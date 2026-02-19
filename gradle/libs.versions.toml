@@ -1,0 +1,61 @@
+[versions]
+agp            = "8.5.2"
+kotlin         = "2.0.21"
+ksp            = "2.0.21-1.0.25"
+composeBom     = "2024.09.03"
+coreKtx        = "1.13.1"
+lifecycle      = "2.8.7"
+activityCompose = "1.9.3"
+navigationCompose = "2.8.4"
+room           = "2.6.1"
+coroutines     = "1.9.0"
+camerax        = "1.4.1"
+mlkitBarcode   = "17.3.0"
+zxing          = "3.5.3"
+coil           = "2.7.0"
+
+[libraries]
+androidx-core-ktx       = { group = "androidx.core",       name = "core-ktx",       version.ref = "coreKtx" }
+androidx-lifecycle-runtime = { group = "androidx.lifecycle", name = "lifecycle-runtime-compose", version.ref = "lifecycle" }
+androidx-lifecycle-viewmodel = { group = "androidx.lifecycle", name = "lifecycle-viewmodel-compose", version.ref = "lifecycle" }
+androidx-activity-compose = { group = "androidx.activity",  name = "activity-compose", version.ref = "activityCompose" }
+androidx-navigation-compose = { group = "androidx.navigation", name = "navigation-compose", version.ref = "navigationCompose" }
+
+# Compose BOM
+compose-bom             = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
+compose-ui              = { group = "androidx.compose.ui", name = "ui" }
+compose-ui-graphics     = { group = "androidx.compose.ui", name = "ui-graphics" }
+compose-ui-tooling      = { group = "androidx.compose.ui", name = "ui-tooling" }
+compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
+compose-material3       = { group = "androidx.compose.material3", name = "material3" }
+compose-material-icons  = { group = "androidx.compose.material", name = "material-icons-extended" }
+
+# Room
+room-runtime            = { group = "androidx.room", name = "room-runtime", version.ref = "room" }
+room-ktx                = { group = "androidx.room", name = "room-ktx",     version.ref = "room" }
+room-compiler           = { group = "androidx.room", name = "room-compiler", version.ref = "room" }
+
+# Coroutines
+kotlinx-coroutines      = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
+
+# CameraX (QR scanning)
+camerax-core            = { group = "androidx.camera", name = "camera-core",    version.ref = "camerax" }
+camerax-camera2         = { group = "androidx.camera", name = "camera-camera2", version.ref = "camerax" }
+camerax-lifecycle       = { group = "androidx.camera", name = "camera-lifecycle", version.ref = "camerax" }
+camerax-view            = { group = "androidx.camera", name = "camera-view",    version.ref = "camerax" }
+
+# ML Kit barcode
+mlkit-barcode           = { group = "com.google.mlkit", name = "barcode-scanning", version.ref = "mlkitBarcode" }
+
+# ZXing (QR generation)
+zxing-core              = { group = "com.google.zxing", name = "core", version.ref = "zxing" }
+
+# Coil (image loading)
+coil-compose            = { group = "io.coil-kt", name = "coil-compose", version.ref = "coil" }
+coil-gif                = { group = "io.coil-kt", name = "coil-gif",     version.ref = "coil" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+kotlin-android      = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+kotlin-compose      = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+ksp                 = { id = "com.google.devtools.ksp", version.ref = "ksp" }

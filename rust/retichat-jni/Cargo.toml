@@ -1,0 +1,12 @@
+[package]
+name = "retichat-jni"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+reticulum_rust = { path = "../../../Reticulum-rust" }
+lxmf_rust = { path = "../../../LXMF-rust" }
+jni = "0.21"

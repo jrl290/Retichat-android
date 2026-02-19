@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Retichat</string>
+    <string name="notification_channel_service">Reticulum Service</string>
+    <string name="notification_service_running">Retichat is connected</string>
+</resources>
