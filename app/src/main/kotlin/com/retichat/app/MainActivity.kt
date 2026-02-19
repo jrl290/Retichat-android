@@ -19,7 +19,11 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
 
         // Start the Reticulum foreground service
-        ReticulumService.start(this)
+        try {
+            ReticulumService.start(this)
+        } catch (e: Exception) {
+            android.util.Log.w("MainActivity", "Service start deferred: ${e.message}")
+        }
 
         setContent {
             RetichatTheme {

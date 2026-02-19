@@ -24,8 +24,17 @@ interface MessageCallback {
  */
 object RetichatBridge {
 
+    /** Whether the native library loaded successfully. */
+    var isLoaded: Boolean = false
+        private set
+
     init {
-        System.loadLibrary("retichat_jni")
+        try {
+            System.loadLibrary("retichat_jni")
+            isLoaded = true
+        } catch (e: UnsatisfiedLinkError) {
+            android.util.Log.w("RetichatBridge", "Native library not available: ${e.message}")
+        }
     }
 
     // ---- Error ----

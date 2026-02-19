@@ -62,6 +62,10 @@ class ReticulumService : Service() {
     // ---- Reticulum bootstrap ----
 
     private fun initReticulum() {
+        if (!RetichatBridge.isLoaded) {
+            android.util.Log.w("ReticulumService", "Native library not loaded — skipping Reticulum init")
+            return
+        }
         val configDir = File(filesDir, "reticulum").also { it.mkdirs() }
         ensureDefaultConfig(configDir)
 
