@@ -4,6 +4,8 @@ import androidx.room.*
 import com.retichat.app.data.db.entity.ChatEntity
 import kotlinx.coroutines.flow.Flow
 
+@Suppress("unused") // Room uses createdAt for ORDER BY
+
 data class ChatPreview(
     val id: String,
     val isGroup: Boolean,
@@ -21,6 +23,7 @@ interface ChatDao {
      * All chats ordered by most-recent message, with a preview of
      * the latest message and unread count.
      */
+    @RewriteQueriesToDropUnusedColumns
     @Query("""
         SELECT c.*,
                m.content  AS lastContent,
