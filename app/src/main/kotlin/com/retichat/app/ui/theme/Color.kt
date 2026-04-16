@@ -27,5 +27,5 @@ val TextPrimaryDark  = Color(0xFFFFFFFF)
 val TextSecondaryDark = Color(0xFF98989D)
 
 val BubbleOutgoing   = Color(0xFF007AFF)
-val BubbleIncoming   = Color(0xFFE9E9EB)
+val BubbleIncoming   = Color(0xFFD1D1D6)
 val BubbleIncomingDark = Color(0xFF2C2C2E)

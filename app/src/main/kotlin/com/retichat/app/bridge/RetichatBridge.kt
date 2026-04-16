@@ -12,7 +12,15 @@ interface MessageCallback {
         content: String,
         timestamp: Double,
         signatureValid: Boolean,
+        fieldsRaw: ByteArray,
     )
+}
+
+/**
+ * Callback interface for receiving LXMF delivery announces from the Rust layer.
+ */
+interface AnnounceCallback {
+    fun onAnnounce(destHash: ByteArray, displayName: String?)
 }
 
 /**
@@ -106,6 +114,10 @@ object RetichatBridge {
     fun transportHopsTo(destHash: ByteArray): Int =
         nativeTransportHopsTo(destHash)
 
+    /** Enable/disable early-dropping of inbound announce packets (opt-in, default off). */
+    fun setDropAnnounces(enabled: Boolean) = nativeSetDropAnnounces(enabled)
+
+    private external fun nativeSetDropAnnounces(enabled: Boolean)
     private external fun nativeTransportHasPath(destHash: ByteArray): Int
     private external fun nativeTransportRequestPath(destHash: ByteArray): Int
     private external fun nativeTransportHopsTo(destHash: ByteArray): Int
@@ -125,9 +137,17 @@ object RetichatBridge {
     fun routerSetDeliveryCallback(router: Long, callback: MessageCallback): Boolean =
         nativeRouterSetDeliveryCallback(router, callback) == 0
 
+    /** Register the announce callback (fires when a delivery announce is received). */
+    fun routerSetAnnounceCallback(router: Long, callback: AnnounceCallback): Boolean =
+        nativeRouterSetAnnounceCallback(router, callback) == 0
+
     /** Announce a delivery destination. */
     fun routerAnnounce(router: Long, destHash: ByteArray): Boolean =
         nativeRouterAnnounce(router, destHash) == 0
+
+    /** Add a destination to the announce watch list (only watched destinations trigger callbacks). */
+    fun routerWatchDestination(router: Long, destHash: ByteArray): Boolean =
+        nativeRouterWatchDestination(router, destHash) == 0
 
     /** Kick the outbound processor. */
     fun routerProcessOutbound(router: Long): Boolean =
@@ -140,20 +160,72 @@ object RetichatBridge {
         router: Long, identity: Long, name: String, stampCost: Int
     ): Long
     private external fun nativeRouterSetDeliveryCallback(router: Long, callback: MessageCallback): Int
+    private external fun nativeRouterSetAnnounceCallback(router: Long, callback: AnnounceCallback): Int
     private external fun nativeRouterAnnounce(router: Long, destHash: ByteArray): Int
+    private external fun nativeRouterWatchDestination(router: Long, destHash: ByteArray): Int
     private external fun nativeRouterProcessOutbound(router: Long): Int
     private external fun nativeRouterDestroy(router: Long): Int
+
+    // ---- Propagation ----
+
+    /** Set the outbound propagation node (16-byte destination hash). */
+    fun routerSetPropagationNode(router: Long, destHash: ByteArray): Boolean =
+        nativeRouterSetPropagationNode(router, destHash) == 0
+
+    /** Request messages from the configured propagation node. */
+    fun routerRequestMessages(router: Long, identity: Long): Boolean =
+        nativeRouterRequestMessages(router, identity) == 0
+
+    /** Get the current propagation transfer state (PR_* constant). */
+    fun routerGetPropagationState(router: Long): Int =
+        nativeRouterGetPropagationState(router)
+
+    /** Get the current propagation transfer progress (0.0 – 1.0). */
+    fun routerGetPropagationProgress(router: Long): Float =
+        nativeRouterGetPropagationProgress(router)
+
+    /** Cancel any in-progress propagation node requests. */
+    fun routerCancelPropagation(router: Long): Boolean =
+        nativeRouterCancelPropagation(router) == 0
+
+    private external fun nativeRouterSetPropagationNode(router: Long, destHash: ByteArray): Int
+    private external fun nativeRouterRequestMessages(router: Long, identity: Long): Int
+    private external fun nativeRouterGetPropagationState(router: Long): Int
+    private external fun nativeRouterGetPropagationProgress(router: Long): Float
+    private external fun nativeRouterCancelPropagation(router: Long): Int
+
+    // ---- Keepalive tuning ----
+
+    /**
+     * Adjust the keepalive interval (in seconds) for all active Reticulum
+     * links and TCP backbone connections.
+     *
+     * Pass `0.0` to restore compiled-in defaults (360 s link, 5 s TCP probe).
+     */
+    fun setKeepaliveInterval(secs: Double): Boolean =
+        nativeSetKeepaliveInterval(secs) == 0
+
+    private external fun nativeSetKeepaliveInterval(secs: Double): Int
 
     // ---- Message ----
 
     /** Create an outbound message. method: 0=opportunistic, 1=direct, 2=propagated. Returns handle. */
     fun messageCreate(
         destHash: ByteArray, srcHash: ByteArray,
-        content: String, title: String = "", method: Int = 1
-    ): Long = nativeMessageCreate(destHash, srcHash, content, title, method)
+        content: String, title: String = "", method: Int = 1,
+        identityHandle: Long = 0L,
+    ): Long = nativeMessageCreate(destHash, srcHash, content, title, method, identityHandle)
 
     fun messageAddAttachment(handle: Long, filename: String, data: ByteArray): Boolean =
         nativeMessageAddAttachment(handle, filename, data) == 0
+
+    /** Add a string-valued LXMF field (e.g. group metadata). */
+    fun messageAddFieldString(handle: Long, key: Int, value: String): Boolean =
+        nativeMessageAddFieldString(handle, key, value) == 0
+
+    /** Add a boolean-valued LXMF field. */
+    fun messageAddFieldBool(handle: Long, key: Int, value: Boolean): Boolean =
+        nativeMessageAddFieldBool(handle, key, value) == 0
 
     /** Submit the message to the router for delivery. */
     fun messageSend(router: Long, msg: Long): Boolean =
@@ -166,9 +238,12 @@ object RetichatBridge {
 
     private external fun nativeMessageCreate(
         destHash: ByteArray, srcHash: ByteArray,
-        content: String, title: String, method: Int
+        content: String, title: String, method: Int,
+        identityHandle: Long,
     ): Long
     private external fun nativeMessageAddAttachment(handle: Long, filename: String, data: ByteArray): Int
+    private external fun nativeMessageAddFieldString(handle: Long, key: Int, value: String): Int
+    private external fun nativeMessageAddFieldBool(handle: Long, key: Int, value: Boolean): Int
     private external fun nativeMessageSend(router: Long, msg: Long): Int
     private external fun nativeMessageGetState(handle: Long): Int
     private external fun nativeMessageGetProgress(handle: Long): Float
@@ -178,19 +253,35 @@ object RetichatBridge {
     // ---- Constants (mirror Rust LXMessage state) ----
 
     object MessageState {
-        const val GENERATING = 0
-        const val OUTBOUND   = 1
-        const val SENDING    = 2
-        const val SENT       = 3
-        const val DELIVERED  = 4
-        const val REJECTED   = 5
-        const val CANCELLED  = 6
-        const val FAILED     = 255
+        const val GENERATING = 0x00
+        const val OUTBOUND   = 0x01
+        const val SENDING    = 0x02
+        const val SENT       = 0x04
+        const val DELIVERED  = 0x08
+        const val REJECTED   = 0xFD
+        const val CANCELLED  = 0xFE
+        const val FAILED     = 0xFF
     }
 
     object DeliveryMethod {
-        const val OPPORTUNISTIC = 0
-        const val DIRECT        = 1
-        const val PROPAGATED    = 2
+        const val OPPORTUNISTIC = 0x01
+        const val DIRECT        = 0x02
+        const val PROPAGATED    = 0x03
+    }
+
+    /** Propagation transfer state constants (mirrors Rust LXMRouter PR_*). */
+    object PropagationState {
+        const val PR_IDLE              = 0x00
+        const val PR_PATH_REQUESTED    = 0x01
+        const val PR_LINK_ESTABLISHING = 0x02
+        const val PR_LINK_ESTABLISHED  = 0x03
+        const val PR_REQUEST_SENT      = 0x04
+        const val PR_RECEIVING         = 0x05
+        const val PR_RESPONSE_RECEIVED = 0x06
+        const val PR_COMPLETE          = 0x07
+        const val PR_NO_PATH           = 0xF0
+        const val PR_NO_IDENTITY_RCVD  = 0xF3
+        const val PR_NO_ACCESS         = 0xF4
+        const val PR_FAILED            = 0xFE
     }
 }

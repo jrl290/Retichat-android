@@ -28,6 +28,23 @@ use lxmf_rust::ffi as lxmf;
 use reticulum_rust::ffi as rns;
 
 // ---------------------------------------------------------------------------
+// Android logcat output
+// ---------------------------------------------------------------------------
+extern "C" {
+    fn __android_log_write(prio: i32, tag: *const u8, text: *const u8) -> i32;
+}
+
+/// Write a message to Android logcat under the "RNS" tag (priority = INFO = 4).
+fn android_log(msg: &str) {
+    let tag = b"RNS\0";
+    let mut buf = msg.as_bytes().to_vec();
+    buf.push(0); // null-terminate
+    unsafe {
+        __android_log_write(4, tag.as_ptr(), buf.as_ptr());
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -79,6 +96,7 @@ fn vec_to_jbytes(env: &JNIEnv, data: &[u8]) -> jbyteArray {
 // ---------------------------------------------------------------------------
 
 static DELIVERY_CB: Mutex<Option<(JavaVM, GlobalRef)>> = Mutex::new(None);
+static ANNOUNCE_CB: Mutex<Option<(JavaVM, GlobalRef)>> = Mutex::new(None);
 
 // ---------------------------------------------------------------------------
 // JNI entry points
@@ -92,8 +110,24 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeInit(
     config_dir: JString,
     log_level: jint,
 ) -> jint {
+    android_log("nativeInit: setting log callback");
+    // Route Rust log() output to Android logcat before init
+    rns::set_log_callback(|msg| {
+        android_log(&msg);
+    });
+    android_log("nativeInit: log callback set, calling init");
+
     let dir = jstring_to_string(&mut env, &config_dir);
-    ok_or_neg(rns::init(&dir, log_level))
+    let result = rns::init(&dir, log_level);
+    android_log(&format!("nativeInit: init result={:?}", result));
+
+    // Re-apply log callback after init in case init() reset LOG_STATE
+    rns::set_log_callback(|msg| {
+        android_log(&msg);
+    });
+    android_log("nativeInit: log callback re-applied after init");
+
+    ok_or_neg(result)
 }
 
 /// `RetichatBridge.nativeShutdown(): Int`
@@ -353,10 +387,13 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRouterS
             let j_title = env.new_string(&msg.title).unwrap();
             let j_content = env.new_string(&msg.content).unwrap();
 
+            // Raw LXMF fields (msgpack bytes — Kotlin decodes)
+            let j_fields = env.byte_array_from_slice(&msg.fields_raw).unwrap();
+
             let _ = env.call_method(
                 cb_ref.as_obj(),
                 "onMessage",
-                "([B[B[BLjava/lang/String;Ljava/lang/String;DZ)V",
+                "([B[B[BLjava/lang/String;Ljava/lang/String;DZ[B)V",
                 &[
                     JValue::Object(&j_hash),
                     JValue::Object(&j_src),
@@ -365,6 +402,79 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRouterS
                     JValue::Object(&JObject::from(j_content)),
                     JValue::Double(msg.timestamp),
                     JValue::Bool(msg.signature_validated as u8),
+                    JValue::Object(&j_fields),
+                ],
+            );
+        }),
+    );
+
+    ok_or_neg(result)
+}
+
+/// `RetichatBridge.nativeRouterSetAnnounceCallback(routerHandle: Long, callback: AnnounceCallback): Int`
+///
+/// `AnnounceCallback` is a Kotlin interface with:
+/// ```kotlin
+/// fun onAnnounce(destHash: ByteArray, displayName: String?)
+/// ```
+#[no_mangle]
+pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRouterSetAnnounceCallback(
+    mut env: JNIEnv,
+    _class: JClass,
+    router: jlong,
+    callback: JObject,
+) -> jint {
+    let jvm = match env.get_java_vm() {
+        Ok(vm) => vm,
+        Err(e) => {
+            rns::set_error(format!("Failed to get JavaVM: {}", e));
+            return -1;
+        }
+    };
+    let global_ref = match env.new_global_ref(&callback) {
+        Ok(r) => r,
+        Err(e) => {
+            rns::set_error(format!("Failed to create global ref: {}", e));
+            return -1;
+        }
+    };
+
+    *ANNOUNCE_CB.lock().unwrap() = Some((jvm, global_ref));
+
+    let result = lxmf::router_set_announce_callback(
+        router as u64,
+        Arc::new(move |dest_hash: &[u8], display_name: Option<String>| {
+            let guard = ANNOUNCE_CB.lock().unwrap();
+            let (jvm, cb_ref) = match guard.as_ref() {
+                Some(pair) => pair,
+                None => return,
+            };
+
+            let mut env = match jvm.attach_current_thread() {
+                Ok(env) => env,
+                Err(_) => return,
+            };
+
+            let j_hash = match env.byte_array_from_slice(dest_hash) {
+                Ok(h) => h,
+                Err(_) => return,
+            };
+
+            let j_name = match &display_name {
+                Some(name) => match env.new_string(name) {
+                    Ok(s) => JObject::from(s),
+                    Err(_) => JObject::null(),
+                },
+                None => JObject::null(),
+            };
+
+            let _ = env.call_method(
+                cb_ref.as_obj(),
+                "onAnnounce",
+                "([BLjava/lang/String;)V",
+                &[
+                    JValue::Object(&j_hash),
+                    JValue::Object(&j_name),
                 ],
             );
         }),
@@ -383,6 +493,18 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRouterA
 ) -> jint {
     let h = jbytes_to_vec(&env, &dest_hash);
     ok_or_neg(lxmf::router_announce(router as u64, &h))
+}
+
+/// `RetichatBridge.nativeRouterWatchDestination(router: Long, destHash: ByteArray): Int`
+#[no_mangle]
+pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRouterWatchDestination(
+    env: JNIEnv,
+    _class: JClass,
+    router: jlong,
+    dest_hash: JByteArray,
+) -> jint {
+    let h = jbytes_to_vec(&env, &dest_hash);
+    ok_or_neg(lxmf::router_watch_destination(router as u64, &h))
 }
 
 /// `RetichatBridge.nativeRouterProcessOutbound(router: Long): Int`
@@ -407,7 +529,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRouterD
 
 // ---- Message ----
 
-/// `RetichatBridge.nativeMessageCreate(destHash: ByteArray, srcHash: ByteArray, content: String, title: String, method: Int): Long`
+/// `RetichatBridge.nativeMessageCreate(destHash: ByteArray, srcHash: ByteArray, content: String, title: String, method: Int, identityHandle: Long): Long`
 #[no_mangle]
 pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeMessageCreate(
     mut env: JNIEnv,
@@ -417,12 +539,13 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeMessage
     content: JString,
     title: JString,
     method: jint,
+    identity_handle: jlong,
 ) -> jlong {
     let dh = jbytes_to_vec(&env, &dest_hash);
     let sh = jbytes_to_vec(&env, &src_hash);
     let c = jstring_to_string(&mut env, &content);
     let t = jstring_to_string(&mut env, &title);
-    ok_or_zero(lxmf::message_create(&dh, &sh, &c, &t, method as u8))
+    ok_or_zero(lxmf::message_create(&dh, &sh, &c, &t, method as u8, identity_handle as u64))
 }
 
 /// `RetichatBridge.nativeMessageAddAttachment(handle: Long, filename: String, data: ByteArray): Int`
@@ -437,6 +560,31 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeMessage
     let f = jstring_to_string(&mut env, &filename);
     let d = jbytes_to_vec(&env, &data);
     ok_or_neg(lxmf::message_add_attachment(handle as u64, &f, &d))
+}
+
+/// `RetichatBridge.nativeMessageAddFieldString(handle: Long, key: Int, value: String): Int`
+#[no_mangle]
+pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeMessageAddFieldString(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    key: jint,
+    value: JString,
+) -> jint {
+    let v = jstring_to_string(&mut env, &value);
+    ok_or_neg(lxmf::message_add_field_string(handle as u64, key as u8, &v))
+}
+
+/// `RetichatBridge.nativeMessageAddFieldBool(handle: Long, key: Int, value: Boolean): Int`
+#[no_mangle]
+pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeMessageAddFieldBool(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    key: jint,
+    value: jni::sys::jboolean,
+) -> jint {
+    ok_or_neg(lxmf::message_add_field_bool(handle as u64, key as u8, value != 0))
 }
 
 /// `RetichatBridge.nativeMessageSend(router: Long, msg: Long): Int`
@@ -506,4 +654,99 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeMessage
     handle: jlong,
 ) -> jint {
     ok_or_neg(lxmf::message_destroy(handle as u64))
+}
+
+// ---- Propagation ----
+
+/// `RetichatBridge.nativeRouterSetPropagationNode(router: Long, destHash: ByteArray): Int`
+#[no_mangle]
+pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRouterSetPropagationNode(
+    env: JNIEnv,
+    _class: JClass,
+    router: jlong,
+    dest_hash: JByteArray,
+) -> jint {
+    let h = jbytes_to_vec(&env, &dest_hash);
+    ok_or_neg(lxmf::router_set_propagation_node(router as u64, &h))
+}
+
+/// `RetichatBridge.nativeRouterRequestMessages(router: Long, identity: Long): Int`
+#[no_mangle]
+pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRouterRequestMessages(
+    _env: JNIEnv,
+    _class: JClass,
+    router: jlong,
+    identity: jlong,
+) -> jint {
+    ok_or_neg(lxmf::router_request_messages(router as u64, identity as u64))
+}
+
+/// `RetichatBridge.nativeRouterGetPropagationState(router: Long): Int`
+#[no_mangle]
+pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRouterGetPropagationState(
+    _env: JNIEnv,
+    _class: JClass,
+    router: jlong,
+) -> jint {
+    match lxmf::router_get_propagation_state(router as u64) {
+        Ok(s) => s as jint,
+        Err(e) => {
+            rns::set_error(e);
+            -1
+        }
+    }
+}
+
+/// `RetichatBridge.nativeRouterGetPropagationProgress(router: Long): Float`
+#[no_mangle]
+pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRouterGetPropagationProgress(
+    _env: JNIEnv,
+    _class: JClass,
+    router: jlong,
+) -> jfloat {
+    match lxmf::router_get_propagation_progress(router as u64) {
+        Ok(p) => p as jfloat,
+        Err(e) => {
+            rns::set_error(e);
+            -1.0
+        }
+    }
+}
+
+/// `RetichatBridge.nativeRouterCancelPropagation(router: Long): Int`
+#[no_mangle]
+pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRouterCancelPropagation(
+    _env: JNIEnv,
+    _class: JClass,
+    router: jlong,
+) -> jint {
+    ok_or_neg(lxmf::router_cancel_propagation(router as u64))
+}
+
+// ---------------------------------------------------------------------------
+// Announce filtering
+// ---------------------------------------------------------------------------
+
+/// `RetichatBridge.nativeSetDropAnnounces(enabled: Boolean): Unit`
+#[no_mangle]
+pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeSetDropAnnounces(
+    _env: JNIEnv,
+    _class: JClass,
+    enabled: jni::sys::jboolean,
+) {
+    rns::set_drop_announces(enabled != 0);
+}
+
+// ---------------------------------------------------------------------------
+// Keepalive tuning
+// ---------------------------------------------------------------------------
+
+/// `RetichatBridge.nativeSetKeepaliveInterval(secs: Double): Int`
+#[no_mangle]
+pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeSetKeepaliveInterval(
+    _env: JNIEnv,
+    _class: JClass,
+    secs: jni::sys::jdouble,
+) -> jint {
+    ok_or_neg(rns::set_keepalive_interval(secs))
 }

@@ -1,6 +1,9 @@
 package com.retichat.app.ui.contacts
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.graphics.Bitmap
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -13,6 +16,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CameraAlt
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -79,7 +83,10 @@ private fun ShowQrContent(destHashHex: String) {
         return
     }
 
-    val bitmap = remember(destHashHex) { generateQrBitmap(destHashHex, 512) }
+    val lxmfUri = "lxmf://$destHashHex"
+    val bitmap = remember(lxmfUri) { generateQrBitmap(lxmfUri, 512) }
+    val context = LocalContext.current
+    var copied by remember { mutableStateOf(false) }
 
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         if (bitmap != null) {
@@ -91,13 +98,29 @@ private fun ShowQrContent(destHashHex: String) {
         }
         Spacer(Modifier.height(24.dp))
         Text(
-            text = destHashHex,
+            text = lxmfUri,
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        Spacer(Modifier.height(12.dp))
+        OutlinedButton(
+            onClick = {
+                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                clipboard.setPrimaryClip(ClipData.newPlainText("LXMF Address", lxmfUri))
+                copied = true
+            },
+        ) {
+            Icon(
+                Icons.Default.ContentCopy,
+                contentDescription = null,
+                modifier = Modifier.size(18.dp),
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(if (copied) "Copied!" else "Copy Address")
+        }
         Spacer(Modifier.height(8.dp))
         Text(
-            text = "Share this QR code so others can message you",
+            text = "Share this QR code or link so others can message you",
             style = MaterialTheme.typography.bodyMedium,
         )
     }
@@ -197,9 +220,15 @@ private fun processBarcode(imageProxy: ImageProxy, onResult: (String) -> Unit) {
     scanner.process(inputImage)
         .addOnSuccessListener { barcodes ->
             for (barcode in barcodes) {
-                val value = barcode.rawValue
-                // Expect a 32-char hex string (16-byte dest hash)
-                if (value != null && value.matches(Regex("^[0-9a-fA-F]{32}$"))) {
+                val value = barcode.rawValue ?: continue
+                // Accept lxmf:// URI → extract the hex hash
+                val lxmfMatch = Regex("^lxmf://([0-9a-fA-F]{32})$").find(value)
+                if (lxmfMatch != null) {
+                    onResult(lxmfMatch.groupValues[1].lowercase())
+                    break
+                }
+                // Also accept a raw 32-char hex string for backwards compat
+                if (value.matches(Regex("^[0-9a-fA-F]{32}$"))) {
                     onResult(value.lowercase())
                     break
                 }

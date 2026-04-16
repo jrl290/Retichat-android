@@ -7,6 +7,6 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-reticulum_rust = { path = "../../../Reticulum-rust" }
+reticulum_rust = { path = "../../../Reticulum-rust", default-features = false }
 lxmf_rust = { path = "../../../LXMF-rust" }
 jni = "0.21"

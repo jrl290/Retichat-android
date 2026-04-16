@@ -18,8 +18,12 @@ data class ChatEntity(
     val name: String,
     /** Comma-separated hex dest hashes in canonical order. */
     val memberHashes: String,
-    val groupSecretHex: String? = null,
+    /** The random group identifier (hex) shared by all participants. */
+    val groupIdHex: String? = null,
+    /** Hex hash of the member currently relaying for us (null = no relay). */
+    val currentRelayerHex: String? = null,
     val createdAt: Long = System.currentTimeMillis(),
+    val isArchived: Boolean = false,
 )
 
 @Entity(tableName = "messages")
@@ -32,6 +36,7 @@ data class MessageEntity(
     val isOutbound: Boolean,
     val state: Int = 0,
     val nativeHandle: Long = 0,        // for tracking outbound progress
+    val progress: Float = 0f,          // resource transfer progress 0..1
 )
 
 @Entity(tableName = "attachments")
@@ -50,7 +55,7 @@ data class GroupMemberEntity(
     val chatId: String,
     val destHashHex: String,
     val displayName: String,
-    val isLowBandwidth: Boolean = false,
+    val acked: Boolean = false,
 )
 
 @Entity(tableName = "delivery_tracking")
@@ -61,4 +66,23 @@ data class DeliveryTrackingEntity(
     val memberHashHex: String,
     val delivered: Boolean = false,
     val deliveredAt: Long? = null,
+)
+
+/**
+ * A persisted Reticulum network interface configuration.
+ *
+ * [type] is one of: TCPClientInterface, TCPServerInterface, UDPInterface,
+ * AutoInterface, I2PInterface.
+ *
+ * [configJson] holds the type-specific key/value pairs as a JSON string,
+ * e.g. {"target_host":"192.168.1.1","target_port":"4242"}.
+ */
+@Entity(tableName = "interfaces")
+data class InterfaceConfigEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val name: String,
+    val type: String,
+    val enabled: Boolean = true,
+    val configJson: String = "{}",
+    val createdAt: Long = System.currentTimeMillis(),
 )

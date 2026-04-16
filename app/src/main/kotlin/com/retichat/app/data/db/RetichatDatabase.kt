@@ -6,6 +6,7 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import com.retichat.app.data.db.dao.ChatDao
 import com.retichat.app.data.db.dao.ContactDao
+import com.retichat.app.data.db.dao.InterfaceConfigDao
 import com.retichat.app.data.db.dao.MessageDao
 import com.retichat.app.data.db.entity.*
 
@@ -17,14 +18,16 @@ import com.retichat.app.data.db.entity.*
         AttachmentEntity::class,
         GroupMemberEntity::class,
         DeliveryTrackingEntity::class,
+        InterfaceConfigEntity::class,
     ],
-    version = 1,
+    version = 6,
     exportSchema = false,
 )
 abstract class RetichatDatabase : RoomDatabase() {
     abstract fun contactDao(): ContactDao
     abstract fun chatDao(): ChatDao
     abstract fun messageDao(): MessageDao
+    abstract fun interfaceConfigDao(): InterfaceConfigDao
 
     companion object {
         @Volatile private var INSTANCE: RetichatDatabase? = null
@@ -35,7 +38,7 @@ abstract class RetichatDatabase : RoomDatabase() {
                     context.applicationContext,
                     RetichatDatabase::class.java,
                     "retichat.db"
-                ).build().also { INSTANCE = it }
+                ).fallbackToDestructiveMigration().build().also { INSTANCE = it }
             }
     }
 }

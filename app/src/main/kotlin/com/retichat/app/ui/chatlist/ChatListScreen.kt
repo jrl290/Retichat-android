@@ -1,11 +1,14 @@
 package com.retichat.app.ui.chatlist
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
@@ -13,9 +16,11 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.retichat.app.ServiceState
 import com.retichat.app.data.db.dao.ChatPreview
 import com.retichat.app.ui.components.AvatarCircle
 import java.text.SimpleDateFormat
@@ -26,6 +31,8 @@ fun ChatListScreen(
     onChatClick: (String) -> Unit,
     onNewChat: () -> Unit,
     onShowQr: () -> Unit,
+    onSettings: () -> Unit = {},
+    serviceState: ServiceState = ServiceState(),
     viewModel: ChatListViewModel? = null,
 ) {
     val chats = viewModel?.chats?.collectAsState()?.value ?: dummyPreviews
@@ -52,8 +59,6 @@ fun ChatListScreen(
                 .fillMaxSize()
                 .padding(padding),
         ) {
-            Spacer(Modifier.windowInsetsPadding(WindowInsets.statusBars))
-
             // --- Search bar with inline QR + Settings ---
             Row(
                 modifier = Modifier
@@ -95,11 +100,32 @@ fun ChatListScreen(
                         tint = MaterialTheme.colorScheme.primary,
                     )
                 }
-                IconButton(onClick = { /* TODO: settings */ }) {
+                IconButton(onClick = onSettings) {
                     Icon(
                         Icons.Default.Settings,
                         contentDescription = "Settings",
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
+            // --- Status bar ---
+            if (serviceState.isInitialized || serviceState.error != null) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    val dot = if (serviceState.isInitialized) "\u2022 " else "\u25CB "
+                    val color = if (serviceState.isInitialized)
+                        MaterialTheme.colorScheme.primary
+                    else
+                        MaterialTheme.colorScheme.error
+                    Text(
+                        text = dot + (if (serviceState.isInitialized) serviceState.identityHashHex.take(16) else "Error"),
+                        style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                        color = color.copy(alpha = 0.7f),
                     )
                 }
             }
@@ -123,10 +149,62 @@ fun ChatListScreen(
                     contentPadding = PaddingValues(top = 4.dp, bottom = 88.dp),
                 ) {
                     items(filtered, key = { it.id }) { chat ->
-                        ChatRow(chat = chat, onClick = { onChatClick(chat.id) })
+                        SwipeToArchiveRow(
+                            chat = chat,
+                            onClick = { onChatClick(chat.id) },
+                            onArchive = { viewModel?.archiveChat(chat.id) },
+                        )
                     }
                 }
             }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SwipeToArchiveRow(
+    chat: ChatPreview,
+    onClick: () -> Unit,
+    onArchive: () -> Unit,
+) {
+    val dismissState = rememberSwipeToDismissBoxState(
+        confirmValueChange = { value ->
+            if (value == SwipeToDismissBoxValue.EndToStart) {
+                onArchive()
+                true
+            } else false
+        },
+    )
+
+    SwipeToDismissBox(
+        state = dismissState,
+        backgroundContent = {
+            val color by animateColorAsState(
+                when (dismissState.targetValue) {
+                    SwipeToDismissBoxValue.EndToStart -> MaterialTheme.colorScheme.tertiaryContainer
+                    else -> MaterialTheme.colorScheme.surface
+                },
+                label = "bg",
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(color)
+                    .padding(horizontal = 24.dp),
+                contentAlignment = Alignment.CenterEnd,
+            ) {
+                Icon(
+                    Icons.Default.Archive,
+                    contentDescription = "Archive",
+                    tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                )
+            }
+        },
+        enableDismissFromStartToEnd = false,
+    ) {
+        Surface(color = MaterialTheme.colorScheme.background) {
+            ChatRow(chat = chat, onClick = onClick)
         }
     }
 }

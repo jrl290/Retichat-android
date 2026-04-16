@@ -2,4 +2,10 @@
     <string name="app_name">Retichat</string>
     <string name="notification_channel_service">Reticulum Service</string>
     <string name="notification_service_running">Retichat is connected</string>
+    <string name="notification_channel_messages">Messages</string>
+    <string name="notification_channel_messages_desc">New message notifications</string>
+    <string name="notification_channel_persistent">Persistent connection</string>
+    <string name="notification_channel_persistent_desc">Shown while Retichat maintains a persistent background connection</string>
+    <string name="notification_persistent_title">Retichat connected</string>
+    <string name="notification_persistent_text">Maintaining persistent connection for real-time messages</string>
 </resources>

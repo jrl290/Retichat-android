@@ -25,7 +25,7 @@ data class Chat(
     val isGroup: Boolean,
     val name: String,
     val members: List<ByteArray>,          // dest hashes in canonical order
-    val groupSecret: ByteArray? = null,    // null for 1:1
+    val groupIdHex: String? = null,        // null for 1:1
     val lastMessage: String? = null,
     val lastMessageTime: Long = 0,
     val unreadCount: Int = 0,
@@ -70,7 +70,6 @@ data class Attachment(
 data class GroupMember(
     val destHash: ByteArray,
     val displayName: String,
-    val isLowBandwidth: Boolean = false,
 ) {
     override fun equals(other: Any?) =
         other is GroupMember && destHash.contentEquals(other.destHash)

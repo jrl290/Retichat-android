@@ -78,7 +78,12 @@ dependencies {
     // Room
     implementation(libs.room.runtime)
     implementation(libs.room.ktx)
+    implementation(libs.room.paging)
     ksp(libs.room.compiler)
+
+    // Paging 3
+    implementation(libs.paging.runtime)
+    implementation(libs.paging.compose)
 
     // CameraX (QR scanning)
     implementation(libs.camerax.core)
@@ -93,6 +98,9 @@ dependencies {
     // Image loading
     implementation(libs.coil.compose)
     implementation(libs.coil.gif)
+
+    // WorkManager
+    implementation(libs.workmanager.runtime)
 }
 
 // ---- Rust NDK build task ----

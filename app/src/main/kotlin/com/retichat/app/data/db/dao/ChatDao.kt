@@ -11,7 +11,7 @@ data class ChatPreview(
     val isGroup: Boolean,
     val name: String,
     val memberHashes: String,
-    val groupSecretHex: String?,
+    val groupIdHex: String?,
     val lastContent: String?,
     val lastTimestamp: Long?,
     val unreadCount: Int,
@@ -38,15 +38,34 @@ interface ChatDao {
         LEFT JOIN (
             SELECT chatId, COUNT(*) AS cnt
             FROM messages
-            WHERE isOutbound = 0 AND state < 4
+            WHERE isOutbound = 0 AND state < 8
             GROUP BY chatId
         ) u ON u.chatId = c.id
+        WHERE c.isArchived = 0
         ORDER BY COALESCE(m.timestamp, c.createdAt) DESC
     """)
     fun chatPreviews(): Flow<List<ChatPreview>>
 
+    @Query("UPDATE chats SET isArchived = 1 WHERE id = :id")
+    suspend fun archiveChat(id: String)
+
+    @Query("UPDATE chats SET isArchived = 0 WHERE id = :id")
+    suspend fun unarchiveChat(id: String)
+
+    @Query("UPDATE chats SET name = :name WHERE id = :id")
+    suspend fun updateChatName(id: String, name: String)
+
     @Query("SELECT * FROM chats WHERE id = :id")
     suspend fun findById(id: String): ChatEntity?
+
+    @Query("SELECT * FROM chats WHERE groupIdHex = :groupIdHex LIMIT 1")
+    suspend fun findByGroupId(groupIdHex: String): ChatEntity?
+
+    @Query("SELECT * FROM chats WHERE groupIdHex LIKE :prefix LIMIT 1")
+    suspend fun findByGroupIdPrefix(prefix: String): ChatEntity?
+
+    @Query("SELECT * FROM chats WHERE id = :id")
+    fun chatByIdFlow(id: String): Flow<ChatEntity?>
 
     @Upsert
     suspend fun upsert(chat: ChatEntity)

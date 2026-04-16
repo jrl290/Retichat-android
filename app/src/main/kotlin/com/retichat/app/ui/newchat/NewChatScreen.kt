@@ -7,11 +7,13 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Group
+import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.retichat.app.data.model.Contact
@@ -25,9 +27,15 @@ fun NewChatScreen(
     onNewGroup: () -> Unit,
     onScanQr: () -> Unit,
     onBack: () -> Unit,
-    contacts: List<Contact> = emptyList(), // injected from ViewModel in production
+    onDestHashChat: (String) -> Unit = {},
+    contacts: List<Contact> = emptyList(),
     onSelectContact: (Contact) -> Unit = {},
 ) {
+    var destHashInput by remember { mutableStateOf("") }
+    var showDestInput by remember { mutableStateOf(false) }
+    val destHashClean = destHashInput.trim().lowercase().replace(" ", "")
+    val isValidHash = destHashClean.length == 32 && destHashClean.all { it in '0'..'9' || it in 'a'..'f' }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -45,7 +53,66 @@ fun NewChatScreen(
                 .fillMaxSize()
                 .padding(padding),
         ) {
-            // Actions
+            // ---- Actions ----
+
+            item {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { showDestInput = !showDestInput }
+                        .padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        Icons.Default.Link,
+                        contentDescription = "LXMF destination",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(28.dp),
+                    )
+                    Spacer(Modifier.width(16.dp))
+                    Text("Enter LXMF Destination", style = MaterialTheme.typography.titleMedium)
+                }
+            }
+
+            if (showDestInput) {
+                item {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp)
+                            .padding(bottom = 8.dp),
+                    ) {
+                        OutlinedTextField(
+                            value = destHashInput,
+                            onValueChange = { destHashInput = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            label = { Text("Destination hash (32 hex chars)") },
+                            placeholder = {
+                                Text(
+                                    "e.g. a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
+                                    fontFamily = FontFamily.Monospace,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+                                )
+                            },
+                            singleLine = true,
+                            shape = MaterialTheme.shapes.medium,
+                            isError = destHashInput.isNotEmpty() && !isValidHash,
+                            supportingText = if (destHashInput.isNotEmpty() && !isValidHash) {
+                                { Text("Must be exactly 32 hex characters") }
+                            } else null,
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Button(
+                            onClick = { onDestHashChat(destHashClean) },
+                            enabled = isValidHash,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text("Start Chat")
+                        }
+                    }
+                }
+            }
+
             item {
                 Row(
                     modifier = Modifier
