@@ -20,7 +20,7 @@ import androidx.navigation.compose.rememberNavController
 import com.retichat.app.data.model.Contact
 import com.retichat.app.data.model.hexToBytes
 import com.retichat.app.service.MessageNotificationHelper
-import com.retichat.app.service.ReticulumService
+import com.retichat.app.service.StackRuntime
 import com.retichat.app.ui.navigation.RetichatNavHost
 import com.retichat.app.ui.navigation.Routes
 import com.retichat.app.ui.theme.RetichatTheme
@@ -51,10 +51,10 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // Ensure the Reticulum service is running while the app is visible.
-        // This is the only place we start the service — Android 12+ forbids
-        // startService() from BroadcastReceivers or WorkManager.
-        ReticulumService.start(this)
+        // Bring the Reticulum stack up while the app is visible.
+        // StackRuntime is reference-counted; release happens in onStop.
+        val app = applicationContext as RetichatApp
+        app.applicationScope.launch { StackRuntime.acquire(applicationContext) }
 
         setContent {
             RetichatTheme {
@@ -86,12 +86,16 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        // Handle lxmf:// deep link  (e.g. lxmf://ab01cd23ef...)
+        // Handle lxma:// or lxmf:// deep link  (e.g. lxma://ab01cd23ef... or lxma://ab01cd23ef....<pubkey>)
         val uri = intent?.data
-        if (uri != null && uri.scheme.equals("lxmf", ignoreCase = true)) {
-            val hexHash = uri.host?.lowercase()?.filter { it in '0'..'9' || it in 'a'..'f' } ?: return
+        val scheme = uri?.scheme?.lowercase()
+        if (uri != null && (scheme == "lxma" || scheme == "lxmf")) {
+            // host may contain <hash>.<pubkey> — take only the hash part
+            val hostRaw = uri.host?.lowercase() ?: return
+            val hashPart = hostRaw.split(".").first()
+            val hexHash = hashPart.filter { it in '0'..'9' || it in 'a'..'f' }
             if (hexHash.isEmpty()) return
-            Log.i(TAG, "Deep link: lxmf://$hexHash")
+            Log.i(TAG, "Deep link: $scheme://$hexHash")
             intent?.data = null  // consume so rotation doesn't re-trigger
 
             val app = applicationContext as RetichatApp
@@ -116,9 +120,14 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
-        // Re-start the service when the app becomes visible.
-        // startService is idempotent — if already running, delivers onStartCommand only.
-        ReticulumService.start(this)
+        val app = applicationContext as RetichatApp
+        app.applicationScope.launch { StackRuntime.acquire(applicationContext) }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // Ref-counted: schedules a delayed shutdown if no other holders.
+        StackRuntime.release()
     }
 
     companion object {

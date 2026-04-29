@@ -27,13 +27,20 @@ fun NewChatScreen(
     onNewGroup: () -> Unit,
     onScanQr: () -> Unit,
     onBack: () -> Unit,
+    onJoinChannel: () -> Unit = {},
     onDestHashChat: (String) -> Unit = {},
     contacts: List<Contact> = emptyList(),
     onSelectContact: (Contact) -> Unit = {},
 ) {
     var destHashInput by remember { mutableStateOf("") }
     var showDestInput by remember { mutableStateOf(false) }
-    val destHashClean = destHashInput.trim().lowercase().replace(" ", "")
+    // Normalise: strip lxma:// or lxmf:// prefix and optional .<pubkey> suffix
+    val destHashClean = run {
+        var raw = destHashInput.trim().lowercase()
+        if (raw.startsWith("lxma://")) raw = raw.removePrefix("lxma://")
+        else if (raw.startsWith("lxmf://")) raw = raw.removePrefix("lxmf://")
+        raw.split(".").first().filter { it in '0'..'9' || it in 'a'..'f' }
+    }
     val isValidHash = destHashClean.length == 32 && destHashClean.all { it in '0'..'9' || it in 'a'..'f' }
 
     Scaffold(
@@ -129,6 +136,31 @@ fun NewChatScreen(
                     )
                     Spacer(Modifier.width(16.dp))
                     Text("New Group", style = MaterialTheme.typography.titleMedium)
+                }
+            }
+
+            item {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(onClick = onJoinChannel)
+                        .padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(
+                        modifier = Modifier.size(28.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = "#",
+                            style = MaterialTheme.typography.titleLarge.copy(
+                                fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+                            ),
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                    Spacer(Modifier.width(16.dp))
+                    Text("Join Channel", style = MaterialTheme.typography.titleMedium)
                 }
             }
 

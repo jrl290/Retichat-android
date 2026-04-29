@@ -7,20 +7,23 @@ import android.util.Log
 import com.retichat.app.bridge.RetichatBridge
 import com.retichat.app.data.db.RetichatDatabase
 import com.retichat.app.data.repository.ChatRepository
-import com.retichat.app.service.PropagationPollWorker
 import com.retichat.app.service.MessageNotificationHelper
 import com.retichat.app.service.NetworkMonitor
-import com.retichat.app.service.PersistentConnectionService
-import com.retichat.app.service.ReticulumService
+import com.retichat.app.service.PropagationSync
+import com.retichat.app.service.RfedChannelClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import java.io.File
 
-/** Observable state of the background Reticulum service. */
+/** Observable state of the Reticulum stack (set by [com.retichat.app.service.StackRuntime]). */
 data class ServiceState(
     val isInitialized: Boolean = false,
     val identityHashHex: String = "",
@@ -33,14 +36,24 @@ class RetichatApp : Application() {
     companion object {
         private const val TAG = "RetichatApp"
 
-        /** True while any Activity is in the started-or-resumed state. */
-        @Volatile
-        var isInForeground: Boolean = false
+        /** Initial foreground propagation poll delay (matches iOS 5 s). */
+        private const val INITIAL_POLL_DELAY_MS = 5_000L
+
+        /** Foreground propagation poll interval (matches iOS 300 s). */
+        private const val POLL_INTERVAL_MS = 300_000L
+
+        @Volatile var isInForeground: Boolean = false
             private set
 
-        /** Chat ID currently visible on screen, or null. */
-        @Volatile
-        var activeChatId: String? = null
+        @Volatile var activeChatId: String? = null
+
+        /**
+         * Process-wide application instance, available without a Context.
+         * Used by [com.retichat.app.service.StackRuntime] to schedule its
+         * delayed shutdown without keeping a leaking Activity reference.
+         */
+        @Volatile var appInstance: RetichatApp? = null
+            private set
     }
 
     val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -58,20 +71,21 @@ class RetichatApp : Application() {
         )
     }
 
+    val rfedChannelClient: RfedChannelClient by lazy {
+        RfedChannelClient(
+            appContext = this,
+            channelDao = database.channelDao(),
+            scope = applicationScope,
+        )
+    }
+
     override fun onCreate() {
         super.onCreate()
+        appInstance = this
 
-        // Create notification channels (idempotent)
         MessageNotificationHelper.createChannel(this)
-        PersistentConnectionService.createChannel(this)
-
-        // Start monitoring network connectivity
         NetworkMonitor.register(this)
 
-        // Track foreground state via activity lifecycle.
-        // When the last Activity stops, relax keepalive intervals so the
-        // still-running service uses fewer resources and survives longer.
-        // When an Activity starts, restore defaults for real-time messaging.
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
             private var startedActivities = 0
 
@@ -79,11 +93,9 @@ class RetichatApp : Application() {
                 startedActivities++
                 if (!isInForeground) {
                     isInForeground = true
-                    // Restore fast keepalive for real-time message delivery
                     RetichatBridge.setKeepaliveInterval(0.0)
-                    // Reset idle backoff so the next background poll is immediate
-                    PropagationPollWorker.resetIdleBackoff(this@RetichatApp)
-                    Log.d(TAG, "App entered foreground — keepalive restored, idle backoff reset")
+                    Log.d(TAG, "App foreground — keepalive=default")
+                    startForegroundPropagationPolling()
                 }
             }
             override fun onActivityStopped(a: Activity) {
@@ -91,32 +103,45 @@ class RetichatApp : Application() {
                 if (startedActivities <= 0) {
                     startedActivities = 0
                     isInForeground = false
-                    // Relax keepalive so the service drains less power in
-                    // the background and the system is less likely to kill it.
                     RetichatBridge.setKeepaliveInterval(300.0)
-                    Log.d(TAG, "App entered background — keepalive relaxed to 300s")
+                    Log.d(TAG, "App background — keepalive=300s")
+                    stopForegroundPropagationPolling()
                 }
             }
-
             override fun onActivityCreated(a: Activity, b: Bundle?) {}
             override fun onActivityResumed(a: Activity) {}
             override fun onActivityPaused(a: Activity) {}
             override fun onActivitySaveInstanceState(a: Activity, b: Bundle) {}
             override fun onActivityDestroyed(a: Activity) {}
         })
-
-        // Enqueue the periodic WorkManager propagation poll (every 15 min).
-        // This is the *only* way messages arrive when no Activity is visible.
-        PropagationPollWorker.enqueue(this)
-
-        // If the user has enabled persistent connection, start the foreground service.
-        // This keeps the process alive even when no Activity is visible.
-        if (PersistentConnectionService.isEnabled(this)) {
-            PersistentConnectionService.start(this)
-        }
     }
 
-    // ---- Service state (updated by ReticulumService) ----
+    // ---- Foreground LXMF propagation polling ----
+    //
+    // Mirrors iOS `ChatRepository.startPropagationPolling()` — when the app
+    // is in the foreground, fire an initial poll after 5 s and then every
+    // 300 s thereafter. Job is cancelled when the app backgrounds.
+    private var foregroundPollJob: Job? = null
+
+    private fun startForegroundPropagationPolling() {
+        if (foregroundPollJob?.isActive == true) return
+        foregroundPollJob = applicationScope.launch {
+            // Initial poll after 5 s, then every 300 s — matches iOS cadence.
+            delay(INITIAL_POLL_DELAY_MS)
+            while (isActive) {
+                runCatching { PropagationSync.runOnce(this@RetichatApp) }
+                    .onFailure { Log.w(TAG, "foreground propagation poll failed", it) }
+                delay(POLL_INTERVAL_MS)
+            }
+        }
+        Log.d(TAG, "Foreground propagation poll started (interval=${POLL_INTERVAL_MS}ms)")
+    }
+
+    private fun stopForegroundPropagationPolling() {
+        foregroundPollJob?.cancel()
+        foregroundPollJob = null
+        Log.d(TAG, "Foreground propagation poll stopped")
+    }
 
     private val _serviceState = MutableStateFlow(ServiceState())
     val serviceState: StateFlow<ServiceState> = _serviceState.asStateFlow()

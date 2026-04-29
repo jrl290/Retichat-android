@@ -5,6 +5,14 @@ plugins {
     alias(libs.plugins.ksp)
 }
 
+// Apply google-services plugin only if the developer has placed a real
+// `google-services.json` in app/. Without that file the plugin throws,
+// so we make it opt-in to keep the project buildable for contributors
+// who don't have a Firebase project set up.
+if (file("google-services.json").exists()) {
+    apply(plugin = "com.google.gms.google-services")
+}
+
 android {
     namespace = "com.retichat.app"
     compileSdk = 34
@@ -101,6 +109,15 @@ dependencies {
 
     // WorkManager
     implementation(libs.workmanager.runtime)
+
+    // Firebase Cloud Messaging (push wake-up; replaces foreground service)
+    implementation(platform(libs.firebase.bom))
+    implementation(libs.firebase.messaging)
+
+    // BouncyCastle — used for pure-Kotlin canonical channel-hash derivation
+    // (Curve25519 + Ed25519 + SHA-256), matching iOS Swift
+    // RfedChannelClient.channelHash(name:) exactly. See ChannelHash.kt.
+    implementation(libs.bouncycastle.prov)
 }
 
 // ---- Rust NDK build task ----

@@ -1,0 +1,304 @@
+package com.retichat.app.service
+
+import android.content.Context
+import android.util.Log
+import com.retichat.app.RetichatApp
+import com.retichat.app.bridge.AnnounceCallback
+import com.retichat.app.bridge.MessageCallback
+import com.retichat.app.bridge.RetichatBridge
+import com.retichat.app.bridge.RfedBlobCallback
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import java.io.File
+import java.util.concurrent.atomic.AtomicInteger
+
+/**
+ * Reference-counted owner of the Reticulum + LXMF + RFed-delivery handles.
+ *
+ * Replaces the old [ReticulumService]/[PersistentConnectionService] pair.
+ * The stack is brought up the first time a caller [acquire]s and torn down
+ * a few seconds after the final [release] (grace period prevents thrash
+ * when the user backgrounds + foregrounds quickly).
+ *
+ * Lifecycle entry points:
+ *   - [MainActivity.onStart]              → acquire / release on stop
+ *   - [WakeWorker]                        → acquire while running, release when done
+ *   - [PropagationPollWorker]             → (legacy) replaced by WakeWorker
+ *
+ * No foreground service, no persistent notification.
+ */
+object StackRuntime {
+
+    private const val TAG = "StackRuntime"
+    /** How long to keep the stack warm after the last release(). */
+private const val GRACE_SHUTDOWN_MS = 30_000L  // 30s grace avoids stack teardown on brief background flaps
+
+    private val refCount = AtomicInteger(0)
+    private val initLock = Mutex()
+    private var shutdownJob: Job? = null
+
+    /** Blocks waiters on the very first acquire until the stack is ready. */
+    @Volatile private var readyDeferred: CompletableDeferred<Boolean>? = null
+
+    @Volatile var identityHandle: Long = 0L
+        private set
+    @Volatile var routerHandle: Long = 0L
+        private set
+    @Volatile var destHandle: Long = 0L
+        private set
+    @Volatile var selfDestHash: ByteArray = ByteArray(0)
+        private set
+
+    @Volatile var isReady: Boolean = false
+        private set
+
+    /** Increment the ref count. If first acquirer, start the stack. Suspends until ready. */
+    suspend fun acquire(context: Context): Boolean {
+        // Cancel any pending shutdown
+        shutdownJob?.cancel()
+        shutdownJob = null
+
+        val newCount = refCount.incrementAndGet()
+        Log.d(TAG, "acquire: refCount=$newCount")
+
+        return startIfNeeded(context.applicationContext)
+    }
+
+    /** Synchronous variant for callers without a coroutine scope. */
+    fun acquireBlocking(context: Context): Boolean = runBlocking { acquire(context) }
+
+    /** Decrement the ref count. If it hits zero, schedule a graceful shutdown. */
+    fun release() {
+        val newCount = refCount.decrementAndGet()
+        Log.d(TAG, "release: refCount=$newCount")
+        if (newCount > 0) return
+        if (newCount < 0) {
+            refCount.set(0)
+            return
+        }
+
+        // Schedule a delayed shutdown so a quick foreground/background flap
+        // doesn't tear down + re-init the stack.
+        val app = (RetichatApp.appInstance ?: return)
+        shutdownJob = app.applicationScope.launch(Dispatchers.IO) {
+            delay(GRACE_SHUTDOWN_MS)
+            if (!isActive) return@launch
+            if (refCount.get() == 0) {
+                shutdownNow(app)
+            }
+        }
+    }
+
+    /** Wait up to [timeoutMs] for the stack to be fully ready. */
+    suspend fun awaitReady(timeoutMs: Long = 30_000L): Boolean {
+        if (isReady) return true
+        val d = readyDeferred ?: return false
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (d.isCompleted) return d.getCompleted()
+            delay(100)
+        }
+        return false
+    }
+
+    // ---- Internal bootstrap (idempotent) ----
+
+    private suspend fun startIfNeeded(context: Context): Boolean {
+        initLock.withLock {
+            if (isReady && identityHandle != 0L && routerHandle != 0L) return true
+
+            val app = (context.applicationContext as RetichatApp)
+            val deferred = CompletableDeferred<Boolean>()
+            readyDeferred = deferred
+
+            val ok = try {
+                bootstrap(app)
+            } catch (t: Throwable) {
+                Log.e(TAG, "Bootstrap threw", t)
+                false
+            }
+            isReady = ok
+            deferred.complete(ok)
+            return ok
+        }
+    }
+
+    private suspend fun bootstrap(app: RetichatApp): Boolean {
+        if (!RetichatBridge.isLoaded) {
+            app.updateServiceState(error = "Native library not loaded")
+            Log.w(TAG, "Native library not loaded")
+            return false
+        }
+
+        val configDir = File(app.filesDir, "reticulum").also { it.mkdirs() }
+
+        // Read enabled interfaces; fall back / merge default endpoint per pref.
+        var interfaces = app.database.interfaceConfigDao().enabledInterfaces()
+        val useDefault = interfaces.isEmpty() && UserPreferences.isDefaultTcpEnabled(app)
+        if (useDefault) {
+            val ep = DefaultEndpointManager.current
+            Log.i(TAG, "No interfaces configured — default endpoint ${ep.first}:${ep.second}")
+            interfaces = listOf(DefaultEndpointManager.asInterfaceConfig())
+        } else if (UserPreferences.isDefaultTcpEnabled(app)) {
+            interfaces = interfaces + DefaultEndpointManager.asInterfaceConfig()
+        }
+        writeReticulumConfig(configDir, interfaces)
+
+        if (!RetichatBridge.init(configDir.absolutePath)) {
+            val err = RetichatBridge.lastError() ?: "unknown"
+            if (err.contains("already", ignoreCase = true)) {
+                Log.i(TAG, "Reticulum already initialised — continuing")
+            } else {
+                app.updateServiceState(error = "Init failed: $err")
+                Log.e(TAG, "Init failed: $err")
+                return false
+            }
+        }
+
+        // Identity
+        val idFile = File(app.filesDir, "identity")
+        identityHandle = if (idFile.exists()) {
+            RetichatBridge.identityFromFile(idFile.absolutePath)
+        } else {
+            val h = RetichatBridge.identityCreate()
+            if (h != 0L) RetichatBridge.identityToFile(h, idFile.absolutePath)
+            h
+        }
+        if (identityHandle == 0L) {
+            app.updateServiceState(error = "Identity failed: ${RetichatBridge.lastError()}")
+            return false
+        }
+
+        // LXMRouter
+        val storagePath = File(app.filesDir, "lxmf_storage").also { it.mkdirs() }
+        routerHandle = RetichatBridge.routerCreate(identityHandle, storagePath.absolutePath)
+        if (routerHandle == 0L) {
+            app.updateServiceState(error = "Router failed: ${RetichatBridge.lastError()}")
+            return false
+        }
+
+        val displayName = UserPreferences.getDisplayName(app)
+        destHandle = RetichatBridge.routerRegisterDelivery(routerHandle, identityHandle, displayName)
+
+        selfDestHash = RetichatBridge.destinationHash(identityHandle, "lxmf", "delivery")
+            ?: ByteArray(0)
+
+        // Wire up repository
+        val repo = app.repository
+        repo.configure(selfDestHash, routerHandle, identityHandle)
+
+        RetichatBridge.routerSetDeliveryCallback(routerHandle, object : MessageCallback {
+            override fun onMessage(
+                hash: ByteArray, srcHash: ByteArray, destHash: ByteArray,
+                title: String, content: String, timestamp: Double, signatureValid: Boolean,
+                fieldsRaw: ByteArray,
+            ) {
+                repo.onMessageReceived(
+                    hash, srcHash, destHash, title, content, timestamp, signatureValid, fieldsRaw,
+                )
+            }
+        })
+
+        RetichatBridge.routerSetAnnounceCallback(routerHandle, object : AnnounceCallback {
+            override fun onAnnounce(destHash: ByteArray, displayName: String?) {
+                repo.onAnnounceReceived(destHash, displayName)
+            }
+        })
+
+        if (UserPreferences.isDropAnnouncesEnabled(app)) {
+            RetichatBridge.setDropAnnounces(true)
+        }
+
+        if (selfDestHash.isNotEmpty()) {
+            // Hand the delivery destination off to Transport's auto-announce
+            // daemon: it will announce immediately, on every interface
+            // false→true online transition, and every 30 minutes thereafter.
+            // Replaces the old "announce once at startup + hope" pattern.
+            RetichatBridge.transportPublishDestination(selfDestHash, 30.0 * 60.0)
+        }
+
+        // Start the RFed delivery callback so channel/group blobs are dispatched
+        RetichatBridge.rfedDeliveryStart(identityHandle, object : RfedBlobCallback {
+            override fun onBlob(blob: ByteArray) {
+                Log.i(TAG, "rfed.delivery blob received: ${blob.size} bytes")
+                app.applicationScope.launch(Dispatchers.IO) {
+                    runCatching { app.rfedChannelClient.dispatchInboundBlob(blob) }
+                        .onFailure { Log.e(TAG, "dispatchInboundBlob failed", it) }
+                }
+            }
+        })
+
+        // Announce rfed.delivery so the rfed node can establish a path
+        // to live-fanout channel/delivery blobs to us. Without this the
+        // node never reaches us and every message is deferred — channel
+        // messages from peers never arrive on this device until WakeWorker
+        // re-announces from a push wake-up.
+        // (Mirrors iOS RfedChannelClient.start: startRfedDelivery → rfedDeliveryAnnounce.)
+        runCatching { RetichatBridge.rfedDeliveryAnnounce() }
+            .onFailure { Log.w(TAG, "rfedDeliveryAnnounce failed", it) }
+
+        // Re-register per-channel rfed.notify subscriptions so push wakeups resume
+        // after process restart (mirrors iOS resubscribePersistedChannels).
+        app.applicationScope.launch(Dispatchers.IO) {
+            runCatching { app.rfedChannelClient.reregisterChannelPushOnStart() }
+                .onFailure { Log.e(TAG, "reregisterChannelPushOnStart failed", it) }
+            // Re-call /rfed/subscribe for every persisted channel so the rfed
+            // node knows we're still subscribed (it may have lost our state on
+            // its own restart). Without this, peers' messages never reach us.
+            runCatching { app.rfedChannelClient.resubscribePersistedChannels() }
+                .onFailure { Log.e(TAG, "resubscribePersistedChannels failed", it) }
+        }
+
+        val hashHex = selfDestHash.joinToString("") { "%02x".format(it) }
+        app.updateServiceState(
+            isInitialized = true,
+            identityHashHex = hashHex,
+            interfaceCount = interfaces.size,
+        )
+        Log.i(TAG, "StackRuntime ready — dest=$hashHex, ${interfaces.size} interface(s)")
+        return true
+    }
+
+    private fun shutdownNow(app: RetichatApp) {
+        Log.i(TAG, "Shutting down stack (refCount=0)")
+        isReady = false
+        readyDeferred = null
+
+        app.repository.configure(ByteArray(0), 0L, 0L)
+
+        runCatching { RetichatBridge.rfedDeliveryStop() }
+
+        if (selfDestHash.isNotEmpty()) {
+            runCatching { RetichatBridge.transportUnpublishDestination(selfDestHash) }
+        }
+
+        if (routerHandle != 0L) {
+            runCatching { RetichatBridge.routerDestroy(routerHandle) }
+            routerHandle = 0L
+        }
+        if (identityHandle != 0L) {
+            runCatching { RetichatBridge.identityDestroy(identityHandle) }
+            identityHandle = 0L
+        }
+        destHandle = 0L
+        selfDestHash = ByteArray(0)
+        runCatching { RetichatBridge.shutdown() }
+        app.updateServiceState()
+    }
+
+    /** Force teardown ignoring ref count; only used by tests / settings restart. */
+    fun forceShutdown(context: Context) {
+        val app = context.applicationContext as RetichatApp
+        refCount.set(0)
+        shutdownJob?.cancel()
+        shutdownJob = null
+        shutdownNow(app)
+    }
+}

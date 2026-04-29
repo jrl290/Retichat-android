@@ -8,8 +8,12 @@ import android.util.Log
  * On construction the node list is shuffled. The first node is the primary.
  * If a node becomes unreachable, [reportFailure] moves it to the back
  * of the list and advances to the next.
+ *
+ * If [userConfiguredHash] is a valid 32-hex string it is prepended to the
+ * list so the user-configured node is always tried first. Mirrors iOS
+ * `PropagationNodeManager.setUserConfiguredNode(_:)`.
  */
-class PropagationNodeManager {
+class PropagationNodeManager(userConfiguredHash: String? = null) {
 
     companion object {
         private const val TAG = "PropNodeManager"
@@ -42,7 +46,21 @@ class PropagationNodeManager {
     init {
         // Deduplicate and shuffle
         val unique = NODE_HASHES.distinct().map { hexToBytes(it) }
-        nodes = unique.shuffled().toMutableList()
+        val shuffled = unique.shuffled().toMutableList()
+
+        // If a user-configured hash was supplied, validate and prepend it.
+        val trimmed = userConfiguredHash?.trim()?.lowercase().orEmpty()
+        if (trimmed.length == 32 && trimmed.all { it in "0123456789abcdef" }) {
+            val userBytes = hexToBytes(trimmed)
+            // Drop any duplicate of the user hash from the built-in list
+            shuffled.removeAll { it.contentEquals(userBytes) }
+            shuffled.add(0, userBytes)
+            Log.i(TAG, "User-configured propagation node prepended: $trimmed")
+        } else if (trimmed.isNotEmpty()) {
+            Log.w(TAG, "Ignoring invalid user-configured propagation node: '$trimmed'")
+        }
+
+        nodes = shuffled
         Log.i(TAG, "Initialised with ${nodes.size} nodes, primary=${bytesToHex(nodes.first())}")
     }
 

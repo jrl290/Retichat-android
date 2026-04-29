@@ -66,14 +66,15 @@ class LxmfFields private constructor(
     }
 
     companion object {
-        /** Application-level group field IDs. */
-        const val GROUP_ID             = 0xA0
-        const val GROUP_MEMBERS        = 0xA1
-        const val GROUP_NAME           = 0xA2
-        const val GROUP_SENDER         = 0xA4
-        const val GROUP_RELAY_FOR      = 0xA6
-        const val GROUP_RELAY_COMPLETE = 0xA7
-        const val GROUP_ACK            = 0xA8
+        /** Application-level group field IDs (mirrors iOS LxmfFieldKey). */
+        const val GROUP_ID             = 0xA0  // str: 32-hex group identifier
+        const val GROUP_MEMBERS        = 0xA1  // str: comma-sep member hashes (invite only)
+        const val GROUP_NAME           = 0xA2  // str: human-readable group name
+        const val GROUP_ACTION         = 0xA3  // str: "invite"|"accept"|"leave"|"relay_req"|"relay_done"
+        const val GROUP_SENDER         = 0xA4  // str: original sender hex
+        const val GROUP_RELAY_SEEN     = 0xA5  // str: comma-sep hashes already delivered
+        const val GROUP_RELAY_FOR      = 0xA6  // str: hash of member requesting relay
+        const val GROUP_RELAY_DONE     = 0xA7  // bool: relay-complete confirmation
 
         /** Standard LXMF field IDs (for reference). */
         const val FIELD_EMBEDDED_LXMS    = 0x01

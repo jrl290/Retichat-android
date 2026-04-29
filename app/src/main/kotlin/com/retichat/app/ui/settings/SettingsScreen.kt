@@ -25,7 +25,6 @@ import androidx.compose.ui.unit.dp
 import com.retichat.app.ServiceState
 import com.retichat.app.data.db.entity.InterfaceConfigEntity
 import com.retichat.app.service.DefaultEndpointManager
-import com.retichat.app.service.PersistentConnectionService
 import com.retichat.app.service.UserPreferences
 import org.json.JSONObject
 
@@ -63,14 +62,19 @@ fun SettingsScreen(
                 ServiceStatusCard(state = state, onRestart = { viewModel.restartService() })
             }
 
-            // ---- Section: Display Name ----
+            // ---- Section: Profile (display name + channel display name) ----
             item {
-                DisplayNameCard()
+                ProfileCard()
             }
 
-            // ---- Section: Persistent Connection ----
+            // ---- Section: Privacy ----
             item {
-                PersistentConnectionCard()
+                PrivacyCard()
+            }
+
+            // ---- Section: RFed node + LXMF Propagation ----
+            item {
+                RfedConfigCard()
             }
 
             // ---- Section: Interfaces ----
@@ -380,13 +384,13 @@ private fun InterfaceEditorDialog(
 // ---- Display name card ----
 
 @Composable
-private fun DisplayNameCard() {
+private fun ProfileCard() {
     val context = LocalContext.current
-    val prefs = remember {
-        context.getSharedPreferences(UserPreferences.PREF_NAME, android.content.Context.MODE_PRIVATE)
+    var displayName by remember {
+        mutableStateOf(UserPreferences.getDisplayName(context))
     }
-    var name by remember {
-        mutableStateOf(prefs.getString(UserPreferences.PREF_KEY_DISPLAY_NAME, "") ?: "")
+    var channelDisplayName by remember {
+        mutableStateOf(UserPreferences.getChannelDisplayName(context))
     }
 
     Card(
@@ -399,43 +403,65 @@ private fun DisplayNameCard() {
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Text(
-                "Display name",
+                "Profile",
                 style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
             )
-            Spacer(Modifier.height(4.dp))
+            Spacer(Modifier.height(12.dp))
+
             Text(
-                "Visible to other Reticulum users when you announce. " +
-                    "Leave blank to use the default (\"Retichat\").",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                "Display Name",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Spacer(Modifier.height(8.dp))
             OutlinedTextField(
-                value = name,
-                onValueChange = { newName ->
-                    name = newName
-                    prefs.edit()
-                        .putString(UserPreferences.PREF_KEY_DISPLAY_NAME, newName)
-                        .apply()
+                value = displayName,
+                onValueChange = {
+                    displayName = it
+                    UserPreferences.setDisplayName(context, it)
                 },
-                label = { Text("Name") },
-                placeholder = { Text("Retichat") },
+                placeholder = { Text("Your name in DMs") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
                 shape = MaterialTheme.shapes.medium,
                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words),
             )
+
+            Spacer(Modifier.height(12.dp))
+
+            Text(
+                "Channel Display Name",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedTextField(
+                value = channelDisplayName,
+                onValueChange = {
+                    channelDisplayName = it
+                    UserPreferences.setChannelDisplayName(context, it)
+                },
+                placeholder = {
+                    Text(if (displayName.isEmpty()) "Same as Display Name" else displayName)
+                },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                shape = MaterialTheme.shapes.medium,
+                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words),
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Shown to others in channels. If blank, uses your Display Name.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+            )
         }
     }
 }
 
-// ---- Persistent connection card ----
-
 @Composable
-private fun PersistentConnectionCard() {
+private fun PrivacyCard() {
     val context = LocalContext.current
-    var enabled by remember {
-        mutableStateOf(PersistentConnectionService.isEnabled(context))
+    var filterStrangers by remember {
+        mutableStateOf(UserPreferences.isFilterStrangersEnabled(context))
     }
 
     Card(
@@ -447,35 +473,70 @@ private fun PersistentConnectionCard() {
         ),
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
+            Text(
+                "Privacy",
+                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+            )
+            Spacer(Modifier.height(8.dp))
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        "Persistent connection",
-                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                        "Privacy filter",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurface,
                     )
-                    Spacer(Modifier.height(2.dp))
                     Text(
-                        "Stay connected in the background",
+                        "Only accept messages from contacts you have explicitly added",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 Switch(
-                    checked = enabled,
-                    onCheckedChange = { newValue ->
-                        enabled = newValue
-                        PersistentConnectionService.setEnabled(context, newValue)
+                    checked = filterStrangers,
+                    onCheckedChange = {
+                        filterStrangers = it
+                        UserPreferences.setFilterStrangersEnabled(context, it)
                     },
                 )
             }
+        }
+    }
+}
+
+// ---- Push delivery info card (replaces former PersistentConnectionCard) ----
+
+@Composable
+private fun PushDeliveryInfoCard() {
+    val context = LocalContext.current
+    val tokenSet = remember { UserPreferences.getFcmDeviceToken(context).isNotEmpty() }
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+        ),
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                "Background delivery",
+                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                if (tokenSet) "Push registered \u2014 messages wake the app on arrival."
+                else "Push not yet registered. Open the app while online.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             Spacer(Modifier.height(8.dp))
             Text(
-                "Uses more battery. Keeps the connection alive so messages " +
-                    "arrive instantly, even when the app is closed. " +
-                    "A persistent notification will appear \u2014 you can " +
-                    "long-press it and choose \"Minimize\" to hide it.",
+                "Retichat now uses Firebase Cloud Messaging instead of a " +
+                    "persistent foreground service. The app sleeps when not " +
+                    "in use and wakes briefly when the rfed bridge has new " +
+                    "traffic for you.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
             )
@@ -676,6 +737,105 @@ private fun ServiceStatusCard(state: ServiceState, onRestart: () -> Unit) {
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error,
                 )
+            }
+        }
+    }
+}
+
+// ---- RFed config card ----
+
+@Composable
+private fun RfedConfigCard() {
+    val context = LocalContext.current
+    var nodeHash by remember {
+        mutableStateOf(UserPreferences.getRfedNodeIdentityHash(context))
+    }
+    var lxmfPropOverride by remember {
+        mutableStateOf(UserPreferences.getRfedLxmfPropOverride(context))
+    }
+
+    fun isHex32(s: String) = s.length == 32 && s.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+        ),
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                "RFed Node",
+                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+            )
+            Spacer(Modifier.height(12.dp))
+
+            Text(
+                "Node Identity Hash",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedTextField(
+                value = nodeHash,
+                onValueChange = { nodeHash = it.trim().lowercase() },
+                placeholder = { Text("32-char hex") },
+                singleLine = true,
+                isError = nodeHash.isNotEmpty() && !isHex32(nodeHash),
+                textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                keyboardOptions = KeyboardOptions(
+                    capitalization = KeyboardCapitalization.None,
+                    keyboardType = KeyboardType.Ascii,
+                ),
+                modifier = Modifier.fillMaxWidth(),
+            )
+
+            Spacer(Modifier.height(12.dp))
+
+            Text(
+                "LXMF Propagation",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedTextField(
+                value = lxmfPropOverride,
+                onValueChange = { lxmfPropOverride = it.trim().lowercase() },
+                placeholder = { Text("32-char hex (optional)") },
+                singleLine = true,
+                isError = lxmfPropOverride.isNotEmpty() && !isHex32(lxmfPropOverride),
+                textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                keyboardOptions = KeyboardOptions(
+                    capitalization = KeyboardCapitalization.None,
+                    keyboardType = KeyboardType.Ascii,
+                ),
+                modifier = Modifier.fillMaxWidth(),
+            )
+
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "Enter the RFed Node's public identity hash. Notify, channel, delivery, " +
+                    "and LXMF propagation hashes are derived automatically. Leave the propagation " +
+                    "field empty to use the derived address, or enter a different one to override it. " +
+                    "Changes take effect on next service restart.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+            )
+
+            Spacer(Modifier.height(12.dp))
+            Button(
+                onClick = {
+                    if (nodeHash.isEmpty() || isHex32(nodeHash)) {
+                        UserPreferences.setRfedNodeIdentityHash(context, nodeHash)
+                    }
+                    if (lxmfPropOverride.isEmpty() || isHex32(lxmfPropOverride)) {
+                        UserPreferences.setRfedLxmfPropOverride(context, lxmfPropOverride)
+                    }
+                },
+                enabled = (nodeHash.isEmpty() || isHex32(nodeHash)) &&
+                    (lxmfPropOverride.isEmpty() || isHex32(lxmfPropOverride)),
+                modifier = Modifier.align(Alignment.End),
+            ) {
+                Text("Apply")
             }
         }
     }

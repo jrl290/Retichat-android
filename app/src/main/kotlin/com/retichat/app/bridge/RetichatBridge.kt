@@ -24,6 +24,18 @@ interface AnnounceCallback {
 }
 
 /**
+ * Callback interface for receiving inbound RFed channel blobs (push fanout).
+ *
+ * Wire format: `blob = channel_hash(16) | inner_blob(*)`.
+ * Implementations should look up the channel by `channel_hash` then
+ * call [RetichatBridge.channelLxmUnpack] on the full blob to validate
+ * the LXMF signature.
+ */
+interface RfedBlobCallback {
+    fun onBlob(blob: ByteArray)
+}
+
+/**
  * JNI bridge to the Rust Reticulum + LXMF libraries.
  *
  * All `native*` methods map 1:1 to C-exported JNI functions in
@@ -145,6 +157,25 @@ object RetichatBridge {
     fun routerAnnounce(router: Long, destHash: ByteArray): Boolean =
         nativeRouterAnnounce(router, destHash) == 0
 
+    /**
+     * Opt a destination into Transport's auto-announce daemon.
+     *
+     * Once published, Transport automatically re-announces the destination:
+     *   * once on every interface false→true `online` transition, and
+     *   * every [refreshSecs] seconds (pass `0.0` to disable periodic
+     *     refresh and only re-announce on interface up-edges).
+     *
+     * Idempotent: a second call updates the existing entry without
+     * triggering an immediate announce. Replaces the per-app pattern of
+     * Timer-based + reconnect-driven + foreground-driven re-announces.
+     */
+    fun transportPublishDestination(destHash: ByteArray, refreshSecs: Double): Boolean =
+        nativeTransportPublishDestination(destHash, refreshSecs) == 0
+
+    /** Remove a destination from the auto-announce daemon's published set. */
+    fun transportUnpublishDestination(destHash: ByteArray): Boolean =
+        nativeTransportUnpublishDestination(destHash) == 0
+
     /** Add a destination to the announce watch list (only watched destinations trigger callbacks). */
     fun routerWatchDestination(router: Long, destHash: ByteArray): Boolean =
         nativeRouterWatchDestination(router, destHash) == 0
@@ -165,6 +196,8 @@ object RetichatBridge {
     private external fun nativeRouterWatchDestination(router: Long, destHash: ByteArray): Int
     private external fun nativeRouterProcessOutbound(router: Long): Int
     private external fun nativeRouterDestroy(router: Long): Int
+    private external fun nativeTransportPublishDestination(destHash: ByteArray, refreshSecs: Double): Int
+    private external fun nativeTransportUnpublishDestination(destHash: ByteArray): Int
 
     // ---- Propagation ----
 
@@ -283,5 +316,205 @@ object RetichatBridge {
         const val PR_NO_IDENTITY_RCVD  = 0xF3
         const val PR_NO_ACCESS         = 0xF4
         const val PR_FAILED            = 0xFE
+    }
+
+    // -------------------------------------------------------------------
+    // Identity sign / Announce watchlist / Path persistence
+    // -------------------------------------------------------------------
+
+    /** Ed25519-sign `data` with the identity at [handle]. Returns 64-byte sig or null. */
+    fun identitySign(handle: Long, data: ByteArray): ByteArray? =
+        nativeIdentitySign(handle, data)
+
+    /** Whitelist a destination so its announces always pass the drop filter. */
+    fun watchAnnounce(destHash: ByteArray) = nativeWatchAnnounce(destHash)
+
+    /** Remove a destination from the announce whitelist. */
+    fun unwatchAnnounce(destHash: ByteArray) = nativeUnwatchAnnounce(destHash)
+
+    /** Force-flush the in-memory path table to disk. */
+    fun transportSavePaths(): Boolean = nativeTransportSavePaths() == 0
+
+    private external fun nativeIdentitySign(handle: Long, data: ByteArray): ByteArray?
+    private external fun nativeWatchAnnounce(destHash: ByteArray)
+    private external fun nativeUnwatchAnnounce(destHash: ByteArray)
+    private external fun nativeTransportSavePaths(): Int
+
+    // -------------------------------------------------------------------
+    // Raw packet send / synchronous link request
+    // -------------------------------------------------------------------
+
+    /**
+     * Send a single encrypted DATA packet to `destHash`. The remote identity
+     * must already be in the known-destinations cache (from a prior announce).
+     * Used by FCM token registration and channel SEND.
+     */
+    fun packetSendToHash(
+        destHash: ByteArray,
+        appName: String,
+        aspects: String,
+        payload: ByteArray,
+    ): Boolean = nativePacketSendToHash(destHash, appName, aspects, payload) == 0
+
+    /**
+     * Open a Link to a remote destination, identify, send a request along
+     * `path` with `payload`, await the response, tear down. **Blocks** —
+     * call from a background thread / coroutine on Dispatchers.IO.
+     *
+     * Returns response bytes, or null on error (call [lastError]).
+     */
+    fun linkRequest(
+        destHash: ByteArray,
+        appName: String,
+        aspects: String,
+        identityHandle: Long,
+        path: String,
+        payload: ByteArray,
+        timeoutSecs: Double = 15.0,
+    ): ByteArray? = nativeLinkRequest(
+        destHash, appName, aspects, identityHandle, path, payload, timeoutSecs
+    )
+
+    private external fun nativePacketSendToHash(
+        destHash: ByteArray, appName: String, aspects: String, payload: ByteArray
+    ): Int
+    private external fun nativeLinkRequest(
+        destHash: ByteArray, appName: String, aspects: String,
+        identityHandle: Long, path: String, payload: ByteArray, timeoutSecs: Double
+    ): ByteArray?
+
+    // -------------------------------------------------------------------
+    // RFed Delivery — inbound channel blob endpoint
+    // -------------------------------------------------------------------
+
+    /**
+     * Register an inbound rfed.delivery destination so the rfed server can
+     * push channel blobs to this device. The callback fires on a Rust
+     * background thread (already attached to the JVM) — bridge to Kotlin's
+     * Main/IO dispatcher inside `onBlob` if needed.
+     */
+    fun rfedDeliveryStart(identityHandle: Long, callback: RfedBlobCallback): Boolean =
+        nativeRfedDeliveryStart(identityHandle, callback) == 0
+
+    /** Announce the local rfed.delivery so the server flushes deferred blobs. */
+    fun rfedDeliveryAnnounce(): Boolean = nativeRfedDeliveryAnnounce() == 0
+
+    /** Tear down the rfed.delivery endpoint. */
+    fun rfedDeliveryStop(): Boolean = nativeRfedDeliveryStop() == 0
+
+    private external fun nativeRfedDeliveryStart(identityHandle: Long, callback: RfedBlobCallback): Int
+    private external fun nativeRfedDeliveryAnnounce(): Int
+    private external fun nativeRfedDeliveryStop(): Int
+
+    // -------------------------------------------------------------------
+    // Channel crypto / stamp / LXM pack-unpack
+    //
+    // CHANNEL MESSAGES ARE LXMF PACKAGES.  See repo memory
+    // /memories/repo/retichat-rfed-channel-integration.md for the wire
+    // format and stamp contract.
+    // -------------------------------------------------------------------
+
+    /** EC-encrypt `plaintext` with the deterministic channel key derived from `name`. */
+    fun channelEncrypt(name: String, plaintext: ByteArray): ByteArray? =
+        nativeChannelEncrypt(name, plaintext)
+
+    /** EC-decrypt `ciphertext` with the channel key. */
+    fun channelDecrypt(name: String, ciphertext: ByteArray): ByteArray? =
+        nativeChannelDecrypt(name, ciphertext)
+
+    /**
+     * Compute a 32-byte PoW stamp for a channel SEND payload at the given
+     * `cost`. Returns null when cost <= 0 (no stamp) or when the PoW
+     * search fails to meet `cost` (in which case [lastError] is set —
+     * abort the send rather than ship a sub-cost stamp).
+     */
+    fun channelComputeStamp(payload: ByteArray, cost: Int): ByteArray? =
+        nativeComputeChannelStamp(payload, cost)
+
+    /**
+     * Pack an LXMF channel message. Returns the wire buffer prefixed with an
+     * 8-byte timestamp the caller strips:
+     *   `[ ts_ms_be(8) | channel_id_hash(16) | EC_encrypted_tail ]`
+     * The portion sent to rfed.channel is `output.copyOfRange(8, end)`.
+     */
+    fun channelLxmPack(
+        name: String,
+        senderIdentityHandle: Long,
+        content: ByteArray,
+        title: ByteArray = ByteArray(0),
+    ): ByteArray? = nativeChannelLxmPack(name, senderIdentityHandle, content, title)
+
+    /**
+     * Unpack a received channel message. Input is the full lxmf_data:
+     *   `[ channel_id_hash(16) | EC_encrypted_tail ]`
+     *
+     * Returns flat parsed-message bytes (see [ChannelLxmUnpackResult.parse]):
+     *   `[source_hash(16) | ts_ms_be(8) | sig_ok(1) | reason(1) | title_len_be(2) | content_len_be(4) | title | content]`
+     */
+    fun channelLxmUnpack(name: String, lxmfData: ByteArray): ByteArray? =
+        nativeChannelLxmUnpack(name, lxmfData)
+
+    private external fun nativeChannelEncrypt(name: String, plaintext: ByteArray): ByteArray?
+    private external fun nativeChannelDecrypt(name: String, ciphertext: ByteArray): ByteArray?
+    private external fun nativeComputeChannelStamp(payload: ByteArray, cost: Int): ByteArray?
+    private external fun nativeChannelLxmPack(
+        name: String, senderHandle: Long, content: ByteArray, title: ByteArray
+    ): ByteArray?
+    private external fun nativeChannelLxmUnpack(name: String, lxmfData: ByteArray): ByteArray?
+
+    /**
+     * Derive the 16-byte channel-identity hash from the channel name.
+     *
+     * Computed in pure Kotlin (see [com.retichat.app.crypto.ChannelHash]) so
+     * the routing label / DB primary key is independent of the JNI Rust
+     * derivation path. Mirrors iOS Swift `RfedChannelClient.channelHash`.
+     */
+    fun channelHash16(name: String): ByteArray =
+        com.retichat.app.crypto.ChannelHash.compute(name)
+}
+
+/**
+ * Decoded form of the byte buffer returned by [RetichatBridge.channelLxmUnpack].
+ */
+data class ChannelLxmUnpackResult(
+    val sourceHash: ByteArray,
+    val timestampMs: Long,
+    val signatureValidated: Boolean,
+    /** 0 = ok, 1 = SOURCE_UNKNOWN, 2 = SIGNATURE_INVALID. */
+    val unverifiedReason: Int,
+    val title: ByteArray,
+    val content: ByteArray,
+) {
+    companion object {
+        fun parse(raw: ByteArray): ChannelLxmUnpackResult? {
+            if (raw.size < 32) return null
+            val source = raw.copyOfRange(0, 16)
+            val ts = ((raw[16].toLong() and 0xff) shl 56) or
+                     ((raw[17].toLong() and 0xff) shl 48) or
+                     ((raw[18].toLong() and 0xff) shl 40) or
+                     ((raw[19].toLong() and 0xff) shl 32) or
+                     ((raw[20].toLong() and 0xff) shl 24) or
+                     ((raw[21].toLong() and 0xff) shl 16) or
+                     ((raw[22].toLong() and 0xff) shl 8) or
+                     (raw[23].toLong() and 0xff)
+            val sigOk = raw[24].toInt() and 0xff
+            val reason = raw[25].toInt() and 0xff
+            val titleLen = ((raw[26].toInt() and 0xff) shl 8) or (raw[27].toInt() and 0xff)
+            val contentLen = ((raw[28].toInt() and 0xff) shl 24) or
+                             ((raw[29].toInt() and 0xff) shl 16) or
+                             ((raw[30].toInt() and 0xff) shl 8) or
+                             (raw[31].toInt() and 0xff)
+            if (raw.size < 32 + titleLen + contentLen) return null
+            val title = raw.copyOfRange(32, 32 + titleLen)
+            val content = raw.copyOfRange(32 + titleLen, 32 + titleLen + contentLen)
+            return ChannelLxmUnpackResult(
+                sourceHash = source,
+                timestampMs = ts,
+                signatureValidated = sigOk == 1,
+                unverifiedReason = reason,
+                title = title,
+                content = content,
+            )
+        }
     }
 }

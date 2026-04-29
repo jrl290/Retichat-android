@@ -16,3 +16,12 @@ app/src/main/jniLibs/
 
 # OS
 .DS_Store
+
+# Local runtime artifacts
+identity.bin
+rns_config/
+.vscode/
+# Stray empty marker files
+/Join
+/Start
+/type

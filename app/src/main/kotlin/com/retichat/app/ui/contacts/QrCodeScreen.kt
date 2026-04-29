@@ -49,6 +49,7 @@ fun QrCodeScreen(
     onBack: () -> Unit,
     onScanned: (String) -> Unit,
     selfDestHashHex: String = "",  // injected in production
+    selfPublicKeyHex: String = "",  // injected in production
 ) {
     Scaffold(
         topBar = {
@@ -69,7 +70,7 @@ fun QrCodeScreen(
             contentAlignment = Alignment.Center,
         ) {
             when (mode) {
-                QrCodeScreen.Mode.SHOW -> ShowQrContent(selfDestHashHex)
+                QrCodeScreen.Mode.SHOW -> ShowQrContent(selfDestHashHex, selfPublicKeyHex)
                 QrCodeScreen.Mode.SCAN -> ScanQrContent(onScanned)
             }
         }
@@ -77,14 +78,14 @@ fun QrCodeScreen(
 }
 
 @Composable
-private fun ShowQrContent(destHashHex: String) {
+private fun ShowQrContent(destHashHex: String, publicKeyHex: String = "") {
     if (destHashHex.isBlank()) {
         Text("Identity not yet initialised", style = MaterialTheme.typography.bodyLarge)
         return
     }
 
-    val lxmfUri = "lxmf://$destHashHex"
-    val bitmap = remember(lxmfUri) { generateQrBitmap(lxmfUri, 512) }
+    val lxmaUri = if (publicKeyHex.isNotBlank()) "lxma://$destHashHex.$publicKeyHex" else "lxma://$destHashHex"
+    val bitmap = remember(lxmaUri) { generateQrBitmap(lxmaUri, 512) }
     val context = LocalContext.current
     var copied by remember { mutableStateOf(false) }
 
@@ -98,7 +99,7 @@ private fun ShowQrContent(destHashHex: String) {
         }
         Spacer(Modifier.height(24.dp))
         Text(
-            text = lxmfUri,
+            text = lxmaUri,
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -106,7 +107,7 @@ private fun ShowQrContent(destHashHex: String) {
         OutlinedButton(
             onClick = {
                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                clipboard.setPrimaryClip(ClipData.newPlainText("LXMF Address", lxmfUri))
+                clipboard.setPrimaryClip(ClipData.newPlainText("LXMF Address", lxmaUri))
                 copied = true
             },
         ) {
@@ -221,8 +222,14 @@ private fun processBarcode(imageProxy: ImageProxy, onResult: (String) -> Unit) {
         .addOnSuccessListener { barcodes ->
             for (barcode in barcodes) {
                 val value = barcode.rawValue ?: continue
-                // Accept lxmf:// URI → extract the hex hash
-                val lxmfMatch = Regex("^lxmf://([0-9a-fA-F]{32})$").find(value)
+                // Accept lxma://<hash>[.<pubkey>] (new format)
+                val lxmaMatch = Regex("^lxma://([0-9a-fA-F]{32})(?:\\.[0-9a-fA-F]+)?$", RegexOption.IGNORE_CASE).find(value)
+                if (lxmaMatch != null) {
+                    onResult(lxmaMatch.groupValues[1].lowercase())
+                    break
+                }
+                // Accept lxmf://<hash> (backwards compat)
+                val lxmfMatch = Regex("^lxmf://([0-9a-fA-F]{32})$", RegexOption.IGNORE_CASE).find(value)
                 if (lxmfMatch != null) {
                     onResult(lxmfMatch.groupValues[1].lowercase())
                     break

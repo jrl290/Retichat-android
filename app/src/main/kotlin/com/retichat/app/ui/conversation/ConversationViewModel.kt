@@ -54,6 +54,19 @@ class ConversationViewModel(
         repository.groupMembers(chatId)
             .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
+    /** True when this chat is a group with an unaccepted invite. */
+    val isPendingInvite: StateFlow<Boolean> =
+        repository.isPendingGroupInvite(chatId)
+            .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    fun acceptInvite() {
+        viewModelScope.launch { repository.acceptGroupInvite(chatId) }
+    }
+
+    fun declineInvite() {
+        viewModelScope.launch { repository.declineGroupInvite(chatId) }
+    }
+
     /** Rename a contact (and the DM chat). */
     fun renameContact(destHashHex: String, newName: String) {
         viewModelScope.launch {

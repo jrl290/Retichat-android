@@ -13,13 +13,16 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
 import com.retichat.app.RetichatApp
+import com.retichat.app.bridge.RetichatBridge
 import com.retichat.app.data.model.Contact
 import com.retichat.app.data.model.hexToBytes
 import com.retichat.app.ui.chatlist.ChatListScreen
 import com.retichat.app.ui.chatlist.ChatListViewModel
 import com.retichat.app.ui.contacts.QrCodeScreen
+import com.retichat.app.ui.conversation.ConversationMode
 import com.retichat.app.ui.conversation.ConversationScreen
 import com.retichat.app.ui.conversation.ConversationViewModel
+import com.retichat.app.ui.channels.JoinChannelScreen
 import com.retichat.app.ui.newchat.NewChatScreen
 import com.retichat.app.ui.newchat.NewGroupScreen
 import com.retichat.app.ui.settings.SettingsScreen
@@ -34,8 +37,11 @@ object Routes {
     const val QR_CODE      = "qr_code"
     const val QR_SCAN      = "qr_scan"
     const val SETTINGS     = "settings"
+    const val JOIN_CHANNEL = "join_channel"
+    const val CHANNEL      = "channel/{channelId}"
 
     fun conversation(chatId: String) = "conversation/$chatId"
+    fun channel(channelId: String) = "channel/$channelId"
 }
 
 @Composable
@@ -47,16 +53,17 @@ fun RetichatNavHost(navController: NavHostController) {
 
         composable(Routes.CHAT_LIST) {
             val vm: ChatListViewModel = viewModel(
-                factory = ChatListViewModel.Factory(repository),
+                factory = ChatListViewModel.Factory(repository, app.rfedChannelClient),
             )
             val svcState by app.serviceState.collectAsState()
             ChatListScreen(
-                onChatClick = { chatId -> navController.navigate(Routes.conversation(chatId)) },
-                onNewChat   = { navController.navigate(Routes.NEW_CHAT) },
-                onShowQr    = { navController.navigate(Routes.QR_CODE) },
-                onSettings  = { navController.navigate(Routes.SETTINGS) },
-                serviceState = svcState,
-                viewModel   = vm,
+                onChatClick    = { chatId -> navController.navigate(Routes.conversation(chatId)) },
+                onChannelClick = { channelId -> navController.navigate(Routes.channel(channelId)) },
+                onNewChat      = { navController.navigate(Routes.NEW_CHAT) },
+                onShowQr       = { navController.navigate(Routes.QR_CODE) },
+                onSettings     = { navController.navigate(Routes.SETTINGS) },
+                serviceState   = svcState,
+                viewModel      = vm,
             )
         }
 
@@ -69,7 +76,7 @@ fun RetichatNavHost(navController: NavHostController) {
                 factory = ConversationViewModel.Factory(chatId, repository),
             )
             ConversationScreen(
-                chatId = chatId,
+                mode = ConversationMode.Dm(chatId),
                 onBack = { navController.popBackStack() },
                 viewModel = vm,
             )
@@ -83,9 +90,10 @@ fun RetichatNavHost(navController: NavHostController) {
                         popUpTo(Routes.CHAT_LIST)
                     }
                 },
-                onNewGroup = { navController.navigate(Routes.NEW_GROUP) },
-                onScanQr   = { navController.navigate(Routes.QR_SCAN) },
-                onBack     = { navController.popBackStack() },
+                onNewGroup    = { navController.navigate(Routes.NEW_GROUP) },
+                onJoinChannel = { navController.navigate(Routes.JOIN_CHANNEL) },
+                onScanQr      = { navController.navigate(Routes.QR_SCAN) },
+                onBack        = { navController.popBackStack() },
                 onDestHashChat = { hexHash ->
                     scope.launch {
                         val destBytes = hexHash.hexToBytes()
@@ -131,24 +139,36 @@ fun RetichatNavHost(navController: NavHostController) {
             val selfHex = remember {
                 repository.selfDestHash.joinToString("") { "%02x".format(it) }
             }
+            val selfPubKeyHex = remember {
+                RetichatBridge.identityPublicKey(repository.identityHandle)
+                    ?.joinToString("") { "%02x".format(it) } ?: ""
+            }
             QrCodeScreen(
                 mode = QrCodeScreen.Mode.SHOW,
                 onBack = { navController.popBackStack() },
                 onScanned = {},
                 selfDestHashHex = selfHex,
+                selfPublicKeyHex = selfPubKeyHex,
             )
         }
 
         composable(Routes.QR_SCAN) {
+            val scope = rememberCoroutineScope()
             QrCodeScreen(
                 mode = QrCodeScreen.Mode.SCAN,
                 onBack = { navController.popBackStack() },
                 onScanned = { destHashHex ->
-                    // Pop back to new-chat with result
-                    navController.previousBackStackEntry
-                        ?.savedStateHandle
-                        ?.set("scannedHash", destHashHex)
-                    navController.popBackStack()
+                    // Mirror the manual "Enter LXMF Destination" flow:
+                    // add as contact, ensure DM chat exists, navigate.
+                    scope.launch {
+                        val destBytes = destHashHex.hexToBytes()
+                        repository.addContact(destBytes, destHashHex.take(8))
+                        val contact = Contact(destBytes, destHashHex.take(8))
+                        val chatId = repository.getOrCreateDirectChat(contact)
+                        navController.navigate(Routes.conversation(chatId)) {
+                            popUpTo(Routes.CHAT_LIST)
+                        }
+                    }
                 },
             )
         }
@@ -160,13 +180,41 @@ fun RetichatNavHost(navController: NavHostController) {
                     dao = app.database.interfaceConfigDao(),
                     serviceState = app.serviceState,
                     onRestart = {
-                        com.retichat.app.service.ReticulumService.restart(context)
+                        // Force a stack restart so freshly-saved interface
+                        // settings take effect. The next acquire() (e.g.
+                        // when MainActivity returns to onStart) re-bootstraps.
+                        com.retichat.app.service.StackRuntime.forceShutdown(context)
                     },
                 ),
             )
             SettingsScreen(
                 onBack = { navController.popBackStack() },
                 viewModel = vm,
+            )
+        }
+
+        composable(Routes.JOIN_CHANNEL) {
+            JoinChannelScreen(
+                onJoined = { channelId ->
+                    navController.navigate(Routes.channel(channelId)) {
+                        popUpTo(Routes.CHAT_LIST)
+                    }
+                },
+                onBack = { navController.popBackStack() },
+            )
+        }
+
+        composable(
+            route = Routes.CHANNEL,
+            arguments = listOf(navArgument("channelId") { type = NavType.StringType }),
+        ) { entry ->
+            val channelId = entry.arguments?.getString("channelId") ?: return@composable
+            ConversationScreen(
+                mode = ConversationMode.Channel(channelId),
+                onBack = { navController.popBackStack() },
+                onLeft = {
+                    navController.popBackStack(Routes.CHAT_LIST, inclusive = false)
+                },
             )
         }
     }

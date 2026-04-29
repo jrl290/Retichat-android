@@ -10,3 +10,4 @@ crate-type = ["cdylib"]
 reticulum_rust = { path = "../../../Reticulum-rust", default-features = false }
 lxmf_rust = { path = "../../../LXMF-rust" }
 jni = "0.21"
+sha2 = "0.10"

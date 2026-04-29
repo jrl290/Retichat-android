@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Archive
@@ -16,12 +17,12 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.retichat.app.ServiceState
-import com.retichat.app.data.db.dao.ChatPreview
 import com.retichat.app.ui.components.AvatarCircle
 import java.text.SimpleDateFormat
 import java.util.*
@@ -29,17 +30,18 @@ import java.util.*
 @Composable
 fun ChatListScreen(
     onChatClick: (String) -> Unit,
+    onChannelClick: (String) -> Unit,
     onNewChat: () -> Unit,
     onShowQr: () -> Unit,
     onSettings: () -> Unit = {},
     serviceState: ServiceState = ServiceState(),
     viewModel: ChatListViewModel? = null,
 ) {
-    val chats = viewModel?.chats?.collectAsState()?.value ?: dummyPreviews
+    val items = viewModel?.items?.collectAsState()?.value ?: emptyList()
     var searchQuery by remember { mutableStateOf("") }
 
-    val filtered = if (searchQuery.isBlank()) chats
-    else chats.filter { it.name.contains(searchQuery, ignoreCase = true) }
+    val filtered = if (searchQuery.isBlank()) items
+    else items.filter { it.name.contains(searchQuery, ignoreCase = true) }
 
     Scaffold(
         floatingActionButton = {
@@ -137,7 +139,7 @@ fun ChatListScreen(
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
-                        text = if (chats.isEmpty()) "No conversations yet\nTap + to start one"
+                        text = if (items.isEmpty()) "No conversations yet\nTap + to start one"
                         else "No results",
                         style = MaterialTheme.typography.bodyLarge,
                         color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
@@ -148,12 +150,18 @@ fun ChatListScreen(
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(top = 4.dp, bottom = 88.dp),
                 ) {
-                    items(filtered, key = { it.id }) { chat ->
-                        SwipeToArchiveRow(
-                            chat = chat,
-                            onClick = { onChatClick(chat.id) },
-                            onArchive = { viewModel?.archiveChat(chat.id) },
-                        )
+                    items(filtered, key = { it.id }) { item ->
+                        if (item.isChannel) {
+                            Surface(color = MaterialTheme.colorScheme.background) {
+                                ChannelRow(item = item, onClick = { onChannelClick(item.id) })
+                            }
+                        } else {
+                            SwipeToArchiveRow(
+                                item = item,
+                                onClick = { onChatClick(item.id) },
+                                onArchive = { viewModel?.archiveChat(item.id) },
+                            )
+                        }
                     }
                 }
             }
@@ -164,7 +172,7 @@ fun ChatListScreen(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SwipeToArchiveRow(
-    chat: ChatPreview,
+    item: ChatListItem,
     onClick: () -> Unit,
     onArchive: () -> Unit,
 ) {
@@ -204,14 +212,67 @@ private fun SwipeToArchiveRow(
         enableDismissFromStartToEnd = false,
     ) {
         Surface(color = MaterialTheme.colorScheme.background) {
-            ChatRow(chat = chat, onClick = onClick)
+            ChatRow(item = item, onClick = onClick)
         }
     }
 }
 
 @Composable
-private fun ChatRow(chat: ChatPreview, onClick: () -> Unit) {
-    val hasUnread = chat.unreadCount > 0
+private fun ChannelRow(item: ChatListItem, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(54.dp)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = "#",
+                style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
+                color = MaterialTheme.colorScheme.primary,
+            )
+        }
+        Spacer(Modifier.width(14.dp))
+
+        Column(modifier = Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = item.name,
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                item.lastTimestamp?.let { ts ->
+                    Text(
+                        text = formatTime(ts),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
+                    )
+                }
+            }
+            Spacer(Modifier.height(3.dp))
+            Text(
+                text = "RFed channel",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+@Composable
+private fun ChatRow(item: ChatListItem, onClick: () -> Unit) {
+    val hasUnread = item.unreadCount > 0
 
     Row(
         modifier = Modifier
@@ -221,9 +282,9 @@ private fun ChatRow(chat: ChatPreview, onClick: () -> Unit) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         AvatarCircle(
-            name = chat.name,
+            name = item.name,
             size = 54.dp,
-            backgroundColor = if (chat.isGroup)
+            backgroundColor = if (item.isGroup)
                 MaterialTheme.colorScheme.tertiaryContainer
             else MaterialTheme.colorScheme.primaryContainer,
         )
@@ -232,7 +293,7 @@ private fun ChatRow(chat: ChatPreview, onClick: () -> Unit) {
         Column(modifier = Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    text = chat.name,
+                    text = item.name,
                     style = MaterialTheme.typography.titleMedium.copy(
                         fontWeight = if (hasUnread) FontWeight.Bold else FontWeight.SemiBold,
                     ),
@@ -240,7 +301,7 @@ private fun ChatRow(chat: ChatPreview, onClick: () -> Unit) {
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
                 )
-                chat.lastTimestamp?.let { ts ->
+                item.lastTimestamp?.let { ts ->
                     Text(
                         text = formatTime(ts),
                         style = MaterialTheme.typography.labelSmall,
@@ -252,7 +313,7 @@ private fun ChatRow(chat: ChatPreview, onClick: () -> Unit) {
             Spacer(Modifier.height(3.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    text = chat.lastContent ?: "",
+                    text = item.lastContent ?: "",
                     style = MaterialTheme.typography.bodyMedium.copy(
                         fontWeight = if (hasUnread) FontWeight.Medium else FontWeight.Normal,
                     ),
@@ -269,7 +330,7 @@ private fun ChatRow(chat: ChatPreview, onClick: () -> Unit) {
                         contentColor = MaterialTheme.colorScheme.onPrimary,
                     ) {
                         Text(
-                            chat.unreadCount.toString(),
+                            item.unreadCount.toString(),
                             style = MaterialTheme.typography.labelSmall.copy(
                                 fontWeight = FontWeight.Bold,
                             ),
@@ -296,20 +357,3 @@ private fun formatTime(millis: Long): String {
         else -> SimpleDateFormat("MMM d", Locale.getDefault()).format(Date(millis))
     }
 }
-
-// ---- Dummy data for preview ----
-
-private val dummyPreviews = listOf(
-    ChatPreview("dm_alice", false, "Alice", "aabbccdd", null,
-        "Hey! Just tested Retichat over LoRa \uD83D\uDE80",
-        System.currentTimeMillis() - 300_000, 2),
-    ChatPreview("dm_bob", false, "Bob", "11223344", null,
-        "The mesh is growing fast",
-        System.currentTimeMillis() - 3_600_000, 0),
-    ChatPreview("grp_meshnet", true, "Meshnet Crew", "aabbccdd,11223344,55667788", "cafebabe",
-        "Bob: Anyone near the relay node?",
-        System.currentTimeMillis() - 7_200_000, 5),
-    ChatPreview("dm_carol", false, "Carol", "55667788", null,
-        "Thanks for the firmware update",
-        System.currentTimeMillis() - 86_400_000, 0),
-)

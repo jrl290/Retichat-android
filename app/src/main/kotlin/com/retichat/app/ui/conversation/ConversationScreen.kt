@@ -27,6 +27,8 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.outlined.Info
+import androidx.paging.LoadState
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -51,10 +53,13 @@ import coil.request.ImageRequest
 import com.retichat.app.RetichatApp
 import com.retichat.app.bridge.RetichatBridge
 import com.retichat.app.data.db.entity.AttachmentEntity
+import com.retichat.app.data.db.entity.ChannelMessageEntity
 import com.retichat.app.data.db.entity.MessageEntity
 import com.retichat.app.ui.theme.BubbleIncoming
 import com.retichat.app.ui.theme.BubbleIncomingDark
 import com.retichat.app.ui.theme.BubbleOutgoing
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
@@ -71,9 +76,46 @@ private val senderColors = listOf(
     Color(0xFFFF6482), // coral
 )
 
+/**
+ * Selects between a DM/group conversation backed by LXMF and a pub-sub
+ * channel backed by RFed. Mirrors iOS `ConversationMode`. Both modes share
+ * the same chrome, message bubble, and input bar — only the data source
+ * and a few affordances differ.
+ */
+sealed class ConversationMode {
+    data class Dm(val chatId: String) : ConversationMode()
+    data class Channel(val channelId: String) : ConversationMode()
+}
+
+/**
+ * Unified conversation entry point. DM/group chats and RFed channels both
+ * land here; mode-specific content is dispatched internally.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ConversationScreen(
+    mode: ConversationMode,
+    onBack: () -> Unit,
+    onLeft: () -> Unit = {},
+    viewModel: ConversationViewModel? = null,
+) {
+    when (mode) {
+        is ConversationMode.Dm -> DmConversationContent(
+            chatId = mode.chatId,
+            onBack = onBack,
+            viewModel = viewModel,
+        )
+        is ConversationMode.Channel -> ChannelConversationContent(
+            channelId = mode.channelId,
+            onBack = onBack,
+            onLeft = onLeft,
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun DmConversationContent(
     chatId: String,
     onBack: () -> Unit,
     viewModel: ConversationViewModel? = null,
@@ -91,6 +133,7 @@ fun ConversationScreen(
     var draft by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
     val isGroup = chatEntity?.isGroup == true
+    val isPendingInvite = viewModel?.isPendingInvite?.collectAsState()?.value ?: false
 
     // Pending attachment state
     var pendingAttachmentName by remember { mutableStateOf<String?>(null) }
@@ -142,6 +185,16 @@ fun ConversationScreen(
         }
     }
 
+    // Auto-scroll to newest message when a new message arrives, but only if
+    // the user is already near the bottom — otherwise we'd interrupt them
+    // while they're scrolled up reading history.
+    val itemCount = lazyItems?.itemCount ?: 0
+    LaunchedEffect(itemCount) {
+        if (itemCount > 0 && listState.firstVisibleItemIndex <= 2) {
+            listState.animateScrollToItem(0)
+        }
+    }
+
     // Resolve the display name for the top bar
     val displayTitle = chatEntity?.name
         ?: chatId.removePrefix("dm_").take(12)
@@ -181,6 +234,23 @@ fun ConversationScreen(
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 },
+                actions = {
+                    IconButton(onClick = {
+                        if (isGroup) {
+                            showGroupInfo = true
+                        } else {
+                            val currentName = chatEntity?.name ?: ""
+                            renameText = TextFieldValue(currentName, TextRange(0, currentName.length))
+                            showRenameDialog = true
+                        }
+                    }) {
+                        Icon(
+                            Icons.Outlined.Info,
+                            contentDescription = "Chat info",
+                            tint = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.surface,
                 ),
@@ -195,7 +265,10 @@ fun ConversationScreen(
                 .imePadding()
                 .navigationBarsPadding(),
         ) {
-            // Messages – reverse layout so index 0 is at the bottom (newest)
+            // Messages – reverse layout so index 0 is at the bottom (newest).
+            // The list naturally starts at the latest message; new incoming
+            // messages and keyboard show/hide are handled by the LaunchedEffect
+            // that scrolls to index 0.
             LazyColumn(
                 state = listState,
                 reverseLayout = true,
@@ -218,10 +291,72 @@ fun ConversationScreen(
                             )
                         }
                     }
+                    // "Load earlier messages" indicator at top of list
+                    // (visually top because reverseLayout = true → end of items).
+                    val appendState = lazyItems.loadState.append
+                    if (appendState is LoadState.Loading) {
+                        item {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 12.dp),
+                                horizontalArrangement = Arrangement.Center,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp,
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    "Loading earlier messages\u2026",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
                 }
             }
 
-            // Input bar
+            // Input bar (or invite prompt for pending group invites)
+            if (isPendingInvite) {
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceContainer,
+                    tonalElevation = 0.dp,
+                ) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        HorizontalDivider()
+                        Text(
+                            text = "You have been invited to this group",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 8.dp),
+                        )
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 10.dp),
+                            horizontalArrangement = Arrangement.spacedBy(16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            OutlinedButton(
+                                onClick = { viewModel?.declineInvite(); onBack() },
+                                modifier = Modifier.weight(1f).height(48.dp),
+                                shape = RoundedCornerShape(10.dp),
+                            ) { Text("Decline") }
+                            Button(
+                                onClick = { viewModel?.acceptInvite() },
+                                modifier = Modifier.weight(1f).height(48.dp),
+                                shape = RoundedCornerShape(10.dp),
+                            ) { Text("Accept") }
+                        }
+                    }
+                }
+            } else {
             Surface(
                 color = MaterialTheme.colorScheme.surfaceContainer,
                 tonalElevation = 0.dp,
@@ -344,6 +479,7 @@ fun ConversationScreen(
                     }
                 }
             }
+            } // end else (isPendingInvite)
         }
     }
 
@@ -395,6 +531,253 @@ fun ConversationScreen(
             members = groupMembers,
             contactNames = contactNames,
             onDismiss = { showGroupInfo = false },
+        )
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Channel mode (RFed pub-sub channels)
+// Reuses MessageRow/input bar so visual conventions match DM/group exactly.
+// ─────────────────────────────────────────────────────────────────────────
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ChannelConversationContent(
+    channelId: String,
+    onBack: () -> Unit,
+    onLeft: () -> Unit,
+) {
+    val context = LocalContext.current
+    val app = context.applicationContext as RetichatApp
+    val scope = rememberCoroutineScope()
+
+    val channel by app.rfedChannelClient.channelsFlow()
+        .map { list -> list.firstOrNull { it.id == channelId } }
+        .collectAsState(initial = null)
+    val channelMessages by app.rfedChannelClient.messagesFlow(channelId)
+        .collectAsState(initial = emptyList())
+    val canPullMoreMap by app.rfedChannelClient.canPullMore.collectAsState()
+    val pullInFlight by app.rfedChannelClient.pullInFlight.collectAsState()
+    // Only show the button when the rfed node has explicitly told us there
+    // are more messages queued (`more_pending = true`). Unknown (`null`)
+    // and "drained" (`false`) both hide the button.
+    val canPullMore = canPullMoreMap[channelId] == true
+    val isPulling = channelId in pullInFlight
+
+    var draft by remember { mutableStateOf("") }
+    var showInfo by remember { mutableStateOf(false) }
+    val listState = rememberLazyListState()
+
+    // Auto-pull on first open. Subsequent pulls happen via the explicit button
+    // or push wakeups; we don't have an iOS-style link-generation tracker on
+    // Android, so a one-shot pull on screen entry suffices.
+    LaunchedEffect(channel?.id) {
+        val ch = channel ?: return@LaunchedEffect
+        // Reset the flag so the button re-appears whenever the user re-enters.
+        app.rfedChannelClient.resetCanPullMore(ch.id)
+        runCatching { app.rfedChannelClient.pullDeferred(ch) }
+    }
+
+    val density = LocalDensity.current
+    val imeBottom = WindowInsets.ime.getBottom(density)
+    val isKeyboardVisible = imeBottom > 0
+    LaunchedEffect(isKeyboardVisible) {
+        if (isKeyboardVisible && channelMessages.isNotEmpty()) {
+            listState.animateScrollToItem(0)
+        }
+    }
+    LaunchedEffect(channelMessages.size) {
+        if (channelMessages.isNotEmpty() && listState.firstVisibleItemIndex <= 2) {
+            listState.animateScrollToItem(0)
+        }
+    }
+
+    // Synthesize MessageEntity rows so we can reuse the DM MessageRow.
+    // Channels never carry attachments, and pass viewModel = null so
+    // attachmentsFor() returns the empty default. The channel's `sendState`
+    // is mapped to `MessageState` so the bubble renders only ✓ (sent to
+    // rfed) or ✗ in red (failed) — no "sending" hourglass while in flight.
+    val displayMessages = remember(channelMessages) {
+        channelMessages.map { ch ->
+            val mappedState = if (ch.isOutbound) when (ch.sendState) {
+                ChannelMessageEntity.SEND_STATE_SENT -> RetichatBridge.MessageState.SENT
+                ChannelMessageEntity.SEND_STATE_FAILED -> RetichatBridge.MessageState.FAILED
+                // SEND_STATE_SENDING (or any unknown) → use CANCELLED so the
+                // glyph helper returns "" and no indicator is drawn.
+                else -> RetichatBridge.MessageState.CANCELLED
+            } else {
+                RetichatBridge.MessageState.DELIVERED
+            }
+            MessageEntity(
+                id = ch.id,
+                chatId = ch.channelId,
+                senderHashHex = ch.sourceHashHex,
+                content = ch.content,
+                timestamp = ch.timestamp,
+                isOutbound = ch.isOutbound,
+                state = mappedState,
+            )
+        }
+    }
+    val title = channel?.let { "#${it.channelName}" } ?: channelId.take(12)
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text(title, style = MaterialTheme.typography.titleMedium) },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+                actions = {
+                    IconButton(onClick = { showInfo = true }) {
+                        Icon(
+                            Icons.Outlined.Info,
+                            contentDescription = "Channel info",
+                            tint = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                ),
+            )
+        },
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(top = padding.calculateTopPadding())
+                .imePadding()
+                .navigationBarsPadding(),
+        ) {
+            LazyColumn(
+                state = listState,
+                reverseLayout = true,
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+                contentPadding = PaddingValues(vertical = 8.dp),
+            ) {
+                items(items = displayMessages.asReversed(), key = { it.id }) { msg ->
+                    MessageRow(
+                        msg = msg,
+                        showSender = !msg.isOutbound,
+                        contactNames = emptyMap(),
+                        viewModel = null,
+                    )
+                }
+                // "Load earlier messages" — visible only when the rfed node has
+                // not yet reported `more_pending = false` for this channel.
+                if (canPullMore && channel != null) {
+                    item(key = "__channel_load_earlier__") {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.Center,
+                        ) {
+                            TextButton(
+                                onClick = {
+                                    val ch = channel ?: return@TextButton
+                                    scope.launch {
+                                        runCatching { app.rfedChannelClient.pullDeferred(ch) }
+                                    }
+                                },
+                                enabled = !isPulling,
+                            ) {
+                                if (isPulling) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(14.dp),
+                                        strokeWidth = 2.dp,
+                                    )
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(
+                                        "Loading\u2026",
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                } else {
+                                    Text(
+                                        "Load earlier messages",
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Input bar (mirrors DM exactly, minus the attach button).
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceContainer,
+                tonalElevation = 0.dp,
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    OutlinedTextField(
+                        value = draft,
+                        onValueChange = { draft = it },
+                        modifier = Modifier.weight(1f),
+                        placeholder = {
+                            Text(channel?.let { "Message #${it.channelName}\u2026" } ?: "Message")
+                        },
+                        shape = MaterialTheme.shapes.large,
+                        maxLines = 4,
+                        keyboardOptions = KeyboardOptions(
+                            capitalization = KeyboardCapitalization.Sentences,
+                        ),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                            unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                            focusedBorderColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.3f),
+                            unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.15f),
+                        ),
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    FilledIconButton(
+                        onClick = {
+                            val ch = channel ?: return@FilledIconButton
+                            val text = draft
+                            draft = ""
+                            scope.launch {
+                                app.rfedChannelClient.sendMessage(ch, text)
+                            }
+                        },
+                        enabled = draft.isNotBlank() && channel != null,
+                        colors = IconButtonDefaults.filledIconButtonColors(
+                            containerColor = MaterialTheme.colorScheme.primary,
+                            contentColor = MaterialTheme.colorScheme.onPrimary,
+                            disabledContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                            disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+                        ),
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
+                    }
+                }
+            }
+        }
+    }
+
+    if (showInfo) {
+        com.retichat.app.ui.channels.ChannelInfoSheet(
+            channelName = channel?.channelName ?: "",
+            channelId = channelId,
+            onDismiss = { showInfo = false },
+            onLeave = {
+                showInfo = false
+                val ch = channel
+                scope.launch {
+                    if (ch != null) app.rfedChannelClient.leaveChannel(ch.id)
+                    onLeft()
+                }
+            },
         )
     }
 }
@@ -636,10 +1019,12 @@ private fun MessageRow(
 
                     if (isOut) {
                         Spacer(Modifier.width(4.dp))
+                        val isFailed = msg.state == RetichatBridge.MessageState.FAILED
                         Text(
                             text = stateIcon(msg.state),
                             style = MaterialTheme.typography.bodySmall,
-                            color = Color.White.copy(alpha = 0.7f),
+                            color = if (isFailed) Color(0xFFFF5252)
+                                else Color.White.copy(alpha = 0.7f),
                         )
                     }
                 }
@@ -676,9 +1061,9 @@ private fun isImageFile(filename: String): Boolean {
     return ext in listOf("jpg", "jpeg", "png", "gif", "webp", "bmp")
 }
 
-/** Regex matching http/https URLs and lxmf:// addresses. */
+/** Regex matching http/https URLs and lxma:// or lxmf:// addresses. */
 private val urlRegex = Regex(
-    """(?:https?://|lxmf://)[^\s<>\"\)\]\}]+""",
+    """(?:https?://|lxma://|lxmf://)[^\s<>\"\)\]\}]+""",
     RegexOption.IGNORE_CASE,
 )
 

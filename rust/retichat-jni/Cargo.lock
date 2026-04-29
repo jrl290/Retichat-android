@@ -878,6 +878,7 @@ dependencies = [
  "rmp-serde",
  "rmpv",
  "serde",
+ "serde_bytes",
  "sha2 0.10.9",
  "uuid",
 ]
@@ -1130,6 +1131,7 @@ dependencies = [
  "jni 0.21.1",
  "lxmf_rust",
  "reticulum_rust",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -1142,6 +1144,7 @@ dependencies = [
  "bzip2",
  "cbc",
  "chrono",
+ "ctrlc",
  "ed25519-dalek",
  "futures",
  "hkdf",
@@ -1152,6 +1155,7 @@ dependencies = [
  "rand 0.8.5",
  "rmp",
  "rmp-serde",
+ "rmpv",
  "serde",
  "serde_bytes",
  "serialport",

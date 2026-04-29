@@ -86,3 +86,60 @@ data class InterfaceConfigEntity(
     val configJson: String = "{}",
     val createdAt: Long = System.currentTimeMillis(),
 )
+
+/**
+ * A subscribed RFed channel.
+ *
+ * [id] is the 32-char hex of the 16-byte channel identity hash, also used
+ * as the primary key for inbound blob lookup. [channelName] is the
+ * user-supplied name from which the channel keypair is deterministically
+ * derived (`SHA256(name)` seed). [rfedNodeIdentityHashHex] is the RFed
+ * node hosting the subscription — used to derive `rfed.{channel,delivery,
+ * notify}` destinations.
+ *
+ * [stampCost] is the latest known PoW cost from `/rfed/subscribe`
+ * (null = unknown / never refreshed; 0 = disabled).
+ */
+@Entity(tableName = "channels")
+data class ChannelEntity(
+    @PrimaryKey val id: String,
+    val channelName: String,
+    val rfedNodeIdentityHashHex: String,
+    val stampCost: Int? = null,
+    val joinedAt: Long = System.currentTimeMillis(),
+    val lastMessageTime: Long = 0L,
+    val isArchived: Boolean = false,
+)
+
+/**
+ * A message received on (or sent to) an RFed channel.
+ *
+ * [id] is `sourceHashHex|timestampMs` (deterministic per sender+ts) so
+ * duplicate fanout deliveries and PULL replays are deduplicated cheaply.
+ */
+@Entity(tableName = "channel_messages")
+data class ChannelMessageEntity(
+    @PrimaryKey val id: String,
+    val channelId: String,
+    val sourceHashHex: String,
+    val title: String,
+    val content: String,
+    val timestamp: Long,
+    val isOutbound: Boolean,
+    val signatureValidated: Boolean = false,
+    /**
+     * Send state for outbound channel messages. Inbound rows always default
+     * to [SEND_STATE_SENT] (the indicator is only rendered for outbound).
+     *
+     * - 0 = SENDING (in flight; indicator suppressed in UI)
+     * - 1 = SENT    (rfed accepted the packet — single check)
+     * - 2 = FAILED  (both send attempts failed — red X)
+     */
+    val sendState: Int = SEND_STATE_SENT,
+) {
+    companion object {
+        const val SEND_STATE_SENDING = 0
+        const val SEND_STATE_SENT = 1
+        const val SEND_STATE_FAILED = 2
+    }
+}
