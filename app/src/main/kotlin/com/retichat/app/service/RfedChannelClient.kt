@@ -167,18 +167,18 @@ class RfedChannelClient(
                 msgpackBin(channelHashBytes)
             }
             runCatching {
-                RetichatBridge.linkRequest(
-                    rfedChannelDest, "rfed", "channel", identityHandle,
-                    "/rfed/unsubscribe", payload, timeoutSecs = 10.0,
+                // Single-shot via persistent rfed.channel APP_LINK — no
+                // path-poll, no retries (DESIGN_PRINCIPLES.md §1, §2).
+                ConnectionStateManager.appLinkSend(
+                    rfedChannelDest, "rfed", "channel",
+                    "/rfed/unsubscribe", payload,
                 )
             }
         }
 
-        // Per-channel push deregistration (best-effort)
+        // Per-channel push deregistration (fire-and-forget).
         if (identityHandle != 0L) {
-            runCatching {
-                RfedNotifyRegistrar.deregisterForChannel(appContext, identityHandle, channelHashBytes)
-            }
+            RfedNotifyRegistrar.deregisterForChannel(appContext, identityHandle, channelHashBytes)
         }
 
         channelDao.deleteMessagesForChannel(channelId)
@@ -199,9 +199,10 @@ class RfedChannelClient(
         val identityHandle = StackRuntime.identityHandle
         if (identityHandle == 0L) return@withContext false
         val channelHashBytes = FcmTokenRegistrar.hexToBytes(channelHashHex) ?: return@withContext false
-        runCatching {
-            RfedNotifyRegistrar.registerForChannel(appContext, identityHandle, channelHashBytes)
-        }.getOrDefault(false)
+        // Fire-and-forget — RfedNotifyRegistrar drives the actual send via
+        // the rfed.notify APP_LINK status callback (no blocking, no retry).
+        RfedNotifyRegistrar.registerForChannel(appContext, identityHandle, channelHashBytes)
+        true
     }
 
     /**
@@ -212,9 +213,8 @@ class RfedChannelClient(
         val identityHandle = StackRuntime.identityHandle
         if (identityHandle == 0L) return@withContext false
         val channelHashBytes = FcmTokenRegistrar.hexToBytes(channelHashHex) ?: return@withContext false
-        runCatching {
-            RfedNotifyRegistrar.deregisterForChannel(appContext, identityHandle, channelHashBytes)
-        }.getOrDefault(false)
+        RfedNotifyRegistrar.deregisterForChannel(appContext, identityHandle, channelHashBytes)
+        true
     }
 
     /**
@@ -230,8 +230,49 @@ class RfedChannelClient(
         if (enabledIds.isEmpty()) return@withContext
         for (id in enabledIds) {
             val channelHashBytes = FcmTokenRegistrar.hexToBytes(id) ?: continue
-            runCatching {
-                RfedNotifyRegistrar.registerForChannel(appContext, identityHandle, channelHashBytes)
+            RfedNotifyRegistrar.registerForChannel(appContext, identityHandle, channelHashBytes)
+        }
+    }
+
+    /** Has the cold-start re-subscribe fired this process lifetime? */
+    @Volatile private var didResubscribeOnActive = false
+
+    /**
+     * Install one-shot APP_LINK status handlers on every distinct
+     * rfed.channel destination implied by persisted channels.  When
+     * the link transitions to ACTIVE the handler runs
+     * [resubscribePersistedChannels] exactly once.
+     *
+     * Direct port of iOS `scheduleResubscribeOnRfedChannelActive`.
+     *
+     * // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1
+     * Calling [resubscribePersistedChannels] eagerly at boot violates §1:
+     * the inner [ConnectionStateManager.appLinkSend] would assert that
+     * rfed.channel reaches ACTIVE inside 5 s, but multi-hop link
+     * establishment routinely takes longer on cold start.  The fix is to
+     * NOT send until the link is observed ACTIVE — the §1 budget then
+     * always applies to a link that is already up.  No fail-state in code,
+     * no app-level retries.
+     */
+    suspend fun scheduleResubscribeOnRfedChannelActive() = withContext(Dispatchers.IO) {
+        val identityHandle = StackRuntime.identityHandle
+        if (identityHandle == 0L) return@withContext
+        val channels = channelDao.activeChannels()
+        if (channels.isEmpty()) return@withContext
+
+        // Distinct rfed nodes — one set of channels per node, but typically one node.
+        val nodeHexes = channels.map { it.rfedNodeIdentityHashHex }.toSet()
+        for (nodeHex in nodeHexes) {
+            val rfedChannelHex = rfedDestHash(nodeHex, "rfed", listOf("channel")) ?: continue
+            val rfedChannelDest = FcmTokenRegistrar.hexToBytes(rfedChannelHex) ?: continue
+            ConnectionStateManager.setAppLinkStatusHandler(rfedChannelDest) { status ->
+                if (status != RetichatBridge.AppLinkStatus.ACTIVE) return@setAppLinkStatusHandler
+                if (didResubscribeOnActive) return@setAppLinkStatusHandler
+                didResubscribeOnActive = true
+                scope.launch {
+                    Log.i(TAG, "rfed.channel APP_LINK ACTIVE — re-subscribing persisted channels")
+                    resubscribePersistedChannels()
+                }
             }
         }
     }
@@ -245,7 +286,9 @@ class RfedChannelClient(
      * peers will never arrive (the node either lost our subscription on
      * restart or never had it for this session).
      *
-     * Best-effort: failures are logged and swallowed.
+     * Caller MUST only invoke this when the rfed.channel APP_LINK is
+     * already ACTIVE (use [scheduleResubscribeOnRfedChannelActive] at
+     * boot).  Best-effort: failures are logged and swallowed.
      */
     suspend fun resubscribePersistedChannels() = withContext(Dispatchers.IO) {
         val identityHandle = StackRuntime.identityHandle
@@ -435,23 +478,13 @@ class RfedChannelClient(
             ?: throw IllegalStateException("identitySign returned null")
         val payload = msgpackSigned(channelHashBytes, pubkey, sig)
 
-        // Wait up to 20 s for a path to the rfed node.
-        if (!RetichatBridge.transportHasPath(rfedChannelDest)) {
-            RetichatBridge.transportRequestPath(rfedChannelDest)
-            val deadline = System.currentTimeMillis() + 20_000L
-            while (System.currentTimeMillis() < deadline) {
-                if (RetichatBridge.transportHasPath(rfedChannelDest)) break
-                Thread.sleep(500)
-            }
-            if (!RetichatBridge.transportHasPath(rfedChannelDest)) {
-                throw IllegalStateException("rfed node not reachable — no announce received")
-            }
-        }
-
-        val resp = RetichatBridge.linkRequest(
-            rfedChannelDest, "rfed", "channel", identityHandle,
-            "/rfed/subscribe", payload, timeoutSecs = 20.0,
-        ) ?: throw IllegalStateException("link request timed out or failed")
+        // Path resolution + link establishment is delegated to the
+        // persistent rfed.channel APP_LINK — no path-poll, no retry loop.
+        // // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1
+        val resp = ConnectionStateManager.appLinkSend(
+            rfedChannelDest, "rfed", "channel",
+            "/rfed/subscribe", payload,
+        ) ?: throw IllegalStateException("rfed.channel APP_LINK not ACTIVE within 5 s")
 
         parseSubscribeResponse(resp)
     }
@@ -509,11 +542,13 @@ class RfedChannelClient(
             _pullInFlight.value = _pullInFlight.value + channel.id
             try {
                 Log.i(TAG, "PULL start: channel='${channel.channelName}' rfedDest=${rfedDeliveryDest.toHex()}")
-                val resp = RetichatBridge.linkRequest(
-                    rfedDeliveryDest, "rfed", "delivery", identityHandle,
-                    "/rfed/pull", ByteArray(0), timeoutSecs = 15.0,
+                // Single-shot via persistent rfed.delivery APP_LINK.
+                // // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1
+                val resp = ConnectionStateManager.appLinkSend(
+                    rfedDeliveryDest, "rfed", "delivery",
+                    "/rfed/pull", ByteArray(0),
                 ) ?: run {
-                    Log.w(TAG, "PULL: link request failed/timed out")
+                    Log.w(TAG, "PULL: rfed.delivery APP_LINK not ACTIVE within 5 s")
                     _canPullMore.value = _canPullMore.value + (channel.id to null)
                     return@withContext 0 to false
                 }

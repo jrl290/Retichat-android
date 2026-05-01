@@ -244,16 +244,28 @@ private const val GRACE_SHUTDOWN_MS = 30_000L  // 30s grace avoids stack teardow
         runCatching { RetichatBridge.rfedDeliveryAnnounce() }
             .onFailure { Log.w(TAG, "rfedDeliveryAnnounce failed", it) }
 
+        // Hand the router to ConnectionStateManager so it can register the
+        // APP_LINK status callback, the network-change trigger, and pre-open
+        // the rfed.channel link.  MUST happen before any async work that
+        // calls ConnectionStateManager.appLinkSend (e.g. the persisted
+        // channel re-subscribe below) — otherwise routerHandle==0 and the
+        // first wave of sends fail with "APP_LINK not ACTIVE".
+        ConnectionStateManager.register(app, routerHandle)
+
         // Re-register per-channel rfed.notify subscriptions so push wakeups resume
         // after process restart (mirrors iOS resubscribePersistedChannels).
         app.applicationScope.launch(Dispatchers.IO) {
             runCatching { app.rfedChannelClient.reregisterChannelPushOnStart() }
                 .onFailure { Log.e(TAG, "reregisterChannelPushOnStart failed", it) }
-            // Re-call /rfed/subscribe for every persisted channel so the rfed
-            // node knows we're still subscribed (it may have lost our state on
-            // its own restart). Without this, peers' messages never reach us.
-            runCatching { app.rfedChannelClient.resubscribePersistedChannels() }
-                .onFailure { Log.e(TAG, "resubscribePersistedChannels failed", it) }
+            // Defer /rfed/subscribe for every persisted channel until the
+            // rfed.channel APP_LINK reaches ACTIVE — see RfedChannelClient
+            // KDoc and DESIGN_PRINCIPLES.md §1.  Calling resubscribe eagerly
+            // races the link establishment and trips the 5 s assertion on
+            // cold start; the right shape is to defer the send until the
+            // link is observed up.  No timeout, no retry, no fail-state.
+            // // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1
+            runCatching { app.rfedChannelClient.scheduleResubscribeOnRfedChannelActive() }
+                .onFailure { Log.e(TAG, "scheduleResubscribeOnRfedChannelActive failed", it) }
         }
 
         val hashHex = selfDestHash.joinToString("") { "%02x".format(it) }
@@ -262,6 +274,14 @@ private const val GRACE_SHUTDOWN_MS = 30_000L  // 30s grace avoids stack teardow
             identityHashHex = hashHex,
             interfaceCount = interfaces.size,
         )
+
+        // Register the rfed.notify wakeup relay (no-op if not configured).
+        // Driven by the rfed.notify APP_LINK status callback — single shot,
+        // no app-level retries (DESIGN_PRINCIPLES.md §2).
+        if (identityHandle != 0L) {
+            RfedNotifyRegistrar.registerIfNeeded(app, identityHandle)
+        }
+
         Log.i(TAG, "StackRuntime ready — dest=$hashHex, ${interfaces.size} interface(s)")
         return true
     }
@@ -270,6 +290,8 @@ private const val GRACE_SHUTDOWN_MS = 30_000L  // 30s grace avoids stack teardow
         Log.i(TAG, "Shutting down stack (refCount=0)")
         isReady = false
         readyDeferred = null
+
+        ConnectionStateManager.unregister()
 
         app.repository.configure(ByteArray(0), 0L, 0L)
 

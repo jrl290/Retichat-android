@@ -36,6 +36,28 @@ interface RfedBlobCallback {
 }
 
 /**
+ * Callback interface for APP_LINK status transitions. Fires on a Rust
+ * background thread already attached to the JVM — marshal to a coroutine
+ * scope inside `onStatus` if you need to touch UI state.
+ *
+ * `status` is one of [RetichatBridge.AppLinkStatus] constants.
+ */
+interface AppLinkStatusCallback {
+    fun onStatus(destHash: ByteArray, status: Int)
+}
+
+/**
+ * One-shot callback for [RetichatBridge.appLinkRequestAsync].  Fires
+ * exactly once: on response, failure, or timeout.
+ *
+ * `status`: see [RetichatBridge.AppLinkRequestStatus] (0=ok, 1=timeout,
+ * 2=failed). `bytes` is non-null only when `status == 0`.
+ */
+interface AppLinkRequestCallback {
+    fun onResult(status: Int, bytes: ByteArray?)
+}
+
+/**
  * JNI bridge to the Rust Reticulum + LXMF libraries.
  *
  * All `native*` methods map 1:1 to C-exported JNI functions in
@@ -363,6 +385,12 @@ object RetichatBridge {
      *
      * Returns response bytes, or null on error (call [lastError]).
      */
+    @Deprecated(
+        "Use ConnectionStateManager.appLinkSend (persistent APP_LINK). " +
+            "One-shot link-request violates DESIGN_PRINCIPLES.md §3 (no timeout tuning) " +
+            "because every call pays full path+link setup cost.",
+        ReplaceWith("ConnectionStateManager.appLinkSend(destHash, path, payload)"),
+    )
     fun linkRequest(
         destHash: ByteArray,
         appName: String,
@@ -382,6 +410,115 @@ object RetichatBridge {
         destHash: ByteArray, appName: String, aspects: String,
         identityHandle: Long, path: String, payload: ByteArray, timeoutSecs: Double
     ): ByteArray?
+
+    // -------------------------------------------------------------------
+    // APP_LINK — persistent, push-driven destination links
+    //
+    // Direct port of the iOS APP_LINK FFI (see
+    // Retichat-ios/Frameworks/RetichatFFI.xcframework/.../CRetichatFFI.h
+    // `lxmf_app_link_*` and Retichat-ios/Retichat/Services/LxmfClient.swift).
+    // Higher-level orchestration (open-on-demand, status fan-out,
+    // request-suspends-until-ACTIVE) lives in ConnectionStateManager.
+    // -------------------------------------------------------------------
+
+    /** APP_LINK lifecycle states — mirror of `lxmf_rust::ffi::AppLinkStatus`. */
+    object AppLinkStatus {
+        const val NONE           = 0
+        const val PATH_REQUESTED = 1
+        const val ESTABLISHING   = 2
+        const val ACTIVE         = 3
+        const val DISCONNECTED   = 4
+    }
+
+    /** Result codes for [appLinkRequestAsync] callbacks. */
+    object AppLinkRequestStatus {
+        const val RESPONSE = 0
+        const val TIMEOUT  = 1
+        const val FAILED   = 2
+    }
+
+    /**
+     * Open (or reuse) an APP_LINK to `destHash` under the given `appName`
+     * and dotted `aspects` (e.g. `"channel"`, `"notify"`, `"delivery"`).
+     * Idempotent — calling for an already-open link is a no-op.
+     *
+     * Status transitions are reported via the registered
+     * [AppLinkStatusCallback]. Returns `true` on success.
+     */
+    fun appLinkOpen(
+        routerHandle: Long,
+        destHash: ByteArray,
+        appName: String,
+        aspectsCsv: String,
+    ): Boolean = nativeAppLinkOpen(routerHandle, destHash, appName, aspectsCsv) == 0
+
+    /** Tear down the APP_LINK to `destHash`. Idempotent. */
+    fun appLinkClose(routerHandle: Long, destHash: ByteArray): Boolean =
+        nativeAppLinkClose(routerHandle, destHash) == 0
+
+    /** Current [AppLinkStatus] for `destHash`, or -1 on parameter error. */
+    fun appLinkStatus(routerHandle: Long, destHash: ByteArray): Int =
+        nativeAppLinkStatus(routerHandle, destHash)
+
+    /**
+     * Register a non-LXMF aspect (e.g. `"rfed.channel"`) for auto-reconnect
+     * on incoming announces. Call once per aspect at startup.
+     */
+    fun appLinkRegisterReconnect(routerHandle: Long, aspect: String): Boolean =
+        nativeAppLinkRegisterReconnect(routerHandle, aspect) == 0
+
+    /**
+     * Notify the LXMF router that the local network came back online —
+     * triggers exactly ONE fresh attempt for every registered app-link
+     * not currently ACTIVE/ESTABLISHING.  Wire to NetworkMonitor.
+     * (DESIGN_PRINCIPLES.md §3 — no timer-driven retries.)
+     */
+    fun appLinkNetworkChanged(routerHandle: Long): Boolean =
+        nativeAppLinkNetworkChanged(routerHandle) == 0
+
+    /**
+     * Register a process-wide [AppLinkStatusCallback]. Last register wins.
+     * Should be called once during stack initialization (StackRuntime
+     * → ConnectionStateManager.register).
+     */
+    fun appLinkRegisterStatusCallback(routerHandle: Long, cb: AppLinkStatusCallback): Boolean =
+        nativeAppLinkRegisterStatusCallback(routerHandle, cb) == 0
+
+    /**
+     * Send a request on the existing APP_LINK to `destHash` (which must
+     * already be ACTIVE) and fire `cb.onResult` exactly once when the
+     * response arrives, the request fails, or `timeoutSecs` elapses.
+     *
+     * Returns `true` if the request was queued (callback will fire);
+     * `false` on immediate error (callback will NOT fire — check
+     * [lastError]). The caller must NOT retry on failure
+     * (DESIGN_PRINCIPLES.md §2). Use the status callback instead.
+     */
+    fun appLinkRequestAsync(
+        routerHandle: Long,
+        destHash: ByteArray,
+        path: String,
+        payload: ByteArray,
+        timeoutSecs: Double,
+        cb: AppLinkRequestCallback,
+    ): Boolean = nativeAppLinkRequestAsync(
+        routerHandle, destHash, path, payload, timeoutSecs, cb
+    ) == 0
+
+    private external fun nativeAppLinkOpen(
+        router: Long, destHash: ByteArray, appName: String, aspectsCsv: String
+    ): Int
+    private external fun nativeAppLinkClose(router: Long, destHash: ByteArray): Int
+    private external fun nativeAppLinkStatus(router: Long, destHash: ByteArray): Int
+    private external fun nativeAppLinkRegisterReconnect(router: Long, aspect: String): Int
+    private external fun nativeAppLinkNetworkChanged(router: Long): Int
+    private external fun nativeAppLinkRegisterStatusCallback(
+        router: Long, callback: AppLinkStatusCallback
+    ): Int
+    private external fun nativeAppLinkRequestAsync(
+        router: Long, destHash: ByteArray, path: String, payload: ByteArray,
+        timeoutSecs: Double, callback: AppLinkRequestCallback
+    ): Int
 
     // -------------------------------------------------------------------
     // RFed Delivery — inbound channel blob endpoint

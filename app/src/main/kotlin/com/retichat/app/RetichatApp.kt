@@ -8,6 +8,7 @@ import com.retichat.app.bridge.RetichatBridge
 import com.retichat.app.data.db.RetichatDatabase
 import com.retichat.app.data.repository.ChatRepository
 import com.retichat.app.service.MessageNotificationHelper
+import com.retichat.app.service.ConnectionStateManager
 import com.retichat.app.service.NetworkMonitor
 import com.retichat.app.service.PropagationSync
 import com.retichat.app.service.RfedChannelClient
@@ -96,6 +97,9 @@ class RetichatApp : Application() {
                     RetichatBridge.setKeepaliveInterval(0.0)
                     Log.d(TAG, "App foreground — keepalive=default")
                     startForegroundPropagationPolling()
+                    // Re-open active conversation links + rfed.channel link.
+                    ConnectionStateManager.onAppForeground()
+                    ConnectionStateManager.openRfedNodeLink()
                 }
             }
             override fun onActivityStopped(a: Activity) {
@@ -106,6 +110,9 @@ class RetichatApp : Application() {
                     RetichatBridge.setKeepaliveInterval(300.0)
                     Log.d(TAG, "App background — keepalive=300s")
                     stopForegroundPropagationPolling()
+                    // Drop the rfed.channel link to save battery; auto-reconnects
+                    // on next announce after foreground.
+                    ConnectionStateManager.closeRfedNodeLink()
                 }
             }
             override fun onActivityCreated(a: Activity, b: Bundle?) {}

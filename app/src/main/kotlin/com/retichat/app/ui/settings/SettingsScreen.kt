@@ -1,9 +1,11 @@
 package com.retichat.app.ui.settings
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
@@ -16,6 +18,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -23,7 +26,9 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.retichat.app.ServiceState
+import com.retichat.app.bridge.RetichatBridge
 import com.retichat.app.data.db.entity.InterfaceConfigEntity
+import com.retichat.app.service.ConnectionStateManager
 import com.retichat.app.service.DefaultEndpointManager
 import com.retichat.app.service.UserPreferences
 import org.json.JSONObject
@@ -765,10 +770,16 @@ private fun RfedConfigCard() {
         ),
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Text(
-                "RFed Node",
-                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "RFed Node",
+                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                )
+                Spacer(Modifier.width(8.dp))
+                AppLinkStatusDot(
+                    status = ConnectionStateManager.rfedNodeLinkStatusFlow.collectAsState().value,
+                )
+            }
             Spacer(Modifier.height(12.dp))
 
             Text(
@@ -842,6 +853,33 @@ private fun RfedConfigCard() {
 }
 
 // ---- Helpers ----
+
+/**
+ * Status dot for an APP_LINK destination.  Color semantics follow
+ * `/memories/ui-conventions.md`:
+ *   * Grey   \u2014 NONE                                 (idle / not yet attempted)
+ *   * Yellow \u2014 PATH_REQUESTED, ESTABLISHING         (in progress)
+ *   * Green  \u2014 ACTIVE                               (connected)
+ *   * Red    \u2014 DISCONNECTED                         (attempt made, failed)
+ *
+ * NEVER use Red for "unknown" / "not yet tried" \u2014 that is Grey.
+ * NEVER use Green until the success condition is actually verified.
+ */
+@Composable
+private fun AppLinkStatusDot(status: Int) {
+    val color = when (status) {
+        RetichatBridge.AppLinkStatus.ACTIVE -> Color(0xFF34C759)          // Green
+        RetichatBridge.AppLinkStatus.PATH_REQUESTED,
+        RetichatBridge.AppLinkStatus.ESTABLISHING -> Color(0xFFFFCC00)     // Yellow
+        RetichatBridge.AppLinkStatus.DISCONNECTED -> Color(0xFFFF3B30)     // Red
+        else -> Color(0xFF8E8E93)                                          // Grey (NONE)
+    }
+    Box(
+        modifier = Modifier
+            .size(10.dp)
+            .background(color = color, shape = CircleShape),
+    )
+}
 
 private fun buildSummary(iface: InterfaceConfigEntity): String {
     val json = try { JSONObject(iface.configJson) } catch (_: Exception) { return "" }

@@ -3,119 +3,149 @@ package com.retichat.app.service
 import android.content.Context
 import android.util.Log
 import com.retichat.app.bridge.RetichatBridge
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 /**
- * Registers this device's FCM "wakeup" relay with rfed via a Link request
- * to `/rfed/notify/register`. Mirrors iOS [RfedNotifyRegistrar].
+ * Registers this device's FCM "wakeup" relay with rfed via a request to
+ * `/rfed/notify/register` over the persistent `rfed.notify` APP_LINK.
+ *
+ * Direct port of `Retichat-ios/Retichat/Services/RfedNotifyRegistrar.swift`.
  *
  * The `relayHex` we send is the rfed-fcm bridge's own rfed.notify
- * destination hash (32 hex chars). The rfed node uses it as the routing
- * target for the wakeup message that ultimately translates into an FCM
- * data message arriving on this device.
+ * destination hash (32 hex chars).
  *
  * Payload signed-array layout (matches iOS verbatim):
  *   value = msgpack fixarray-2 [str(relay_hex), bin(16 channel_hash) | nil]
  *   wire  = msgpack fixarray-3 [bin(value), bin(64) pubkey, bin(64) sig]
- * where sig = Ed25519(value).
+ *
+ * Driven by the rfed.notify APP_LINK status callback so we only fire once
+ * the persistent link is ACTIVE — never on a 5 s cold-start timeout, and
+ * never with app-level retries.  See DESIGN_PRINCIPLES.md §1, §2, §3.
  */
 object RfedNotifyRegistrar {
 
     private const val TAG = "RfedNotify"
-    private const val MAX_ATTEMPTS = 8
-    private const val BASE_DELAY_MS = 5_000L
-    private const val MAX_DELAY_MS = 120_000L
 
-    /** Register the LXMF wakeup (no per-channel scope). */
-    suspend fun registerIfNeeded(context: Context, identityHandle: Long): Boolean {
-        return doRegister(context, identityHandle, channelHash = null, unregister = false)
+    /** Has the cold-start LXMF wakeup register fired this process lifetime? */
+    @Volatile private var didRegisterOnActive = false
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * Register the LXMF wakeup once the rfed.notify APP_LINK reaches ACTIVE.
+     * Idempotent — additional calls within one process lifetime are no-ops.
+     */
+    fun registerIfNeeded(context: Context, identityHandle: Long) {
+        val rfedHash = rfedNotifyDestHash(context) ?: return
+        val relayHex = relayHexOrNull(context) ?: run {
+            Log.i(TAG, "No relay hex configured — skipping register")
+            return
+        }
+        val payload = buildSignedPayload(identityHandle, relayHex, channelHash = null) ?: run {
+            Log.w(TAG, "Failed to sign payload")
+            return
+        }
+        scope.launch {
+            ConnectionStateManager.setAppLinkStatusHandler(rfedHash) { status ->
+                if (status != RetichatBridge.AppLinkStatus.ACTIVE) return@setAppLinkStatusHandler
+                if (didRegisterOnActive) return@setAppLinkStatusHandler
+                didRegisterOnActive = true
+                scope.launch {
+                    sendOnce(rfedHash, payload, "register")
+                }
+            }
+            // Kick the link open if it is not already.  Idempotent.
+            ConnectionStateManager.appLinkSend(
+                rfedHash, "rfed", "notify",
+                "/rfed/notify/register", payload,
+            ).also { resp ->
+                if (resp != null) {
+                    didRegisterOnActive = true
+                    logSendResult("register", resp)
+                }
+            }
+        }
     }
 
-    /** Register a per-channel wakeup so the rfed node pings on activity in [channelHash]. */
-    suspend fun registerForChannel(
-        context: Context,
-        identityHandle: Long,
-        channelHash: ByteArray,
-    ): Boolean = doRegister(context, identityHandle, channelHash, unregister = false)
+    /** Per-channel registration — best-effort single attempt. */
+    fun registerForChannel(context: Context, identityHandle: Long, channelHash: ByteArray) {
+        val rfedHash = rfedNotifyDestHash(context) ?: return
+        val relayHex = relayHexOrNull(context) ?: return
+        val payload = buildSignedPayload(identityHandle, relayHex, channelHash) ?: return
+        scope.launch {
+            val resp = ConnectionStateManager.appLinkSend(
+                rfedHash, "rfed", "notify",
+                "/rfed/notify/register", payload,
+            )
+            logSendResult("channel-register", resp)
+        }
+    }
 
-    /** Unregister a per-channel wakeup (best-effort, single attempt, no retry). */
-    suspend fun deregisterForChannel(
-        context: Context,
-        identityHandle: Long,
-        channelHash: ByteArray,
-    ): Boolean = doRegister(context, identityHandle, channelHash, unregister = true)
+    /** Per-channel deregistration — best-effort single attempt. */
+    fun deregisterForChannel(context: Context, identityHandle: Long, channelHash: ByteArray) {
+        val rfedHash = rfedNotifyDestHash(context) ?: return
+        val relayHex = relayHexOrNull(context) ?: return
+        val payload = buildSignedPayload(identityHandle, relayHex, channelHash) ?: return
+        scope.launch {
+            val resp = ConnectionStateManager.appLinkSend(
+                rfedHash, "rfed", "notify",
+                "/rfed/notify/unregister", payload,
+            )
+            logSendResult("channel-unregister", resp)
+        }
+    }
 
-    /** Best-effort unregister from an old rfed node before switching. */
-    suspend fun deregisterFrom(
-        context: Context,
-        identityHandle: Long,
-        oldRfedNotifyHashHex: String,
-    ): Boolean {
-        val rfedHash = FcmTokenRegistrar.hexToBytes(oldRfedNotifyHashHex) ?: return false
-        val relayHex = relayHexOrNull(context) ?: return false
-        val payload = buildSignedPayload(identityHandle, relayHex, channelHash = null) ?: return false
-        if (!RetichatBridge.transportHasPath(rfedHash)) return false
-        val resp = RetichatBridge.linkRequest(
-            rfedHash, "rfed", "notify", identityHandle,
-            "/rfed/notify/unregister", payload, timeoutSecs = 5.0,
-        )
-        Log.i(TAG, "Sent unregister to old rfed node (resp=${resp != null})")
-        return resp != null
+    /** Best-effort unregister from an old rfed node before switching nodes. */
+    fun deregisterFrom(context: Context, identityHandle: Long, oldRfedNotifyHashHex: String) {
+        if (oldRfedNotifyHashHex.isEmpty()) return
+        val rfedHash = FcmTokenRegistrar.hexToBytes(oldRfedNotifyHashHex) ?: return
+        val relayHex = relayHexOrNull(context) ?: return
+        val payload = buildSignedPayload(identityHandle, relayHex, channelHash = null) ?: return
+        scope.launch {
+            val resp = ConnectionStateManager.appLinkSend(
+                rfedHash, "rfed", "notify",
+                "/rfed/notify/unregister", payload,
+            )
+            logSendResult("unregister-old", resp)
+        }
     }
 
     // ---- Internal ----
 
-    private suspend fun doRegister(
-        context: Context,
-        identityHandle: Long,
-        channelHash: ByteArray?,
-        unregister: Boolean,
-    ): Boolean {
-        val rfedNotifyHex = FcmTokenRegistrar.rnsDestHash(
-            UserPreferences.getRfedNodeIdentityHash(context), "rfed", listOf("notify"),
-        ) ?: return false
-        val rfedHash = FcmTokenRegistrar.hexToBytes(rfedNotifyHex) ?: return false
-        val relayHex = relayHexOrNull(context) ?: return false
-        val payload = buildSignedPayload(identityHandle, relayHex, channelHash) ?: return false
-        val path = if (unregister) "/rfed/notify/unregister" else "/rfed/notify/register"
-
-        var delayMs = BASE_DELAY_MS
-        for (attempt in 1..MAX_ATTEMPTS) {
-            if (!RetichatBridge.transportHasPath(rfedHash)) {
-                RetichatBridge.transportRequestPath(rfedHash)
-                Log.d(TAG, "Waiting for path (attempt $attempt)")
-                delay(delayMs)
-                delayMs = (delayMs * 2).coerceAtMost(MAX_DELAY_MS)
-                continue
-            }
-            val resp = RetichatBridge.linkRequest(
-                rfedHash, "rfed", "notify", identityHandle, path, payload, timeoutSecs = 15.0,
-            )
-            if (resp != null) {
-                val ok = resp.size == 1 && resp[0] == 0xc3.toByte()
-                if (ok) {
-                    Log.i(TAG, "$path OK (attempt $attempt)")
-                    return true
-                }
-                Log.w(TAG, "$path returned non-true (attempt $attempt)")
-            } else {
-                Log.w(TAG, "$path link request failed: ${RetichatBridge.lastError()}")
-                RetichatBridge.transportRequestPath(rfedHash)
-            }
-            delay(delayMs)
-            delayMs = (delayMs * 2).coerceAtMost(MAX_DELAY_MS)
-        }
-        Log.w(TAG, "Giving up after $MAX_ATTEMPTS attempts")
-        return false
+    /// Single-attempt registration via the persistent rfed.notify APP_LINK.
+    /// Per DESIGN_PRINCIPLES.md §1-§2: one shot with a 5 s budget. The link
+    /// is managed by Rust (auto-reconnect on announce, etc.). If it does not
+    /// reach ACTIVE within 5 s, the operation has failed — no retries.
+    /// // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1
+    private suspend fun sendOnce(rfedHash: ByteArray, payload: ByteArray, kind: String) {
+        val resp = ConnectionStateManager.appLinkSend(
+            rfedHash, "rfed", "notify",
+            "/rfed/notify/register", payload,
+        )
+        logSendResult(kind, resp)
     }
 
-    /**
-     * The relay hash is the rfed-fcm bridge's own rfed.notify destination
-     * hash. We derive it from the same RFed node identity as everything
-     * else — `relay = sha256("rfed.notify"[..10] | rfedNodeIdentity)[..16]`.
-     * In the iOS build this comes from `PushBridgeConfig.plist`; here we
-     * just compute it deterministically from the configured RFed node.
-     */
+    private fun logSendResult(kind: String, resp: ByteArray?) {
+        if (resp == null) {
+            Log.w(TAG, "$kind: APP_LINK not ACTIVE within 5 s — skipping")
+            return
+        }
+        val ok = resp.size == 1 && resp[0] == 0xc3.toByte()
+        if (ok) Log.i(TAG, "$kind: rfed returned true")
+        else Log.w(TAG, "$kind: rfed returned non-true")
+    }
+
+    private fun rfedNotifyDestHash(context: Context): ByteArray? {
+        val identityHex = UserPreferences.getRfedNodeIdentityHash(context)
+        if (identityHex.isEmpty()) return null
+        val rfedNotifyHex = FcmTokenRegistrar.rnsDestHash(identityHex, "rfed", listOf("notify"))
+            ?: return null
+        return FcmTokenRegistrar.hexToBytes(rfedNotifyHex)
+    }
+
     private fun relayHexOrNull(context: Context): String? {
         val rfedNodeHex = UserPreferences.getRfedNodeIdentityHash(context)
         if (rfedNodeHex.length != 32) return null
@@ -134,7 +164,6 @@ object RfedNotifyRegistrar {
     ): ByteArray? {
         val value = ArrayList<Byte>(80)
         value.add(0x92.toByte())                     // fixarray-2
-        // str(relayHex)
         val relayBytes = relayHex.toByteArray()
         when {
             relayBytes.size <= 31 -> value.add((0xa0 or relayBytes.size).toByte())
@@ -166,7 +195,6 @@ object RfedNotifyRegistrar {
         val out = ArrayList<Byte>(3 + 2 * 3 + a.size + b.size + c.size)
         out.add(0x93.toByte())
         for (item in listOf(a, b, c)) {
-            // bin8 if fits; bin16 otherwise
             if (item.size <= 0xff) {
                 out.add(0xc4.toByte()); out.add(item.size.toByte())
             } else {
@@ -179,3 +207,4 @@ object RfedNotifyRegistrar {
         return out.toByteArray()
     }
 }
+

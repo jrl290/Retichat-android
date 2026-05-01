@@ -105,6 +105,11 @@ fn vec_to_jbytes(env: &JNIEnv, data: &[u8]) -> jbyteArray {
 static DELIVERY_CB: Mutex<Option<(JavaVM, GlobalRef)>> = Mutex::new(None);
 static ANNOUNCE_CB: Mutex<Option<(JavaVM, GlobalRef)>> = Mutex::new(None);
 
+/// Process-wide APP_LINK status callback (mirrors iOS
+/// `lxmf_app_link_register_status_callback`).  Only one callback is
+/// supported on the Kotlin side; replacing it overwrites the prior ref.
+static APP_LINK_STATUS_CB: Mutex<Option<(JavaVM, GlobalRef)>> = Mutex::new(None);
+
 // ---------------------------------------------------------------------------
 // JNI entry points
 // ---------------------------------------------------------------------------
@@ -1462,4 +1467,332 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeChannel
     };
     let hash = dest.hash.to_vec();
     vec_to_jbytes(&env, &hash)
+}
+
+// ---------------------------------------------------------------------------
+// APP_LINK — persistent push-driven links
+//
+// Direct port of the iOS APP_LINK FFI surface (see
+// Retichat-ios/Frameworks/RetichatFFI.xcframework/.../CRetichatFFI.h
+// `lxmf_app_link_*` and Retichat-ios/Retichat/Services/LxmfClient.swift
+// AppLink section).  All retries / readiness-waits are owned by the
+// caller via the status callback — no polling, no app-level retries
+// (DESIGN_PRINCIPLES.md §2, §3).
+// ---------------------------------------------------------------------------
+
+/// `RetichatBridge.nativeAppLinkOpen(router, destHash, app, aspectsCsv): Int`
+///
+/// `aspectsCsv` is `.`-separated (e.g. "delivery", "channel"); pass an
+/// empty string for no aspects.
+#[no_mangle]
+pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeAppLinkOpen(
+    mut env: JNIEnv,
+    _class: JClass,
+    router: jlong,
+    dest_hash: JByteArray,
+    app_name: JString,
+    aspects_csv: JString,
+) -> jint {
+    let hash = jbytes_to_vec(&env, &dest_hash);
+    let app = jstring_to_string(&mut env, &app_name);
+    let asp_str = jstring_to_string(&mut env, &aspects_csv);
+    let asp_owned: Vec<String> = if asp_str.is_empty() {
+        Vec::new()
+    } else {
+        asp_str.split('.').map(|s| s.to_string()).collect()
+    };
+    let asp_refs: Vec<&str> = asp_owned.iter().map(|s| s.as_str()).collect();
+    ok_or_neg(lxmf::router_app_link_open(router as u64, &hash, &app, &asp_refs))
+}
+
+/// `RetichatBridge.nativeAppLinkClose(router, destHash): Int`
+#[no_mangle]
+pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeAppLinkClose(
+    env: JNIEnv,
+    _class: JClass,
+    router: jlong,
+    dest_hash: JByteArray,
+) -> jint {
+    let hash = jbytes_to_vec(&env, &dest_hash);
+    ok_or_neg(lxmf::router_app_link_close(router as u64, &hash))
+}
+
+/// `RetichatBridge.nativeAppLinkStatus(router, destHash): Int`
+///
+/// Returns 0..4 (NONE, PATH_REQUESTED, ESTABLISHING, ACTIVE, DISCONNECTED)
+/// or -1 on parameter error.
+#[no_mangle]
+pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeAppLinkStatus(
+    env: JNIEnv,
+    _class: JClass,
+    router: jlong,
+    dest_hash: JByteArray,
+) -> jint {
+    let hash = jbytes_to_vec(&env, &dest_hash);
+    match lxmf::router_app_link_status(router as u64, &hash) {
+        Ok(s) => s as jint,
+        Err(e) => {
+            rns::set_error(e);
+            -1
+        }
+    }
+}
+
+/// `RetichatBridge.nativeAppLinkRegisterReconnect(router, aspect): Int`
+///
+/// LXMF only auto-reconnects app-links that announce under `lxmf.delivery`.
+/// Call once per extra aspect (e.g. "rfed.channel", "rfed.notify",
+/// "rfed.delivery") at startup.
+#[no_mangle]
+pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeAppLinkRegisterReconnect(
+    mut env: JNIEnv,
+    _class: JClass,
+    router: jlong,
+    aspect: JString,
+) -> jint {
+    let asp = jstring_to_string(&mut env, &aspect);
+    ok_or_neg(lxmf::router_register_app_link_reconnect_handler(
+        router as u64,
+        &asp,
+    ))
+}
+
+/// `RetichatBridge.nativeAppLinkNetworkChanged(router): Int`
+///
+/// Triggers ONE fresh attempt for every registered app-link not
+/// currently ACTIVE/ESTABLISHING.  Wire this to NetworkMonitor's
+/// onAvailable callback — it is the only thing that retries an offline
+/// destination (DESIGN_PRINCIPLES.md §1, §3).
+#[no_mangle]
+pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeAppLinkNetworkChanged(
+    _env: JNIEnv,
+    _class: JClass,
+    router: jlong,
+) -> jint {
+    ok_or_neg(lxmf::router_app_link_network_changed(router as u64))
+}
+
+/// `RetichatBridge.nativeAppLinkRegisterStatusCallback(router, cb): Int`
+///
+/// `cb` is a Kotlin `AppLinkStatusCallback`:
+/// ```kotlin
+/// interface AppLinkStatusCallback { fun onStatus(destHash: ByteArray, status: Int) }
+/// ```
+/// Replaces any previously registered callback (last register wins on
+/// the Kotlin side; the underlying Rust registry can hold multiple, but
+/// we only need one process-wide fan-out).
+#[no_mangle]
+pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeAppLinkRegisterStatusCallback(
+    env: JNIEnv,
+    _class: JClass,
+    router: jlong,
+    callback: JObject,
+) -> jint {
+    let jvm = match env.get_java_vm() {
+        Ok(vm) => vm,
+        Err(e) => {
+            rns::set_error(format!("Failed to get JavaVM: {}", e));
+            return -1;
+        }
+    };
+    let global_ref = match env.new_global_ref(&callback) {
+        Ok(r) => r,
+        Err(e) => {
+            rns::set_error(format!("Failed to create global ref: {}", e));
+            return -1;
+        }
+    };
+    *APP_LINK_STATUS_CB.lock().unwrap() = Some((jvm, global_ref));
+
+    let result = lxmf::router_register_app_link_status_callback(
+        router as u64,
+        Arc::new(
+            |dest_hash: &[u8], status: u8, _link: Option<reticulum_rust::link::LinkHandle>| {
+                let guard = APP_LINK_STATUS_CB.lock().unwrap();
+                let (jvm, cb_ref) = match guard.as_ref() {
+                    Some(pair) => pair,
+                    None => return,
+                };
+                let mut env = match jvm.attach_current_thread() {
+                    Ok(env) => env,
+                    Err(_) => return,
+                };
+                let j_hash = match env.byte_array_from_slice(dest_hash) {
+                    Ok(h) => h,
+                    Err(_) => return,
+                };
+                let _ = env.call_method(
+                    cb_ref.as_obj(),
+                    "onStatus",
+                    "([BI)V",
+                    &[JValue::Object(&j_hash), JValue::Int(status as jint)],
+                );
+            },
+        ),
+    );
+    ok_or_neg(result)
+}
+
+/// `RetichatBridge.nativeAppLinkRequestAsync(router, destHash, path,
+///   payload, timeoutSecs, callback): Int`
+///
+/// Non-blocking variant.  Issues a request on the existing app-link
+/// (which must have been opened with `nativeAppLinkOpen` and have
+/// reached ACTIVE).  Fires `callback.onResult(status, bytes)` exactly
+/// once when the response arrives, the request fails, or the timeout
+/// elapses.
+///
+/// `status`: 0 = response (bytes set), 1 = timeout, 2 = failed,
+///           3 = error (callback will NOT fire — check lastError).
+///
+/// Mirrors `lxmf_app_link_request_async` in LXMF-rust/src/cffi.rs and
+/// the iOS Swift trampoline in LxmfClient.swift.
+#[no_mangle]
+pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeAppLinkRequestAsync(
+    mut env: JNIEnv,
+    _class: JClass,
+    router: jlong,
+    dest_hash: JByteArray,
+    path: JString,
+    payload: JByteArray,
+    timeout_secs: jni::sys::jdouble,
+    callback: JObject,
+) -> jint {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    let hash = jbytes_to_vec(&env, &dest_hash);
+    let path_str = jstring_to_string(&mut env, &path);
+    let data = jbytes_to_vec(&env, &payload);
+
+    // Snapshot the link handle for this destination (must already be ACTIVE).
+    let link_handle = match lxmf::router_app_link_get_handle(router as u64, &hash) {
+        Ok(Some(h)) => h,
+        Ok(None) => {
+            rns::set_error(
+                "no app-link to destination — call nativeAppLinkOpen first".to_string(),
+            );
+            return -1;
+        }
+        Err(e) => {
+            rns::set_error(e);
+            return -1;
+        }
+    };
+    if link_handle.status() != reticulum_rust::link::STATE_ACTIVE {
+        rns::set_error(format!(
+            "app-link not active (status={}) — wait for ACTIVE before requesting",
+            link_handle.status()
+        ));
+        return -1;
+    }
+
+    // Per-call JavaVM + GlobalRef so multiple in-flight requests don't
+    // clobber each other.  The single-fire latch ensures we drop the
+    // global ref exactly once even if response/failed/timeout race.
+    let jvm = match env.get_java_vm() {
+        Ok(vm) => vm,
+        Err(e) => {
+            rns::set_error(format!("Failed to get JavaVM: {}", e));
+            return -1;
+        }
+    };
+    let global_ref = match env.new_global_ref(&callback) {
+        Ok(r) => r,
+        Err(e) => {
+            rns::set_error(format!("Failed to create global ref: {}", e));
+            return -1;
+        }
+    };
+
+    // Wrap (jvm, ref) in Arc<Mutex<Option<...>>> so each terminal callback
+    // can take() it: whichever runs first invokes onResult and drops the
+    // ref; later callers see None and no-op.  This avoids leaking the
+    // GlobalRef when response/failed/timeout race.
+    let cb_state: Arc<Mutex<Option<(JavaVM, GlobalRef)>>> =
+        Arc::new(Mutex::new(Some((jvm, global_ref))));
+    let fired = Arc::new(AtomicBool::new(false));
+
+    fn fire(state: &Arc<Mutex<Option<(JavaVM, GlobalRef)>>>, status: i32, bytes: Option<&[u8]>) {
+        let taken = state.lock().unwrap().take();
+        let (jvm, cb_ref) = match taken {
+            Some(pair) => pair,
+            None => return,
+        };
+        let mut env = match jvm.attach_current_thread() {
+            Ok(env) => env,
+            Err(_) => return,
+        };
+        let j_bytes = match bytes {
+            Some(b) => match env.byte_array_from_slice(b) {
+                Ok(arr) => JObject::from(arr),
+                Err(_) => JObject::null(),
+            },
+            None => JObject::null(),
+        };
+        let _ = env.call_method(
+            cb_ref.as_obj(),
+            "onResult",
+            "(I[B)V",
+            &[JValue::Int(status), JValue::Object(&j_bytes)],
+        );
+    }
+
+    let state_ok = cb_state.clone();
+    let fired_ok = fired.clone();
+    let response_cb: Arc<dyn Fn(reticulum_rust::link::RequestReceipt) + Send + Sync> =
+        Arc::new(move |receipt: reticulum_rust::link::RequestReceipt| {
+            if fired_ok.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            match receipt.response {
+                Some(ref data) => fire(&state_ok, 0, Some(data)),
+                None => fire(&state_ok, 2, None),
+            }
+        });
+
+    let state_fail = cb_state.clone();
+    let fired_fail = fired.clone();
+    let failed_cb: Arc<dyn Fn(reticulum_rust::link::RequestReceipt) + Send + Sync> =
+        Arc::new(move |_receipt| {
+            if fired_fail.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            fire(&state_fail, 2, None);
+        });
+
+    // Off-load the synchronous link.request() onto a worker thread to
+    // avoid priority inversion on a cooperative caller (mirrors the
+    // pattern in LXMF-rust/src/cffi.rs::lxmf_app_link_request_async).
+    // // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1
+    let state_send_err = cb_state.clone();
+    let fired_send_err = fired.clone();
+    let link_for_send = link_handle.clone();
+    std::thread::spawn(move || {
+        if let Err(e) = link_for_send.request(
+            path_str,
+            data,
+            Some(response_cb),
+            Some(failed_cb),
+            None,
+        ) {
+            if !fired_send_err.swap(true, Ordering::SeqCst) {
+                fire(&state_send_err, 2, None);
+            }
+            rns::set_error(format!("link.request failed: {:?}", e));
+        }
+    });
+
+    // Detached timeout watcher.
+    let state_to = cb_state.clone();
+    let fired_to = fired.clone();
+    let to_secs = timeout_secs.max(0.0);
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs_f64(to_secs));
+        if !fired_to.swap(true, Ordering::SeqCst) {
+            fire(&state_to, 1, None);
+        }
+    });
+
+    0
 }
