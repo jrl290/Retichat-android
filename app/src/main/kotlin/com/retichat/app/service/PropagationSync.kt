@@ -70,12 +70,22 @@ object PropagationSync {
     /**
      * Resolve the user-configured propagation node hash. RFed-derived
      * `rfedLxmfPropOverride` takes precedence over the manually-entered
-     * `lxmfPropagationHash`. Returns `null` if neither is set.
+     * `lxmfPropagationHash`; if neither is set we derive `lxmf.propagation`
+     * directly from the configured RFed node identity (mirrors the RFed
+     * config blob's `destinations.lxmf.propagation` value).
+     * Returns `null` only if no RFed identity is configured either.
      */
     fun resolvePropagationOverride(context: Context): String? {
         val rfedOverride = UserPreferences.getRfedLxmfPropOverride(context)
         if (rfedOverride.isNotEmpty()) return rfedOverride
         val manual = UserPreferences.getLxmfPropagationHash(context)
-        return manual.ifEmpty { null }
+        if (manual.isNotEmpty()) return manual
+        val rfedId = UserPreferences.getRfedNodeIdentityHash(context)
+        if (rfedId.length == 32) {
+            FcmTokenRegistrar.rnsDestHash(rfedId, "lxmf", listOf("propagation"))
+                ?.takeIf { it.isNotEmpty() }
+                ?.let { return it }
+        }
+        return null
     }
 }

@@ -12,9 +12,11 @@ import com.retichat.app.data.db.entity.ChatEntity
 import com.retichat.app.data.db.entity.GroupMemberEntity
 import com.retichat.app.data.db.entity.MessageEntity
 import com.retichat.app.data.repository.ChatRepository
+import com.retichat.app.service.ConnectionStateManager
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -85,6 +87,38 @@ class ConversationViewModel(
         viewModelScope.launch {
             repository.sendMessage(chatId, content, listOf(filename to data))
         }
+    }
+
+    /**
+     * Lifecycle hook: tell [ConnectionStateManager] to keep an APP_LINK
+     * open to the peer while the conversation is on screen.  Match iOS
+     * `ConnectionStateManager.openConversation(peerHash:)` semantics.
+     * Idempotent; safe to call repeatedly.  No-op for group chats.
+     */
+    fun onConversationVisible() {
+        viewModelScope.launch {
+            val c = repository.chatById(chatId).firstOrNull() ?: return@launch
+            if (c.isGroup) return@launch
+            val peer = c.memberHashes.hexToBytesOrNull() ?: return@launch
+            ConnectionStateManager.openConversation(peer)
+        }
+    }
+
+    /** Lifecycle hook: peer link can be torn down (matches iOS). */
+    fun onConversationHidden() {
+        viewModelScope.launch {
+            val c = repository.chatById(chatId).firstOrNull() ?: return@launch
+            if (c.isGroup) return@launch
+            val peer = c.memberHashes.hexToBytesOrNull() ?: return@launch
+            ConnectionStateManager.closeConversation(peer)
+        }
+    }
+
+    private fun String.hexToBytesOrNull(): ByteArray? {
+        if (length % 2 != 0) return null
+        return runCatching {
+            ByteArray(length / 2) { i -> substring(i * 2, i * 2 + 2).toInt(16).toByte() }
+        }.getOrNull()
     }
 
     /** Get attachments for a message as a reactive flow. */

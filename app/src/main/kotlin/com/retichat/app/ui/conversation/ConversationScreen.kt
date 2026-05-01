@@ -123,7 +123,15 @@ private fun DmConversationContent(
     // Track which chat is visible so notifications are suppressed
     DisposableEffect(chatId) {
         RetichatApp.activeChatId = chatId
-        onDispose { RetichatApp.activeChatId = null }
+        // Open a persistent APP_LINK to the peer for the lifetime of the
+        // screen so the very first DIRECT send doesn't have to wait for
+        // path + link establishment from cold.  Idempotent; no-op for
+        // groups (handled inside the VM).
+        viewModel?.onConversationVisible()
+        onDispose {
+            RetichatApp.activeChatId = null
+            viewModel?.onConversationHidden()
+        }
     }
 
     val context = LocalContext.current

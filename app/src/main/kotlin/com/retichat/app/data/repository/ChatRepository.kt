@@ -5,6 +5,7 @@ import android.util.Log
 import com.retichat.app.RetichatApp
 import com.retichat.app.bridge.LxmfFields
 import com.retichat.app.bridge.RetichatBridge
+import com.retichat.app.service.ConnectionStateManager
 import com.retichat.app.service.GroupChatManager
 import com.retichat.app.service.MessageNotificationHelper
 import com.retichat.app.service.NetworkMonitor
@@ -329,6 +330,27 @@ class ChatRepository(
                     return@launch
                 }
 
+                // Ensure an APP_LINK to the peer is opening (idempotent)
+                // and ask Connection­StateManager which delivery method is
+                // appropriate right now.  Inside its 5 s ceiling
+                // (DESIGN_PRINCIPLES.md §1) it returns DIRECT iff the
+                // APP_LINK is ACTIVE; otherwise PROPAGATED so we don't
+                // spend the budget waiting for a peer that's offline.
+                // // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1
+                ConnectionStateManager.openConversation(destHash)
+                val method = ConnectionStateManager.awaitDeliveryMethod(destHash)
+                Log.d(TAG, "sendDirect: awaitDeliveryMethod → $method (DIRECT=${RetichatBridge.DeliveryMethod.DIRECT})")
+
+                if (method == RetichatBridge.DeliveryMethod.PROPAGATED) {
+                    // Skip the doomed DIRECT attempt entirely; go straight
+                    // to the propagation node.  schedulePropagationFallback
+                    // does the right thing — fire a single PROPAGATED send
+                    // and poll its state.
+                    Log.i(TAG, "sendDirect: peer not reachable directly → PROPAGATED via fallback")
+                    schedulePropagationFallback(localId, destHash, content, attachments, immediate = true)
+                    return@launch
+                }
+
                 val msgHandle = RetichatBridge.messageCreate(
                     destHash = destHash,
                     srcHash = selfDestHash,
@@ -455,9 +477,10 @@ class ChatRepository(
         destHash: ByteArray,
         content: String,
         attachments: List<Pair<String, ByteArray>>,
+        immediate: Boolean = false,
     ) {
         scope.launch(Dispatchers.IO) {
-            delay(5_000)
+            if (!immediate) delay(5_000)
 
             val current = messageDao.findById(localId) ?: return@launch
             // Skip fallback if direct already reached SENT/DELIVERED or a
@@ -474,8 +497,29 @@ class ChatRepository(
                 return@launch
             }
 
+            // Pick the propagation node deterministically.  Priority:
+            //   1. explicit user override (Settings)
+            //   2. legacy `lxmf_propagation_hash` pref
+            //   3. derived `lxmf.propagation` destination of the configured
+            //      RFed node identity (mirrors the RFed config blob's
+            //      `destinations.lxmf.propagation` value)
+            //   4. random pick from PropagationNodeManager's bundled list
+            // // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1: a random
+            // node almost always has no path on a fresh install, so the
+            // first PROPAGATED send hangs at state=1 until §1 fires.  The
+            // RFed-derived hash is the only one we know is reachable
+            // because we already have a path to its rfed.notify aspect.
+            val derivedFromRfed: String = run {
+                val rfedId = UserPreferences.getRfedNodeIdentityHash(appContext)
+                if (rfedId.length == 32) {
+                    com.retichat.app.service.FcmTokenRegistrar
+                        .rnsDestHash(rfedId, "lxmf", listOf("propagation"))
+                        .orEmpty()
+                } else ""
+            }
             val override = UserPreferences.getRfedLxmfPropOverride(appContext)
                 .ifEmpty { UserPreferences.getLxmfPropagationHash(appContext) }
+                .ifEmpty { derivedFromRfed }
             val nodeMgr = PropagationNodeManager(
                 userConfiguredHash = override.ifEmpty { null }
             )
