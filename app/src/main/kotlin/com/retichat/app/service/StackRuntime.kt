@@ -235,14 +235,9 @@ private const val GRACE_SHUTDOWN_MS = 30_000L  // 30s grace avoids stack teardow
             }
         })
 
-        // Announce rfed.delivery so the rfed node can establish a path
-        // to live-fanout channel/delivery blobs to us. Without this the
-        // node never reaches us and every message is deferred — channel
-        // messages from peers never arrive on this device until WakeWorker
-        // re-announces from a push wake-up.
-        // (Mirrors iOS RfedChannelClient.start: startRfedDelivery → rfedDeliveryAnnounce.)
-        runCatching { RetichatBridge.rfedDeliveryAnnounce() }
-            .onFailure { Log.w(TAG, "rfedDeliveryAnnounce failed", it) }
+        // rfed.delivery is now auto-announced by Transport's publish daemon
+        // (registered inside rfedDeliveryStart above via Transport::publish_destination).
+        // No manual announce call needed here.
 
         // Hand the router to ConnectionStateManager so it can register the
         // APP_LINK status callback, the network-change trigger, and pre-open

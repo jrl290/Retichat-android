@@ -18,10 +18,11 @@ import kotlinx.coroutines.withTimeoutOrNull
  *
  * Lifecycle:
  *   1. [StackRuntime.acquire] — bring the Reticulum stack up if not already.
- *   2. Announce rfed.delivery so the server flushes deferred blobs.
- *   3. Pull the per-channel deferred queue once.
- *   4. Run a propagation poll for LXMF.
- *   5. [StackRuntime.release] — stack tears down after the grace period
+ *      Transport's auto-announce daemon re-announces rfed.delivery on the
+ *      interface up-edge that occurs when the network is acquired.
+ *   2. Pull the per-channel deferred queue once.
+ *   3. Run a propagation poll for LXMF.
+ *   4. [StackRuntime.release] — stack tears down after the grace period
  *      unless an Activity is in the foreground.
  *
  * Total budget ~25 s so we stay inside the system's expedited-work window.
@@ -54,11 +55,11 @@ class WakeWorker(
                     return@withTimeoutOrNull Result.success()
                 }
 
-                // Step 1: ask the rfed delivery endpoint to flush deferred blobs.
-                runCatching { RetichatBridge.rfedDeliveryAnnounce() }
-                    .onFailure { Log.w(TAG, "rfedDeliveryAnnounce failed", it) }
+                // rfed.delivery re-announce is handled by Transport's publish daemon
+                // on the interface up-edge when the stack acquires the network —
+                // no manual one-shot needed here.
 
-                // Step 2: per-channel pull (drain one page each).
+                // Per-channel pull (drain one page each).
                 val channels = app.database.channelDao().activeChannels()
                 for (channel in channels) {
                     runCatching {
@@ -67,7 +68,7 @@ class WakeWorker(
                     }.onFailure { Log.w(TAG, "pullDeferred failed for ${channel.channelName}", it) }
                 }
 
-                // Step 3: LXMF propagation sync.
+                // LXMF propagation sync.
                 PropagationSync.runOnce(applicationContext)
 
                 Result.success()

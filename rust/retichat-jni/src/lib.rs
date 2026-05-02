@@ -640,6 +640,40 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeMessage
     ok_or_neg(lxmf::message_send(router as u64, msg as u64))
 }
 
+/// `RetichatBridge.nativeMessageSendViaAppLinks(msg: Long): Int`
+///
+/// Routes the outbound message via Reticulum's `AppLinks::send` pipeline:
+/// parallel iface-race `request_path` (with 2 s liveness cache, LoRa
+/// skip), then dispatch on the global `LXMRouter`. No router handle is
+/// required. Returns 0 on success, -1 on failure (call `nativeLastError`).
+#[no_mangle]
+pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeMessageSendViaAppLinks(
+    _env: JNIEnv,
+    _class: JClass,
+    msg: jlong,
+) -> jint {
+    ok_or_neg(lxmf::message_send_via_app_links(msg as u64))
+}
+
+/// `RetichatBridge.nativeAppLinksInvalidateLiveness(destHash: ByteArray): Int`
+///
+/// Forget the cached liveness winner for `destHash`. Call from your
+/// `ConnectivityManager.NetworkCallback` when the active network flips
+/// (WiFi lost, cellular came up) so the next AppLinks send re-races.
+#[no_mangle]
+pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeAppLinksInvalidateLiveness(
+    env: JNIEnv,
+    _class: JClass,
+    dest_hash: JByteArray,
+) -> jint {
+    let bytes = jbytes_to_vec(&env, &dest_hash);
+    if bytes.is_empty() {
+        return -1;
+    }
+    lxmf::app_links_invalidate_liveness(&bytes);
+    0
+}
+
 /// `RetichatBridge.nativeMessageGetState(handle: Long): Int`
 #[no_mangle]
 pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeMessageGetState(
@@ -1037,6 +1071,19 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRfedDel
     dest.set_packet_callback(Some(packet_cb));
     Transport::register_destination(dest.clone());
 
+    // Opt rfed.delivery into the auto-announce daemon so the RFed node
+    // always has a fresh path back to this device:
+    //   * re-announced on every interface false→true transition, and
+    //   * every 30 minutes for as long as the stack is running.
+    // This replaces the old manual one-shot rfedDeliveryAnnounce() calls
+    // from Kotlin — the daemon is strictly superior because it fires on
+    // interface up-edges that happen while the app is backgrounded.
+    Transport::publish_destination(
+        dest.hash.clone(),
+        Some(std::time::Duration::from_secs(30 * 60)),
+        None,
+    );
+
     *RFED_DELIVERY.lock().unwrap() = Some(RfedDeliveryState { dest, _callback: cb_for_storage });
     0
 }
@@ -1067,6 +1114,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRfedDel
 ) -> jint {
     let mut guard = RFED_DELIVERY.lock().unwrap();
     if let Some(state) = guard.take() {
+        Transport::unpublish_destination(&state.dest.hash);
         Transport::deregister_destination(&state.dest.hash);
     }
     *RFED_DELIVERY_CB.lock().unwrap() = None;
