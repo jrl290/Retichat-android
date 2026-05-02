@@ -413,6 +413,16 @@ class ChatRepository(
     )
 
     /**
+     * Success states (SENT=4, DELIVERED=8) are sticky — a direct delivery win
+     * must never be overwritten by a concurrent propagation failure or any
+     * other non-success state.  DELIVERED can upgrade SENT but nothing else
+     * can downgrade it.
+     */
+    private fun isSuccessState(state: Int) =
+        state == RetichatBridge.MessageState.SENT ||
+        state == RetichatBridge.MessageState.DELIVERED
+
+    /**
      * Poll the native message handle until it reaches a terminal state.
      * Uses exponential back-off: 200ms, 300ms, 450ms, … capped at 5s.
      *
@@ -447,7 +457,25 @@ class ChatRepository(
 
             Log.d(TAG, "pollState: id=$localId handle=$msgHandle state=$newState progress=$progress")
 
-            messageDao.updateStateAndProgress(localId, newState, progress)
+            // Never let a concurrent propagation FAILED (or any non-success state)
+            // overwrite a direct SENT/DELIVERED that already landed in the DB.
+            // DELIVERED may upgrade SENT; nothing else may downgrade success.
+            val dbState = messageDao.findById(localId)?.state ?: 0
+            if (isSuccessState(dbState)) {
+                if (newState == RetichatBridge.MessageState.DELIVERED &&
+                    dbState == RetichatBridge.MessageState.SENT) {
+                    // DELIVERED upgrades SENT — allow it
+                    messageDao.updateStateAndProgress(localId, newState, progress)
+                } else if (!isSuccessState(newState)) {
+                    // Non-success (e.g. prop FAILED) must not overwrite direct success
+                    Log.d(TAG, "pollState: $localId DB=$dbState wins over handle=$msgHandle state=$newState — stopping")
+                    return
+                } else {
+                    messageDao.updateStateAndProgress(localId, newState, progress)
+                }
+            } else {
+                messageDao.updateStateAndProgress(localId, newState, progress)
+            }
 
             if (isTerminalState(newState)) {
                 Log.d(TAG, "pollState: terminal state $newState for $localId")
@@ -558,10 +586,23 @@ class ChatRepository(
                 return@launch
             }
 
-            // Re-point the bubble at the propagated handle and continue polling.
+            // Re-point the bubble at the propagated handle and continue polling,
+            // BUT only if the direct send hasn't already succeeded.  If direct
+            // won while we were creating the prop copy, discard the prop handle
+            // and leave the success state untouched.
+            val afterSend = messageDao.findById(localId)
+            if (afterSend != null && isSuccessState(afterSend.state)) {
+                Log.d(TAG, "fallback: direct already succeeded (state=${afterSend.state}) for $localId — discarding prop handle")
+                RetichatBridge.messageDestroy(propHandle)
+                return@launch
+            }
+
             messageDao.updateHandle(localId, propHandle)
             val newState = RetichatBridge.messageGetState(propHandle)
-            messageDao.updateState(localId, newState)
+            // Only write prop initial state if direct hasn't won
+            if (!isSuccessState(newState)) {
+                messageDao.updateState(localId, newState)
+            }
             if (!isTerminalState(newState)) {
                 pollMessageState(localId, propHandle)
             }
