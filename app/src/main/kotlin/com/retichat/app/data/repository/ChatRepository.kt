@@ -330,26 +330,12 @@ class ChatRepository(
                     return@launch
                 }
 
-                // Ensure an APP_LINK to the peer is opening (idempotent)
-                // and ask Connection­StateManager which delivery method is
-                // appropriate right now.  Inside its 5 s ceiling
-                // (DESIGN_PRINCIPLES.md §1) it returns DIRECT iff the
-                // APP_LINK is ACTIVE; otherwise PROPAGATED so we don't
-                // spend the budget waiting for a peer that's offline.
+                // Ensure an APP_LINK to the peer is opening (idempotent).
+                // Rust process_outbound owns the DIRECT→PROPAGATED stagger
+                // (up to 3 s) — no need to wait here before submitting.
                 // // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1
                 ConnectionStateManager.openConversation(destHash)
-                val method = ConnectionStateManager.awaitDeliveryMethod(destHash)
-                Log.d(TAG, "sendDirect: awaitDeliveryMethod → $method (DIRECT=${RetichatBridge.DeliveryMethod.DIRECT})")
-
-                if (method == RetichatBridge.DeliveryMethod.PROPAGATED) {
-                    // Skip the doomed DIRECT attempt entirely; go straight
-                    // to the propagation node.  schedulePropagationFallback
-                    // does the right thing — fire a single PROPAGATED send
-                    // and poll its state.
-                    Log.i(TAG, "sendDirect: peer not reachable directly → PROPAGATED via fallback")
-                    schedulePropagationFallback(localId, destHash, content, attachments, immediate = true)
-                    return@launch
-                }
+                Log.d(TAG, "sendDirect: openConversation OK, submitting DIRECT")
 
                 val msgHandle = RetichatBridge.messageCreate(
                     destHash = destHash,
@@ -426,21 +412,37 @@ class ChatRepository(
      * Poll the native message handle until it reaches a terminal state.
      * Uses exponential back-off: 200ms, 300ms, 450ms, … capped at 5s.
      *
-     * For small (packet-based) messages the poll gives up after 60s.
+     * [initialDeadlineMs] controls how long to wait before giving up:
+     *   - 60s (default) for DIRECT sends that should succeed in <5s
+     *   - 600s for PROPAGATED fallback sends that can legitimately be slow
      * For large transfers (resource-based) the deadline extends to 10 min
      * and is reset whenever transfer progress advances, so that active
      * transfers are never prematurely killed.
      */
-    private suspend fun pollMessageState(localId: String, msgHandle: Long) {
+    private suspend fun pollMessageState(
+        localId: String,
+        msgHandle: Long,
+        initialDeadlineMs: Long = 60_000L,
+    ) {
         var interval = 200L          // start at 200ms for snappy LAN feedback
         val maxInterval = 5_000L     // cap at 5s
-        val shortDeadline = 60_000L  // 60s for small messages
         val longDeadline = 600_000L  // 10 min max for large transfers
-        var deadline = System.currentTimeMillis() + shortDeadline
+        var deadline = System.currentTimeMillis() + initialDeadlineMs
         var lastProgress = 0f
 
         while (System.currentTimeMillis() < deadline) {
             delay(interval)
+
+            // If schedulePropagationFallback has taken over this message
+            // (replaced the DB handle), this poll is stale. Exit without
+            // touching state so the new poll is the sole owner.
+            // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1
+            val dbHandle = messageDao.findById(localId)?.nativeHandle ?: 0L
+            if (dbHandle != msgHandle) {
+                Log.d(TAG, "pollState: handle changed for $localId ($msgHandle→$dbHandle) — exiting stale poll")
+                return
+            }
+
             val newState = RetichatBridge.messageGetState(msgHandle)
             val progress = RetichatBridge.messageGetProgress(msgHandle)
 
@@ -604,7 +606,12 @@ class ChatRepository(
                 messageDao.updateState(localId, newState)
             }
             if (!isTerminalState(newState)) {
-                pollMessageState(localId, propHandle)
+                // PROPAGATED delivery can legitimately take several minutes
+                // (the propagation node buffers and re-delivers to the
+                // recipient when they next announce).  Use the long deadline
+                // so the poll doesn't mark FAILED before Rust delivers it.
+                // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1
+                pollMessageState(localId, propHandle, initialDeadlineMs = 600_000L)
             }
         }
     }
@@ -1018,6 +1025,17 @@ class ChatRepository(
         timestamp: Double,
         fields: LxmfFields,
     ) {
+        // Dedup: the same LXMF message (deterministic hash) can arrive via
+        // multiple transports in quick succession — PROPAGATED first, then
+        // the sender's DIRECT backchannel.  The message hash is the primary
+        // key; if we've already stored this message, skip silently to avoid
+        // a duplicate bubble and a second notification.
+        // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1
+        if (messageDao.findById(msgId) != null) {
+            Log.d(TAG, "handleDirectMessage: dup msgId=${msgId.take(16)}, skipping")
+            return
+        }
+
         // Handle "STOP: <groupId>" — remove sender from that group
         // Lenient: case-insensitive, optional colon/dash, flexible whitespace
         val stopMatch = Regex("^\\s*stop[:\\-\\s]+([0-9a-f]{4,})\\s*$", RegexOption.IGNORE_CASE)

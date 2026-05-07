@@ -188,48 +188,13 @@ object ConnectionStateManager {
     }
 
     // ────────────────────────────────────────────────────────────────────
-    // Delivery method selection
+    // APP_LINK request helper (open + wait + send, all event-driven)
     // ────────────────────────────────────────────────────────────────────
 
     /**
-     * Async equivalent of `awaitDeliveryMethod(for:)` in the iOS port.
-     *
-     * If an APP_LINK is already ACTIVE, returns DIRECT immediately.  If
-     * it is in the middle of establishing (PATH_REQUESTED or ESTABLISHING),
-     * awaits its resolution for **up to 5 s** (DESIGN_PRINCIPLES.md §1) —
-     * never raise this ceiling.  Otherwise falls through to PROPAGATED
-     * when no path exists.
-     */
-    suspend fun awaitDeliveryMethod(destHash: ByteArray): Int {
-        val rh = routerHandle
-        if (rh == 0L) return RetichatBridge.DeliveryMethod.PROPAGATED
-
-        val status = RetichatBridge.appLinkStatus(rh, destHash)
-        if (status == RetichatBridge.AppLinkStatus.ACTIVE) {
-            return RetichatBridge.DeliveryMethod.DIRECT
-        }
-        if (status == RetichatBridge.AppLinkStatus.PATH_REQUESTED ||
-            status == RetichatBridge.AppLinkStatus.ESTABLISHING
-        ) {
-            // Wait up to 5 s for ACTIVE.  Implemented as a one-shot status
-            // handler + 5 s timeout — no polling.
-            // // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1
-            val reached = awaitAppLinkActive(destHash, timeoutMs = 5_000L)
-            if (reached) return RetichatBridge.DeliveryMethod.DIRECT
-            return RetichatBridge.DeliveryMethod.PROPAGATED
-        }
-
-        // No link in flight — caller decides whether to OPEN one. Default
-        // to PROPAGATED so we don't block message send on a fresh link
-        // setup.  ChatRepository's parallel prop fallback covers the
-        // race where DIRECT eventually wins.
-        return RetichatBridge.DeliveryMethod.PROPAGATED
-    }
-
-    /**
      * Suspend until the APP_LINK to [destHash] reaches ACTIVE, returning
-     * true on success or false on timeout.  Uses the registered status
-     * callback — no polling.
+     * true on success or false on timeout. Used by [appLinkSend].
+     * No polling — uses the registered status callback.
      */
     private suspend fun awaitAppLinkActive(destHash: ByteArray, timeoutMs: Long): Boolean {
         val rh = routerHandle
@@ -244,8 +209,6 @@ object ConnectionStateManager {
                 if (!deferred.isCompleted) deferred.complete(true)
             }
         }
-        // Install handler.  CAUTION: this overwrites any existing handler
-        // for the same dest for the duration of the wait — restore on exit.
         val previous = stateMutex.withLock {
             val p = appLinkStatusHandlers[key]
             appLinkStatusHandlers[key] = handler
@@ -260,10 +223,6 @@ object ConnectionStateManager {
             }
         }
     }
-
-    // ────────────────────────────────────────────────────────────────────
-    // APP_LINK request helper (open + wait + send, all event-driven)
-    // ────────────────────────────────────────────────────────────────────
 
     /**
      * Open (idempotently) an APP_LINK to [destHash] for the given app/aspects

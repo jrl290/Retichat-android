@@ -286,6 +286,24 @@ object RetichatBridge {
     fun messageSend(router: Long, msg: Long): Boolean =
         nativeMessageSend(router, msg) == 0
 
+    /**
+     * Submit the message via Reticulum's top-level `AppLinks::send`
+     * pipeline (interface race + 2 s liveness cache; no router handle
+     * needed — uses the global router). Use this for new send sites
+     * where you don't want to manage iface selection or path warm-up.
+     */
+    fun messageSendViaAppLinks(msg: Long): Boolean =
+        nativeMessageSendViaAppLinks(msg) == 0
+
+    /**
+     * Forget the cached liveness winner for [destHash]. Call from your
+     * `ConnectivityManager.NetworkCallback` (`onLost` / `onAvailable`)
+     * so the next [messageSendViaAppLinks] re-races interfaces instead
+     * of reusing a now-dead path.
+     */
+    fun appLinksInvalidateLiveness(destHash: ByteArray): Boolean =
+        nativeAppLinksInvalidateLiveness(destHash) == 0
+
     fun messageGetState(handle: Long): Int = nativeMessageGetState(handle)
     fun messageGetProgress(handle: Long): Float = nativeMessageGetProgress(handle)
     fun messageGetHash(handle: Long): ByteArray? = nativeMessageGetHash(handle)
@@ -300,6 +318,8 @@ object RetichatBridge {
     private external fun nativeMessageAddFieldString(handle: Long, key: Int, value: String): Int
     private external fun nativeMessageAddFieldBool(handle: Long, key: Int, value: Boolean): Int
     private external fun nativeMessageSend(router: Long, msg: Long): Int
+    private external fun nativeMessageSendViaAppLinks(msg: Long): Int
+    private external fun nativeAppLinksInvalidateLiveness(destHash: ByteArray): Int
     private external fun nativeMessageGetState(handle: Long): Int
     private external fun nativeMessageGetProgress(handle: Long): Float
     private external fun nativeMessageGetHash(handle: Long): ByteArray?
