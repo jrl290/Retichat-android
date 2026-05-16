@@ -57,6 +57,11 @@ interface AppLinkRequestCallback {
     fun onResult(status: Int, bytes: ByteArray?)
 }
 
+/** One-shot callback for [RetichatBridge.appLinkSendAsync]. */
+interface AppLinkSendCallback {
+    fun onResult(status: Int)
+}
+
 /**
  * JNI bridge to the Rust Reticulum + LXMF libraries.
  *
@@ -457,6 +462,12 @@ object RetichatBridge {
         const val FAILED   = 2
     }
 
+    /** Result codes for [appLinkSendAsync] callbacks. */
+    object AppLinkSendStatus {
+        const val DELIVERED = 0
+        const val FAILED    = 1
+    }
+
     /**
      * Open (or reuse) an APP_LINK to `destHash` under the given `appName`
      * and dotted `aspects` (e.g. `"channel"`, `"notify"`, `"delivery"`).
@@ -472,6 +483,20 @@ object RetichatBridge {
         aspectsCsv: String,
     ): Boolean = nativeAppLinkOpen(routerHandle, destHash, appName, aspectsCsv) == 0
 
+    /**
+     * Open a persistent APP_LINK to `destHash`.
+     *
+     * Same destination registration as [appLinkOpen], but once the path-race
+     * succeeds AppLinks holds the outbound link open so request-style traffic
+     * can reuse it directly.
+     */
+    fun appLinkOpenPersistent(
+        routerHandle: Long,
+        destHash: ByteArray,
+        appName: String,
+        aspectsCsv: String,
+    ): Boolean = nativeAppLinkOpenPersistent(routerHandle, destHash, appName, aspectsCsv) == 0
+
     /** Tear down the APP_LINK to `destHash`. Idempotent. */
     fun appLinkClose(routerHandle: Long, destHash: ByteArray): Boolean =
         nativeAppLinkClose(routerHandle, destHash) == 0
@@ -479,6 +504,10 @@ object RetichatBridge {
     /** Current [AppLinkStatus] for `destHash`, or -1 on parameter error. */
     fun appLinkStatus(routerHandle: Long, destHash: ByteArray): Int =
         nativeAppLinkStatus(routerHandle, destHash)
+
+    /** Explicit deterministic re-open trigger for an existing app link. */
+    fun appLinkReopen(routerHandle: Long, destHash: ByteArray): Boolean =
+        nativeAppLinkReopen(routerHandle, destHash) == 0
 
     /**
      * Register a non-LXMF aspect (e.g. `"rfed.channel"`) for auto-reconnect
@@ -505,9 +534,10 @@ object RetichatBridge {
         nativeAppLinkRegisterStatusCallback(routerHandle, cb) == 0
 
     /**
-     * Send a request on the existing APP_LINK to `destHash` (which must
-     * already be ACTIVE) and fire `cb.onResult` exactly once when the
-     * response arrives, the request fails, or `timeoutSecs` elapses.
+    * Send a request on the existing APP_LINK to `destHash` (which should
+    * normally be established with [appLinkOpenPersistent] and already be
+    * ACTIVE) and fire `cb.onResult` exactly once when the response arrives,
+    * the request fails, or `timeoutSecs` elapses.
      *
      * Returns `true` if the request was queued (callback will fire);
      * `false` on immediate error (callback will NOT fire — check
@@ -525,11 +555,30 @@ object RetichatBridge {
         routerHandle, destHash, path, payload, timeoutSecs, cb
     ) == 0
 
+    /**
+     * Send a plain DATA packet via an ephemeral APP_LINK and fire
+     * `cb.onResult` exactly once on delivery proof or terminal failure.
+     */
+    fun appLinkSendAsync(
+        routerHandle: Long,
+        destHash: ByteArray,
+        appName: String,
+        aspectsCsv: String,
+        payload: ByteArray,
+        cb: AppLinkSendCallback,
+    ): Boolean = nativeAppLinkSendAsync(
+        routerHandle, destHash, appName, aspectsCsv, payload, cb
+    ) == 0
+
     private external fun nativeAppLinkOpen(
+        router: Long, destHash: ByteArray, appName: String, aspectsCsv: String
+    ): Int
+    private external fun nativeAppLinkOpenPersistent(
         router: Long, destHash: ByteArray, appName: String, aspectsCsv: String
     ): Int
     private external fun nativeAppLinkClose(router: Long, destHash: ByteArray): Int
     private external fun nativeAppLinkStatus(router: Long, destHash: ByteArray): Int
+    private external fun nativeAppLinkReopen(router: Long, destHash: ByteArray): Int
     private external fun nativeAppLinkRegisterReconnect(router: Long, aspect: String): Int
     private external fun nativeAppLinkNetworkChanged(router: Long): Int
     private external fun nativeAppLinkRegisterStatusCallback(
@@ -538,6 +587,10 @@ object RetichatBridge {
     private external fun nativeAppLinkRequestAsync(
         router: Long, destHash: ByteArray, path: String, payload: ByteArray,
         timeoutSecs: Double, callback: AppLinkRequestCallback
+    ): Int
+    private external fun nativeAppLinkSendAsync(
+        router: Long, destHash: ByteArray, appName: String, aspectsCsv: String,
+        payload: ByteArray, callback: AppLinkSendCallback
     ): Int
 
     // -------------------------------------------------------------------

@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.retichat.app.RetichatApp
 import com.retichat.app.bridge.AppLinkRequestCallback
+import com.retichat.app.bridge.AppLinkSendCallback
 import com.retichat.app.bridge.AppLinkStatusCallback
 import com.retichat.app.bridge.RetichatBridge
 import kotlinx.coroutines.CompletableDeferred
@@ -247,7 +248,7 @@ object ConnectionStateManager {
         if (rh == 0L) return@withContext null
 
         if (RetichatBridge.appLinkStatus(rh, destHash) != RetichatBridge.AppLinkStatus.ACTIVE) {
-            RetichatBridge.appLinkOpen(rh, destHash, app, aspectsCsv)
+            RetichatBridge.appLinkOpenPersistent(rh, destHash, app, aspectsCsv)
         }
         // Wait up to 5 s for ACTIVE — via status callback, not polling.
         // // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1
@@ -269,6 +270,42 @@ object ConnectionStateManager {
                 },
             )
             if (!ok) cont.resume(null)
+        }
+    }
+
+    /** Prime an ephemeral APP_LINK so services can wait for ACTIVE without owning a held link. */
+    fun primeAppLink(destHash: ByteArray, app: String, aspectsCsv: String) {
+        val rh = routerHandle
+        if (rh == 0L) return
+        scope.launch(Dispatchers.IO) {
+            RetichatBridge.appLinkOpen(rh, destHash, app, aspectsCsv)
+        }
+    }
+
+    /** Send a plain DATA packet via AppLinks and await delivery proof or terminal failure. */
+    suspend fun appLinkSendData(
+        destHash: ByteArray,
+        app: String,
+        aspectsCsv: String,
+        payload: ByteArray,
+    ): Boolean = withContext(Dispatchers.IO) {
+        val rh = routerHandle
+        if (rh == 0L) return@withContext false
+
+        suspendCoroutine { cont ->
+            val ok = RetichatBridge.appLinkSendAsync(
+                rh,
+                destHash,
+                app,
+                aspectsCsv,
+                payload,
+                object : AppLinkSendCallback {
+                    override fun onResult(status: Int) {
+                        cont.resume(status == RetichatBridge.AppLinkSendStatus.DELIVERED)
+                    }
+                },
+            )
+            if (!ok) cont.resume(false)
         }
     }
 

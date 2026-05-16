@@ -1553,6 +1553,32 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeAppLink
     ok_or_neg(lxmf::router_app_link_open(router as u64, &hash, &app, &asp_refs))
 }
 
+/// `RetichatBridge.nativeAppLinkOpenPersistent(router, destHash, app, aspectsCsv): Int`
+///
+/// Same destination registration as `nativeAppLinkOpen`, but once the
+/// path-race succeeds AppLinks holds the outbound link open so request-style
+/// traffic can reuse it directly.
+#[no_mangle]
+pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeAppLinkOpenPersistent(
+    mut env: JNIEnv,
+    _class: JClass,
+    router: jlong,
+    dest_hash: JByteArray,
+    app_name: JString,
+    aspects_csv: JString,
+) -> jint {
+    let hash = jbytes_to_vec(&env, &dest_hash);
+    let app = jstring_to_string(&mut env, &app_name);
+    let asp_str = jstring_to_string(&mut env, &aspects_csv);
+    let asp_owned: Vec<String> = if asp_str.is_empty() {
+        Vec::new()
+    } else {
+        asp_str.split('.').map(|s| s.to_string()).collect()
+    };
+    let asp_refs: Vec<&str> = asp_owned.iter().map(|s| s.as_str()).collect();
+    ok_or_neg(lxmf::router_app_link_open_persistent(router as u64, &hash, &app, &asp_refs))
+}
+
 /// `RetichatBridge.nativeAppLinkClose(router, destHash): Int`
 #[no_mangle]
 pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeAppLinkClose(
@@ -1584,6 +1610,20 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeAppLink
             -1
         }
     }
+}
+
+/// `RetichatBridge.nativeAppLinkReopen(router, destHash): Int`
+///
+/// Explicit deterministic re-open trigger for an existing app link.
+#[no_mangle]
+pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeAppLinkReopen(
+    env: JNIEnv,
+    _class: JClass,
+    router: jlong,
+    dest_hash: JByteArray,
+) -> jint {
+    let hash = jbytes_to_vec(&env, &dest_hash);
+    ok_or_neg(lxmf::router_app_link_reopen(router as u64, &hash))
 }
 
 /// `RetichatBridge.nativeAppLinkRegisterReconnect(router, aspect): Int`
@@ -1681,12 +1721,106 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeAppLink
     ok_or_neg(result)
 }
 
+/// `RetichatBridge.nativeAppLinkSendAsync(router, destHash, appName,
+///   aspectsCsv, payload, callback): Int`
+///
+/// Sends a plain DATA packet via an ephemeral APP_LINK and fires
+/// `callback.onResult(status)` exactly once: 0 = delivered (LRPROOF),
+/// 1 = failed.
+#[no_mangle]
+pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeAppLinkSendAsync(
+    mut env: JNIEnv,
+    _class: JClass,
+    router: jlong,
+    dest_hash: JByteArray,
+    app_name: JString,
+    aspects_csv: JString,
+    payload: JByteArray,
+    callback: JObject,
+) -> jint {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let hash = jbytes_to_vec(&env, &dest_hash);
+    let app = jstring_to_string(&mut env, &app_name);
+    let aspects_str = jstring_to_string(&mut env, &aspects_csv);
+    let aspects_owned: Vec<String> = if aspects_str.is_empty() {
+        Vec::new()
+    } else {
+        aspects_str.split('.').map(|s| s.to_string()).collect()
+    };
+    let aspects: Vec<&str> = aspects_owned.iter().map(|s| s.as_str()).collect();
+    let data = jbytes_to_vec(&env, &payload);
+
+    let jvm = match env.get_java_vm() {
+        Ok(vm) => vm,
+        Err(e) => {
+            rns::set_error(format!("Failed to get JavaVM: {}", e));
+            return -1;
+        }
+    };
+    let global_ref = match env.new_global_ref(&callback) {
+        Ok(r) => r,
+        Err(e) => {
+            rns::set_error(format!("Failed to create global ref: {}", e));
+            return -1;
+        }
+    };
+
+    let cb_state: Arc<Mutex<Option<(JavaVM, GlobalRef)>>> =
+        Arc::new(Mutex::new(Some((jvm, global_ref))));
+    let fired = Arc::new(AtomicBool::new(false));
+
+    fn fire(state: &Arc<Mutex<Option<(JavaVM, GlobalRef)>>>, status: i32) {
+        let taken = state.lock().unwrap().take();
+        let (jvm, cb_ref) = match taken {
+            Some(pair) => pair,
+            None => return,
+        };
+        let mut env = match jvm.attach_current_thread() {
+            Ok(env) => env,
+            Err(_) => return,
+        };
+        let _ = env.call_method(
+            cb_ref.as_obj(),
+            "onResult",
+            "(I)V",
+            &[JValue::Int(status)],
+        );
+    }
+
+    let state_ok = cb_state.clone();
+    let fired_ok = fired.clone();
+    let on_delivered: Arc<dyn Fn() + Send + Sync + 'static> = Arc::new(move || {
+        if !fired_ok.swap(true, Ordering::SeqCst) {
+            fire(&state_ok, 0);
+        }
+    });
+
+    let state_fail = cb_state.clone();
+    let fired_fail = fired;
+    let on_failed: Arc<dyn Fn() + Send + Sync + 'static> = Arc::new(move || {
+        if !fired_fail.swap(true, Ordering::SeqCst) {
+            fire(&state_fail, 1);
+        }
+    });
+
+    ok_or_neg(lxmf::router_app_link_send(
+        router as u64,
+        &hash,
+        &app,
+        &aspects,
+        data,
+        on_delivered,
+        on_failed,
+    ))
+}
+
 /// `RetichatBridge.nativeAppLinkRequestAsync(router, destHash, path,
 ///   payload, timeoutSecs, callback): Int`
 ///
 /// Non-blocking variant.  Issues a request on the existing app-link
-/// (which must have been opened with `nativeAppLinkOpen` and have
-/// reached ACTIVE).  Fires `callback.onResult(status, bytes)` exactly
+/// (which should normally be established with `nativeAppLinkOpenPersistent`
+/// and have reached ACTIVE). Fires `callback.onResult(status, bytes)` exactly
 /// once when the response arrives, the request fails, or the timeout
 /// elapses.
 ///
@@ -1718,7 +1852,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeAppLink
         Ok(Some(h)) => h,
         Ok(None) => {
             rns::set_error(
-                "no app-link to destination — call nativeAppLinkOpen first".to_string(),
+                "no app-link handle to destination — use nativeAppLinkOpenPersistent or wait for an inbound link".to_string(),
             );
             return -1;
         }

@@ -9,8 +9,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 
 /**
- * Registers this device's FCM "wakeup" relay with rfed via a request to
- * `/rfed/notify/register` over the persistent `rfed.notify` APP_LINK.
+ * Registers this device's FCM "wakeup" relay with rfed via a signed DATA
+ * packet over the ephemeral `rfed.notify` APP_LINK.
  *
  * Direct port of `Retichat-ios/Retichat/Services/RfedNotifyRegistrar.swift`.
  *
@@ -18,7 +18,7 @@ import kotlinx.coroutines.launch
  * destination hash (32 hex chars).
  *
  * Payload signed-array layout (matches iOS verbatim):
- *   value = msgpack fixarray-2 [str(relay_hex), bin(16 channel_hash) | nil]
+ *   value = msgpack fixarray-3 [str(op), str(relay_hex)|nil, bin(16 channel_hash) | nil]
  *   wire  = msgpack fixarray-3 [bin(value), bin(64) pubkey, bin(64) sig]
  *
  * Driven by the rfed.notify APP_LINK status callback so we only fire once
@@ -44,7 +44,7 @@ object RfedNotifyRegistrar {
             Log.i(TAG, "No relay hex configured — skipping register")
             return
         }
-        val payload = buildSignedPayload(identityHandle, relayHex, channelHash = null) ?: run {
+        val payload = buildSignedPayload(identityHandle, "register", relayHex, channelHash = null) ?: run {
             Log.w(TAG, "Failed to sign payload")
             return
         }
@@ -57,14 +57,13 @@ object RfedNotifyRegistrar {
                     sendOnce(rfedHash, payload, "register")
                 }
             }
-            // Kick the link open if it is not already.  Idempotent.
-            ConnectionStateManager.appLinkSend(
-                rfedHash, "rfed", "notify",
-                "/rfed/notify/register", payload,
-            ).also { resp ->
-                if (resp != null) {
+            ConnectionStateManager.primeAppLink(rfedHash, "rfed", "notify")
+            ConnectionStateManager.appLinkSendData(
+                rfedHash, "rfed", "notify", payload,
+            ).also { delivered ->
+                if (delivered) {
                     didRegisterOnActive = true
-                    logSendResult("register", resp)
+                    logSendResult("register", true)
                 }
             }
         }
@@ -74,13 +73,12 @@ object RfedNotifyRegistrar {
     fun registerForChannel(context: Context, identityHandle: Long, channelHash: ByteArray) {
         val rfedHash = rfedNotifyDestHash(context) ?: return
         val relayHex = relayHexOrNull(context) ?: return
-        val payload = buildSignedPayload(identityHandle, relayHex, channelHash) ?: return
+        val payload = buildSignedPayload(identityHandle, "register", relayHex, channelHash) ?: return
         scope.launch {
-            val resp = ConnectionStateManager.appLinkSend(
-                rfedHash, "rfed", "notify",
-                "/rfed/notify/register", payload,
+            val delivered = ConnectionStateManager.appLinkSendData(
+                rfedHash, "rfed", "notify", payload,
             )
-            logSendResult("channel-register", resp)
+            logSendResult("channel-register", delivered)
         }
     }
 
@@ -88,13 +86,12 @@ object RfedNotifyRegistrar {
     fun deregisterForChannel(context: Context, identityHandle: Long, channelHash: ByteArray) {
         val rfedHash = rfedNotifyDestHash(context) ?: return
         val relayHex = relayHexOrNull(context) ?: return
-        val payload = buildSignedPayload(identityHandle, relayHex, channelHash) ?: return
+        val payload = buildSignedPayload(identityHandle, "unregister", relayHex, channelHash) ?: return
         scope.launch {
-            val resp = ConnectionStateManager.appLinkSend(
-                rfedHash, "rfed", "notify",
-                "/rfed/notify/unregister", payload,
+            val delivered = ConnectionStateManager.appLinkSendData(
+                rfedHash, "rfed", "notify", payload,
             )
-            logSendResult("channel-unregister", resp)
+            logSendResult("channel-unregister", delivered)
         }
     }
 
@@ -103,39 +100,30 @@ object RfedNotifyRegistrar {
         if (oldRfedNotifyHashHex.isEmpty()) return
         val rfedHash = FcmTokenRegistrar.hexToBytes(oldRfedNotifyHashHex) ?: return
         val relayHex = relayHexOrNull(context) ?: return
-        val payload = buildSignedPayload(identityHandle, relayHex, channelHash = null) ?: return
+        val payload = buildSignedPayload(identityHandle, "unregister", relayHex, channelHash = null) ?: return
         scope.launch {
-            val resp = ConnectionStateManager.appLinkSend(
-                rfedHash, "rfed", "notify",
-                "/rfed/notify/unregister", payload,
+            val delivered = ConnectionStateManager.appLinkSendData(
+                rfedHash, "rfed", "notify", payload,
             )
-            logSendResult("unregister-old", resp)
+            logSendResult("unregister-old", delivered)
         }
     }
 
     // ---- Internal ----
 
-    /// Single-attempt registration via the persistent rfed.notify APP_LINK.
-    /// Per DESIGN_PRINCIPLES.md §1-§2: one shot with a 5 s budget. The link
-    /// is managed by Rust (auto-reconnect on announce, etc.). If it does not
-    /// reach ACTIVE within 5 s, the operation has failed — no retries.
+    /// Single-attempt registration via a signed DATA packet on the ephemeral
+    /// rfed.notify APP_LINK.
     /// // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1
     private suspend fun sendOnce(rfedHash: ByteArray, payload: ByteArray, kind: String) {
-        val resp = ConnectionStateManager.appLinkSend(
-            rfedHash, "rfed", "notify",
-            "/rfed/notify/register", payload,
+        val delivered = ConnectionStateManager.appLinkSendData(
+            rfedHash, "rfed", "notify", payload,
         )
-        logSendResult(kind, resp)
+        logSendResult(kind, delivered)
     }
 
-    private fun logSendResult(kind: String, resp: ByteArray?) {
-        if (resp == null) {
-            Log.w(TAG, "$kind: APP_LINK not ACTIVE within 5 s — skipping")
-            return
-        }
-        val ok = resp.size == 1 && resp[0] == 0xc3.toByte()
-        if (ok) Log.i(TAG, "$kind: rfed returned true")
-        else Log.w(TAG, "$kind: rfed returned non-true")
+    private fun logSendResult(kind: String, delivered: Boolean) {
+        if (delivered) Log.i(TAG, "$kind: delivered to rfed.notify")
+        else Log.w(TAG, "$kind: no delivery proof within budget")
     }
 
     private fun rfedNotifyDestHash(context: Context): ByteArray? {
@@ -154,30 +142,38 @@ object RfedNotifyRegistrar {
 
     /**
      * Build the msgpack-3 signed payload:
-     *   value = fixarray-2 [str(relayHex), bin(16) channelHash | nil]
+     *   value = fixarray-3 [str(op), str(relayHex)|nil, bin(16) channelHash | nil]
      *   wire  = fixarray-3 [bin(value), bin(64) pubkey, bin(64) sig]
      */
     private fun buildSignedPayload(
         identityHandle: Long,
-        relayHex: String,
+        operation: String,
+        relayHex: String?,
         channelHash: ByteArray?,
     ): ByteArray? {
         val value = ArrayList<Byte>(80)
-        value.add(0x92.toByte())                     // fixarray-2
-        val relayBytes = relayHex.toByteArray()
-        when {
-            relayBytes.size <= 31 -> value.add((0xa0 or relayBytes.size).toByte())
-            relayBytes.size <= 0xff -> {
-                value.add(0xd9.toByte())
-                value.add(relayBytes.size.toByte())
+        value.add(0x93.toByte())                     // fixarray-3
+        val opBytes = operation.toByteArray()
+        value.add((0xa0 or opBytes.size).toByte())
+        value.addAll(opBytes.toList())
+        if (relayHex != null) {
+            val relayBytes = relayHex.toByteArray()
+            when {
+                relayBytes.size <= 31 -> value.add((0xa0 or relayBytes.size).toByte())
+                relayBytes.size <= 0xff -> {
+                    value.add(0xd9.toByte())
+                    value.add(relayBytes.size.toByte())
+                }
+                else -> {
+                    value.add(0xda.toByte())
+                    value.add(((relayBytes.size shr 8) and 0xff).toByte())
+                    value.add((relayBytes.size and 0xff).toByte())
+                }
             }
-            else -> {
-                value.add(0xda.toByte())
-                value.add(((relayBytes.size shr 8) and 0xff).toByte())
-                value.add((relayBytes.size and 0xff).toByte())
-            }
+            value.addAll(relayBytes.toList())
+        } else {
+            value.add(0xc0.toByte())
         }
-        value.addAll(relayBytes.toList())
         if (channelHash != null) {
             value.add(0xc4.toByte())
             value.add(channelHash.size.toByte())
