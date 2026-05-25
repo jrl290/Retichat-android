@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <receiver
+            android:name=".debug.SimulateFcmWakeReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.newendian.retichat.DEBUG_SIMULATE_FCM_WAKE" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

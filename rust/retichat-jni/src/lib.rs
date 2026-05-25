@@ -4,7 +4,7 @@
 //! `System.loadLibrary("retichat_jni")` in Kotlin.
 //!
 //! Every public function follows the JNI naming convention:
-//!   Java_com_retichat_app_bridge_RetichatBridge_<methodName>
+//!   Java_com_newendian_retichat_bridge_RetichatBridge_<methodName>
 //!
 //! ## Handle conventions
 //!
@@ -84,6 +84,22 @@ fn jstring_to_string(env: &mut JNIEnv, s: &JString) -> String {
         .unwrap_or_default()
 }
 
+fn parse_destination_aspects(app: &str, aspects: &str) -> Vec<String> {
+    let normalized_app = app.trim();
+    let mut parsed: Vec<String> = aspects
+        .split(|c| c == '.' || c == ',')
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| segment.to_string())
+        .collect();
+
+    if parsed.first().map(|segment| segment.as_str()) == Some(normalized_app) {
+        parsed.remove(0);
+    }
+
+    parsed
+}
+
 /// Extract a `Vec<u8>` from a JNI byte array.
 fn jbytes_to_vec(env: &JNIEnv, arr: &JByteArray) -> Vec<u8> {
     env.convert_byte_array(arr).unwrap_or_default()
@@ -116,7 +132,7 @@ static APP_LINK_STATUS_CB: Mutex<Option<(JavaVM, GlobalRef)>> = Mutex::new(None)
 
 /// `RetichatBridge.nativeInit(configDir: String, logLevel: Int): Int`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeInit(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeInit(
     mut env: JNIEnv,
     _class: JClass,
     config_dir: JString,
@@ -144,7 +160,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeInit(
 
 /// `RetichatBridge.nativeShutdown(): Int`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeShutdown(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeShutdown(
     _env: JNIEnv,
     _class: JClass,
 ) -> jint {
@@ -153,7 +169,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeShutdow
 
 /// `RetichatBridge.nativeLastError(): String?`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeLastError(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeLastError(
     mut env: JNIEnv,
     _class: JClass,
 ) -> jstring {
@@ -170,7 +186,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeLastErr
 
 /// `RetichatBridge.nativeIdentityCreate(): Long`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeIdentityCreate(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeIdentityCreate(
     _env: JNIEnv,
     _class: JClass,
 ) -> jlong {
@@ -179,7 +195,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeIdentit
 
 /// `RetichatBridge.nativeIdentityFromFile(path: String): Long`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeIdentityFromFile(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeIdentityFromFile(
     mut env: JNIEnv,
     _class: JClass,
     path: JString,
@@ -190,7 +206,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeIdentit
 
 /// `RetichatBridge.nativeIdentityFromBytes(bytes: ByteArray): Long`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeIdentityFromBytes(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeIdentityFromBytes(
     env: JNIEnv,
     _class: JClass,
     bytes: JByteArray,
@@ -201,7 +217,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeIdentit
 
 /// `RetichatBridge.nativeIdentityToFile(handle: Long, path: String): Int`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeIdentityToFile(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeIdentityToFile(
     mut env: JNIEnv,
     _class: JClass,
     handle: jlong,
@@ -213,7 +229,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeIdentit
 
 /// `RetichatBridge.nativeIdentityPublicKey(handle: Long): ByteArray?`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeIdentityPublicKey(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeIdentityPublicKey(
     env: JNIEnv,
     _class: JClass,
     handle: jlong,
@@ -229,7 +245,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeIdentit
 
 /// `RetichatBridge.nativeIdentityHash(handle: Long): ByteArray?`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeIdentityHash(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeIdentityHash(
     env: JNIEnv,
     _class: JClass,
     handle: jlong,
@@ -245,7 +261,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeIdentit
 
 /// `RetichatBridge.nativeIdentityDestroy(handle: Long): Int`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeIdentityDestroy(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeIdentityDestroy(
     _env: JNIEnv,
     _class: JClass,
     handle: jlong,
@@ -257,9 +273,10 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeIdentit
 
 /// `RetichatBridge.nativeDestinationHash(idHandle: Long, appName: String, aspects: String): ByteArray?`
 ///
-/// `aspects` is a comma-separated string, e.g. `"delivery"`.
+/// `aspects` may be dot- or comma-separated, e.g. `"delivery"` or
+/// `"channel.subscribe"`.
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeDestinationHash(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeDestinationHash(
     mut env: JNIEnv,
     _class: JClass,
     id_handle: jlong,
@@ -268,7 +285,8 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeDestina
 ) -> jbyteArray {
     let app = jstring_to_string(&mut env, &app_name);
     let asp = jstring_to_string(&mut env, &aspects);
-    let parts: Vec<&str> = asp.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+    let parts_owned = parse_destination_aspects(&app, &asp);
+    let parts: Vec<&str> = parts_owned.iter().map(|segment| segment.as_str()).collect();
 
     match rns::destination_hash_for(id_handle as u64, &app, &parts) {
         Ok(h) => vec_to_jbytes(&env, &h),
@@ -283,7 +301,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeDestina
 
 /// `RetichatBridge.nativeTransportHasPath(destHash: ByteArray): Boolean`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeTransportHasPath(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeTransportHasPath(
     env: JNIEnv,
     _class: JClass,
     dest_hash: JByteArray,
@@ -292,9 +310,31 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeTranspo
     if rns::transport_has_path(&h) { 1 } else { 0 }
 }
 
+/// `RetichatBridge.nativeTransportIsPathVerifiedThisSession(destHash: ByteArray): Boolean`
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeTransportIsPathVerifiedThisSession(
+    env: JNIEnv,
+    _class: JClass,
+    dest_hash: JByteArray,
+) -> jint {
+    let h = jbytes_to_vec(&env, &dest_hash);
+    if rns::transport_is_path_verified_this_session(&h) { 1 } else { 0 }
+}
+
+/// `RetichatBridge.nativeTransportIdentityKnown(destHash: ByteArray): Boolean`
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeTransportIdentityKnown(
+    env: JNIEnv,
+    _class: JClass,
+    dest_hash: JByteArray,
+) -> jint {
+    let h = jbytes_to_vec(&env, &dest_hash);
+    if rns::identity_known(&h) { 1 } else { 0 }
+}
+
 /// `RetichatBridge.nativeTransportRequestPath(destHash: ByteArray): Int`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeTransportRequestPath(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeTransportRequestPath(
     env: JNIEnv,
     _class: JClass,
     dest_hash: JByteArray,
@@ -303,9 +343,34 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeTranspo
     ok_or_neg(rns::transport_request_path(&h))
 }
 
+/// `RetichatBridge.nativeTransportClonePathAndIdentity(sourceHash, destHash): Int`
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeTransportClonePathAndIdentity(
+    env: JNIEnv,
+    _class: JClass,
+    source_hash: JByteArray,
+    dest_hash: JByteArray,
+) -> jint {
+    let source = jbytes_to_vec(&env, &source_hash);
+    let dest = jbytes_to_vec(&env, &dest_hash);
+    if source.is_empty() || dest.is_empty() || source == dest {
+        return 0;
+    }
+
+    if !Transport::clone_path(&source, &dest) {
+        return 0;
+    }
+
+    if let Some(public_key) = Identity::recall_public_key(&source) {
+        let _ = Identity::remember_destination(&dest, &public_key, None);
+    }
+
+    1
+}
+
 /// `RetichatBridge.nativeTransportHopsTo(destHash: ByteArray): Int`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeTransportHopsTo(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeTransportHopsTo(
     env: JNIEnv,
     _class: JClass,
     dest_hash: JByteArray,
@@ -318,7 +383,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeTranspo
 
 /// `RetichatBridge.nativeRouterCreate(identityHandle: Long, storagePath: String): Long`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRouterCreate(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeRouterCreate(
     mut env: JNIEnv,
     _class: JClass,
     identity_handle: jlong,
@@ -330,7 +395,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRouterC
 
 /// `RetichatBridge.nativeRouterRegisterDelivery(router: Long, identity: Long, name: String, stampCost: Int): Long`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRouterRegisterDelivery(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeRouterRegisterDelivery(
     mut env: JNIEnv,
     _class: JClass,
     router: jlong,
@@ -353,7 +418,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRouterR
 ///               signatureValid: Boolean)
 /// ```
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRouterSetDeliveryCallback(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeRouterSetDeliveryCallback(
     mut env: JNIEnv,
     _class: JClass,
     router: jlong,
@@ -430,7 +495,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRouterS
 /// fun onAnnounce(destHash: ByteArray, displayName: String?)
 /// ```
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRouterSetAnnounceCallback(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeRouterSetAnnounceCallback(
     mut env: JNIEnv,
     _class: JClass,
     router: jlong,
@@ -497,7 +562,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRouterS
 
 /// `RetichatBridge.nativeRouterAnnounce(router: Long, destHash: ByteArray): Int`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRouterAnnounce(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeRouterAnnounce(
     env: JNIEnv,
     _class: JClass,
     router: jlong,
@@ -514,7 +579,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRouterA
 ///   * once on every interface false→true online transition, and
 ///   * every `refresh_secs` seconds (pass 0.0 for up-edge-only).
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeTransportPublishDestination(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeTransportPublishDestination(
     env: JNIEnv,
     _class: JClass,
     dest_hash: JByteArray,
@@ -527,7 +592,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeTranspo
 
 /// `RetichatBridge.nativeTransportUnpublishDestination(destHash: ByteArray): Int`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeTransportUnpublishDestination(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeTransportUnpublishDestination(
     env: JNIEnv,
     _class: JClass,
     dest_hash: JByteArray,
@@ -539,7 +604,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeTranspo
 
 /// `RetichatBridge.nativeRouterWatchDestination(router: Long, destHash: ByteArray): Int`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRouterWatchDestination(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeRouterWatchDestination(
     env: JNIEnv,
     _class: JClass,
     router: jlong,
@@ -551,7 +616,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRouterW
 
 /// `RetichatBridge.nativeRouterProcessOutbound(router: Long): Int`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRouterProcessOutbound(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeRouterProcessOutbound(
     _env: JNIEnv,
     _class: JClass,
     router: jlong,
@@ -561,7 +626,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRouterP
 
 /// `RetichatBridge.nativeRouterDestroy(router: Long): Int`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRouterDestroy(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeRouterDestroy(
     _env: JNIEnv,
     _class: JClass,
     router: jlong,
@@ -573,7 +638,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRouterD
 
 /// `RetichatBridge.nativeMessageCreate(destHash: ByteArray, srcHash: ByteArray, content: String, title: String, method: Int, identityHandle: Long): Long`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeMessageCreate(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeMessageCreate(
     mut env: JNIEnv,
     _class: JClass,
     dest_hash: JByteArray,
@@ -592,7 +657,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeMessage
 
 /// `RetichatBridge.nativeMessageAddAttachment(handle: Long, filename: String, data: ByteArray): Int`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeMessageAddAttachment(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeMessageAddAttachment(
     mut env: JNIEnv,
     _class: JClass,
     handle: jlong,
@@ -606,7 +671,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeMessage
 
 /// `RetichatBridge.nativeMessageAddFieldString(handle: Long, key: Int, value: String): Int`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeMessageAddFieldString(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeMessageAddFieldString(
     mut env: JNIEnv,
     _class: JClass,
     handle: jlong,
@@ -619,7 +684,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeMessage
 
 /// `RetichatBridge.nativeMessageAddFieldBool(handle: Long, key: Int, value: Boolean): Int`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeMessageAddFieldBool(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeMessageAddFieldBool(
     _env: JNIEnv,
     _class: JClass,
     handle: jlong,
@@ -631,7 +696,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeMessage
 
 /// `RetichatBridge.nativeMessageSend(router: Long, msg: Long): Int`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeMessageSend(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeMessageSend(
     _env: JNIEnv,
     _class: JClass,
     router: jlong,
@@ -647,7 +712,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeMessage
 /// skip), then dispatch on the global `LXMRouter`. No router handle is
 /// required. Returns 0 on success, -1 on failure (call `nativeLastError`).
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeMessageSendViaAppLinks(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeMessageSendViaAppLinks(
     _env: JNIEnv,
     _class: JClass,
     msg: jlong,
@@ -661,7 +726,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeMessage
 /// `ConnectivityManager.NetworkCallback` when the active network flips
 /// (WiFi lost, cellular came up) so the next AppLinks send re-races.
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeAppLinksInvalidateLiveness(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeAppLinksInvalidateLiveness(
     env: JNIEnv,
     _class: JClass,
     dest_hash: JByteArray,
@@ -676,7 +741,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeAppLink
 
 /// `RetichatBridge.nativeMessageGetState(handle: Long): Int`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeMessageGetState(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeMessageGetState(
     _env: JNIEnv,
     _class: JClass,
     handle: jlong,
@@ -692,7 +757,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeMessage
 
 /// `RetichatBridge.nativeMessageGetProgress(handle: Long): Float`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeMessageGetProgress(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeMessageGetProgress(
     _env: JNIEnv,
     _class: JClass,
     handle: jlong,
@@ -708,7 +773,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeMessage
 
 /// `RetichatBridge.nativeMessageGetHash(handle: Long): ByteArray?`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeMessageGetHash(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeMessageGetHash(
     env: JNIEnv,
     _class: JClass,
     handle: jlong,
@@ -724,7 +789,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeMessage
 
 /// `RetichatBridge.nativeMessageDestroy(handle: Long): Int`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeMessageDestroy(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeMessageDestroy(
     _env: JNIEnv,
     _class: JClass,
     handle: jlong,
@@ -736,7 +801,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeMessage
 
 /// `RetichatBridge.nativeRouterSetPropagationNode(router: Long, destHash: ByteArray): Int`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRouterSetPropagationNode(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeRouterSetPropagationNode(
     env: JNIEnv,
     _class: JClass,
     router: jlong,
@@ -748,7 +813,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRouterS
 
 /// `RetichatBridge.nativeRouterRequestMessages(router: Long, identity: Long): Int`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRouterRequestMessages(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeRouterRequestMessages(
     _env: JNIEnv,
     _class: JClass,
     router: jlong,
@@ -759,7 +824,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRouterR
 
 /// `RetichatBridge.nativeRouterGetPropagationState(router: Long): Int`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRouterGetPropagationState(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeRouterGetPropagationState(
     _env: JNIEnv,
     _class: JClass,
     router: jlong,
@@ -775,7 +840,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRouterG
 
 /// `RetichatBridge.nativeRouterGetPropagationProgress(router: Long): Float`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRouterGetPropagationProgress(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeRouterGetPropagationProgress(
     _env: JNIEnv,
     _class: JClass,
     router: jlong,
@@ -791,7 +856,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRouterG
 
 /// `RetichatBridge.nativeRouterCancelPropagation(router: Long): Int`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRouterCancelPropagation(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeRouterCancelPropagation(
     _env: JNIEnv,
     _class: JClass,
     router: jlong,
@@ -805,7 +870,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRouterC
 
 /// `RetichatBridge.nativeSetDropAnnounces(enabled: Boolean): Unit`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeSetDropAnnounces(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeSetDropAnnounces(
     _env: JNIEnv,
     _class: JClass,
     enabled: jni::sys::jboolean,
@@ -819,7 +884,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeSetDrop
 
 /// `RetichatBridge.nativeSetKeepaliveInterval(secs: Double): Int`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeSetKeepaliveInterval(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeSetKeepaliveInterval(
     _env: JNIEnv,
     _class: JClass,
     secs: jni::sys::jdouble,
@@ -834,7 +899,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeSetKeep
 /// `RetichatBridge.nativeIdentitySign(handle: Long, data: ByteArray): ByteArray?`
 /// Returns 64-byte Ed25519 signature, or null on error.
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeIdentitySign(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeIdentitySign(
     env: JNIEnv,
     _class: JClass,
     handle: jlong,
@@ -856,7 +921,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeIdentit
 
 /// `RetichatBridge.nativeWatchAnnounce(destHash: ByteArray): Unit`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeWatchAnnounce(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeWatchAnnounce(
     env: JNIEnv,
     _class: JClass,
     dest_hash: JByteArray,
@@ -867,7 +932,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeWatchAn
 
 /// `RetichatBridge.nativeUnwatchAnnounce(destHash: ByteArray): Unit`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeUnwatchAnnounce(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeUnwatchAnnounce(
     env: JNIEnv,
     _class: JClass,
     dest_hash: JByteArray,
@@ -882,7 +947,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeUnwatch
 
 /// `RetichatBridge.nativeTransportSavePaths(): Int`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeTransportSavePaths(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeTransportSavePaths(
     _env: JNIEnv,
     _class: JClass,
 ) -> jint {
@@ -895,9 +960,9 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeTranspo
 // ---------------------------------------------------------------------------
 
 /// `RetichatBridge.nativePacketSendToHash(destHash, app, aspects, payload): Int`
-/// `aspects` is a comma-separated string.
+/// `aspects` may be dot- or comma-separated.
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativePacketSendToHash(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativePacketSendToHash(
     mut env: JNIEnv,
     _class: JClass,
     dest_hash: JByteArray,
@@ -908,11 +973,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativePacketS
     let hash = jbytes_to_vec(&env, &dest_hash);
     let app = jstring_to_string(&mut env, &app_name);
     let asp_str = jstring_to_string(&mut env, &aspects);
-    let asp_vec: Vec<String> = asp_str
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
+    let asp_vec = parse_destination_aspects(&app, &asp_str);
     let data = jbytes_to_vec(&env, &payload);
 
     let dest_handle = match rns::destination_create_outbound_from_hash(&hash, &app, asp_vec) {
@@ -946,7 +1007,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativePacketS
 
 /// `RetichatBridge.nativeLinkRequest(destHash, app, aspects, identity, path, payload, timeoutSecs): ByteArray?`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeLinkRequest(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeLinkRequest(
     mut env: JNIEnv,
     _class: JClass,
     dest_hash: JByteArray,
@@ -960,11 +1021,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeLinkReq
     let hash = jbytes_to_vec(&env, &dest_hash);
     let app = jstring_to_string(&mut env, &app_name);
     let asp_str = jstring_to_string(&mut env, &aspects);
-    let asp_vec: Vec<String> = asp_str
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
+    let asp_vec = parse_destination_aspects(&app, &asp_str);
     let p = jstring_to_string(&mut env, &path);
     let data = jbytes_to_vec(&env, &payload);
 
@@ -995,7 +1052,7 @@ static RFED_DELIVERY_CB: Mutex<Option<(JavaVM, GlobalRef)>> = Mutex::new(None);
 
 /// `RetichatBridge.nativeRfedDeliveryStart(identityHandle: Long, callback: RfedBlobCallback): Int`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRfedDeliveryStart(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeRfedDeliveryStart(
     mut env: JNIEnv,
     _class: JClass,
     identity_handle: jlong,
@@ -1090,7 +1147,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRfedDel
 
 /// `RetichatBridge.nativeRfedDeliveryAnnounce(): Int`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRfedDeliveryAnnounce(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeRfedDeliveryAnnounce(
     _env: JNIEnv,
     _class: JClass,
 ) -> jint {
@@ -1108,7 +1165,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRfedDel
 
 /// `RetichatBridge.nativeRfedDeliveryStop(): Int`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeRfedDeliveryStop(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeRfedDeliveryStop(
     _env: JNIEnv,
     _class: JClass,
 ) -> jint {
@@ -1159,7 +1216,7 @@ fn channel_destination(name: &str) -> Result<Destination, String> {
 
 /// `RetichatBridge.nativeChannelEncrypt(name: String, plaintext: ByteArray): ByteArray?`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeChannelEncrypt(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeChannelEncrypt(
     mut env: JNIEnv,
     _class: JClass,
     name: JString,
@@ -1185,7 +1242,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeChannel
 
 /// `RetichatBridge.nativeChannelDecrypt(name: String, ciphertext: ByteArray): ByteArray?`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeChannelDecrypt(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeChannelDecrypt(
     mut env: JNIEnv,
     _class: JClass,
     name: JString,
@@ -1214,7 +1271,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeChannel
 /// Returns 32-byte stamp, or null when cost == 0 (no stamp required) or PoW
 /// fails.  See iOS retichat_compute_channel_stamp for the contract.
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeComputeChannelStamp(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeComputeChannelStamp(
     env: JNIEnv,
     _class: JClass,
     payload: JByteArray,
@@ -1244,7 +1301,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeCompute
 ///   [ ts_ms_be(8) | channel_id_hash(16) | EC_encrypted(prelude || lxmf_tail) ]
 /// Caller strips the first 8 bytes before sending; uses tsMs for local dedup.
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeChannelLxmPack(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeChannelLxmPack(
     mut env: JNIEnv,
     _class: JClass,
     name: JString,
@@ -1382,7 +1439,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeChannel
 ///   [28..32]  content_len_be (u32)
 ///   [32..]    title bytes, then content bytes
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeChannelLxmUnpack(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeChannelLxmUnpack(
     mut env: JNIEnv,
     _class: JClass,
     name: JString,
@@ -1500,7 +1557,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeChannel
 /// rfed channel subscribe/pull.  Mirrors `ChannelKeypair::hash` in the
 /// Rust core (and `channelHash(name:)` in the iOS Swift client).
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeChannelHash16(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeChannelHash16(
     mut env: JNIEnv,
     _class: JClass,
     name: JString,
@@ -1533,7 +1590,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeChannel
 /// `aspectsCsv` is `.`-separated (e.g. "delivery", "channel"); pass an
 /// empty string for no aspects.
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeAppLinkOpen(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeAppLinkOpen(
     mut env: JNIEnv,
     _class: JClass,
     router: jlong,
@@ -1559,7 +1616,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeAppLink
 /// path-race succeeds AppLinks holds the outbound link open so request-style
 /// traffic can reuse it directly.
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeAppLinkOpenPersistent(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeAppLinkOpenPersistent(
     mut env: JNIEnv,
     _class: JClass,
     router: jlong,
@@ -1581,7 +1638,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeAppLink
 
 /// `RetichatBridge.nativeAppLinkClose(router, destHash): Int`
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeAppLinkClose(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeAppLinkClose(
     env: JNIEnv,
     _class: JClass,
     router: jlong,
@@ -1596,7 +1653,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeAppLink
 /// Returns 0..4 (NONE, PATH_REQUESTED, ESTABLISHING, ACTIVE, DISCONNECTED)
 /// or -1 on parameter error.
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeAppLinkStatus(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeAppLinkStatus(
     env: JNIEnv,
     _class: JClass,
     router: jlong,
@@ -1616,7 +1673,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeAppLink
 ///
 /// Explicit deterministic re-open trigger for an existing app link.
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeAppLinkReopen(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeAppLinkReopen(
     env: JNIEnv,
     _class: JClass,
     router: jlong,
@@ -1629,10 +1686,11 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeAppLink
 /// `RetichatBridge.nativeAppLinkRegisterReconnect(router, aspect): Int`
 ///
 /// LXMF only auto-reconnects app-links that announce under `lxmf.delivery`.
-/// Call once per extra aspect (e.g. "rfed.channel", "rfed.notify",
-/// "rfed.delivery") at startup.
+/// Call once per extra aspect (e.g. "rfed.channel.subscribe",
+/// "rfed.channel.publish", "rfed.notify.register", "rfed.delivery", ...) at
+/// startup.
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeAppLinkRegisterReconnect(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeAppLinkRegisterReconnect(
     mut env: JNIEnv,
     _class: JClass,
     router: jlong,
@@ -1652,7 +1710,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeAppLink
 /// onAvailable callback — it is the only thing that retries an offline
 /// destination (DESIGN_PRINCIPLES.md §1, §3).
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeAppLinkNetworkChanged(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeAppLinkNetworkChanged(
     _env: JNIEnv,
     _class: JClass,
     router: jlong,
@@ -1670,7 +1728,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeAppLink
 /// the Kotlin side; the underlying Rust registry can hold multiple, but
 /// we only need one process-wide fan-out).
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeAppLinkRegisterStatusCallback(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeAppLinkRegisterStatusCallback(
     env: JNIEnv,
     _class: JClass,
     router: jlong,
@@ -1721,6 +1779,59 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeAppLink
     ok_or_neg(result)
 }
 
+/// `RetichatBridge.nativeAppLinkRegisterPacketCallback(router, destHash, cb): Int`
+///
+/// `cb` is a Kotlin `AppLinkPacketCallback`:
+/// ```kotlin
+/// interface AppLinkPacketCallback { fun onPacket(bytes: ByteArray) }
+/// ```
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeAppLinkRegisterPacketCallback(
+    mut env: JNIEnv,
+    _class: JClass,
+    router: jlong,
+    dest_hash: JByteArray,
+    callback: JObject,
+) -> jint {
+    let hash = jbytes_to_vec(&env, &dest_hash);
+    let jvm = match env.get_java_vm() {
+        Ok(vm) => vm,
+        Err(e) => {
+            rns::set_error(format!("Failed to get JavaVM: {}", e));
+            return -1;
+        }
+    };
+    let global_ref = match env.new_global_ref(&callback) {
+        Ok(r) => r,
+        Err(e) => {
+            rns::set_error(format!("Failed to create global ref: {}", e));
+            return -1;
+        }
+    };
+
+    let result = lxmf::router_register_app_link_packet_callback(
+        router as u64,
+        &hash,
+        Arc::new(move |data: &[u8]| {
+            let mut env = match jvm.attach_current_thread() {
+                Ok(env) => env,
+                Err(_) => return,
+            };
+            let j_blob = match env.byte_array_from_slice(data) {
+                Ok(blob) => blob,
+                Err(_) => return,
+            };
+            let _ = env.call_method(
+                global_ref.as_obj(),
+                "onPacket",
+                "([B)V",
+                &[JValue::Object(&j_blob)],
+            );
+        }),
+    );
+    ok_or_neg(result)
+}
+
 /// `RetichatBridge.nativeAppLinkSendAsync(router, destHash, appName,
 ///   aspectsCsv, payload, callback): Int`
 ///
@@ -1728,7 +1839,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeAppLink
 /// `callback.onResult(status)` exactly once: 0 = delivered (LRPROOF),
 /// 1 = failed.
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeAppLinkSendAsync(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeAppLinkSendAsync(
     mut env: JNIEnv,
     _class: JClass,
     router: jlong,
@@ -1830,7 +1941,7 @@ pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeAppLink
 /// Mirrors `lxmf_app_link_request_async` in LXMF-rust/src/cffi.rs and
 /// the iOS Swift trampoline in LxmfClient.swift.
 #[no_mangle]
-pub extern "system" fn Java_com_retichat_app_bridge_RetichatBridge_nativeAppLinkRequestAsync(
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeAppLinkRequestAsync(
     mut env: JNIEnv,
     _class: JClass,
     router: jlong,

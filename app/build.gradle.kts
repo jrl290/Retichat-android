@@ -14,11 +14,11 @@ if (file("google-services.json").exists()) {
 }
 
 android {
-    namespace = "com.retichat.app"
+    namespace = "com.newendian.retichat"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.retichat.app"
+        applicationId = "com.newendian.retichat"
         minSdk = 26
         targetSdk = 34
         versionCode = 1

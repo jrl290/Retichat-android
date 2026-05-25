@@ -1,0 +1,5 @@
+{
+  "_comment": "Copy this file to app/src/main/assets/PushBridgeConfig.json and fill in the two 32-char hex destination hashes from your deployed fcm-bridge.",
+  "FCMRegistrationDestinationHash": "",
+  "FCMRelayDestinationHash": ""
+}

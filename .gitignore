@@ -21,6 +21,7 @@ app/src/main/jniLibs/
 identity.bin
 rns_config/
 .vscode/
+app/src/main/assets/PushBridgeConfig.json
 # Stray empty marker files
 /Join
 /Start

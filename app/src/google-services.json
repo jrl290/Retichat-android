@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "493302151668",
+    "project_id": "retichat-999df",
+    "storage_bucket": "retichat-999df.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:493302151668:android:8f57ae1c029f2d489161a1",
+        "android_client_info": {
+          "package_name": "com.newendian.retichat"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCBJvsAa7s2uk70d-JA4qbBQOjS_sEU-Xs"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
