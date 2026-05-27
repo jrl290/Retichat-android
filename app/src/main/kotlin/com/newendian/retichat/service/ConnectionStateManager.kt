@@ -42,6 +42,12 @@ import kotlin.coroutines.suspendCoroutine
 object ConnectionStateManager {
     private const val TAG = "ConnState"
 
+    internal enum class RequestOpenMode {
+        NONE,
+        EPHEMERAL,
+        PERSISTENT,
+    }
+
     /** Window in which a peer's announce justifies optimistic DIRECT. */
     private const val DIRECT_ANNOUNCE_WINDOW_MS = 120_000L
 
@@ -59,6 +65,12 @@ object ConnectionStateManager {
             segments == listOf("channel", "stream") ||
                 segments == listOf("propagation", "stream")
             )
+    }
+
+    internal fun requestOpenMode(usePersistentLink: Boolean, currentStatus: Int): RequestOpenMode {
+        if (usePersistentLink) return RequestOpenMode.PERSISTENT
+        if (currentStatus != RetichatBridge.AppLinkStatus.ACTIVE) return RequestOpenMode.EPHEMERAL
+        return RequestOpenMode.NONE
     }
 
     private val scope: CoroutineScope =
@@ -317,12 +329,18 @@ object ConnectionStateManager {
 
         val usePersistentLink = prefersPersistentAppLink(app, aspectsCsv)
 
-        if (RetichatBridge.appLinkStatus(rh, destHash) != RetichatBridge.AppLinkStatus.ACTIVE) {
-            if (usePersistentLink) {
-                RetichatBridge.appLinkOpenPersistent(rh, destHash, app, aspectsCsv)
-            } else {
+        when (requestOpenMode(usePersistentLink, RetichatBridge.appLinkStatus(rh, destHash))) {
+            RequestOpenMode.PERSISTENT -> {
+            // Always upgrade request destinations to a held persistent link.
+            // AppLinks `open()` can report ACTIVE once the path is READY even
+            // though no requestable handle exists yet; rfed.channel.stream and
+            // rfed.propagation.stream need the held link, not just a ready route.
+            RetichatBridge.appLinkOpenPersistent(rh, destHash, app, aspectsCsv)
+            }
+            RequestOpenMode.EPHEMERAL -> {
                 RetichatBridge.appLinkOpen(rh, destHash, app, aspectsCsv)
             }
+            RequestOpenMode.NONE -> Unit
         }
         // Wait up to 5 s for ACTIVE — via status callback, not polling.
         // // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1
@@ -374,6 +392,31 @@ object ConnectionStateManager {
                 RetichatBridge.appLinkOpen(rh, destHash, app, aspectsCsv)
             }
         }
+    }
+
+    /**
+     * Force a fresh persistent APP_LINK reopen and wait for the next ACTIVE edge.
+     *
+     * Used by wake-driven propagation sync so it does not trust a stale held
+     * propagation link that predates a backbone reconnect.
+     */
+    suspend fun reopenPersistentAppLinkAndAwaitActive(
+        destHash: ByteArray,
+        app: String,
+        aspectsCsv: String,
+        timeoutMs: Long = 5_000L,
+    ): Boolean = withContext(Dispatchers.IO) {
+        val rh = routerHandle
+        if (rh == 0L) return@withContext false
+
+        if (!RetichatBridge.appLinkOpenPersistent(rh, destHash, app, aspectsCsv)) {
+            return@withContext false
+        }
+        if (!RetichatBridge.appLinkReopen(rh, destHash)) {
+            return@withContext false
+        }
+
+        awaitAppLinkActive(destHash, timeoutMs)
     }
 
     /** Send a plain DATA packet via AppLinks and await delivery proof or terminal failure. */

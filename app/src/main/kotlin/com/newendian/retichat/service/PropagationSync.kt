@@ -25,8 +25,9 @@ import kotlinx.coroutines.delay
 object PropagationSync {
     private const val TAG = "PropagationSync"
     private const val DEADLINE_MS = 20_000L
+    private const val WAKE_LINK_READY_TIMEOUT_MS = 5_000L
 
-    suspend fun runOnce(context: Context): Boolean {
+    suspend fun runOnce(context: Context, requireFreshTransport: Boolean = false): Boolean {
         val identityHandle = StackRuntime.identityHandle
         val routerHandle = StackRuntime.routerHandle
         if (identityHandle == 0L || routerHandle == 0L) {
@@ -38,6 +39,20 @@ object PropagationSync {
             userConfiguredHash = resolvePropagationOverride(context)
         )
         val nodeHash = nodeManager.primaryNode
+
+        if (requireFreshTransport) {
+            Log.d(TAG, "wake sync: reopening lxmf.propagation app-link before pull")
+            if (!ConnectionStateManager.reopenPersistentAppLinkAndAwaitActive(
+                    nodeHash,
+                    "lxmf",
+                    "propagation",
+                    timeoutMs = WAKE_LINK_READY_TIMEOUT_MS,
+                )
+            ) {
+                Log.w(TAG, "wake sync: propagation app-link did not reach ACTIVE")
+                return false
+            }
+        }
 
         if (!RetichatBridge.routerSetPropagationNode(routerHandle, nodeHash)) {
             Log.w(TAG, "setPropagationNode failed: ${RetichatBridge.lastError()}")

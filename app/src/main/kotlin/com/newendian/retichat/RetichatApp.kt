@@ -12,6 +12,7 @@ import com.newendian.retichat.service.ConnectionStateManager
 import com.newendian.retichat.service.NetworkMonitor
 import com.newendian.retichat.service.PropagationSync
 import com.newendian.retichat.service.RfedChannelClient
+import com.newendian.retichat.service.StackRuntime
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -36,9 +37,6 @@ class RetichatApp : Application() {
 
     companion object {
         private const val TAG = "RetichatApp"
-
-        /** Initial foreground propagation poll delay (matches iOS 5 s). */
-        private const val INITIAL_POLL_DELAY_MS = 5_000L
 
         /** Foreground propagation poll interval (matches iOS 300 s). */
         private const val POLL_INTERVAL_MS = 300_000L
@@ -94,9 +92,17 @@ class RetichatApp : Application() {
                 startedActivities++
                 if (!isInForeground) {
                     isInForeground = true
+                    foregroundPropagationPullIssued = false
                     RetichatBridge.setKeepaliveInterval(0.0)
                     Log.d(TAG, "App foreground — keepalive=default")
-                    startForegroundPropagationPolling()
+                    val stackReady = StackRuntime.isReady &&
+                        StackRuntime.identityHandle != 0L &&
+                        StackRuntime.routerHandle != 0L
+                    if (stackReady) {
+                        onStackReadyWhileForeground()
+                    } else {
+                        Log.d(TAG, "App foreground — awaiting stack readiness for propagation pull")
+                    }
                     // Re-open active conversation links and refresh rfed path tracking.
                     ConnectionStateManager.onAppForeground()
                     ConnectionStateManager.openRfedNodeLink()
@@ -107,6 +113,7 @@ class RetichatApp : Application() {
                 if (startedActivities <= 0) {
                     startedActivities = 0
                     isInForeground = false
+                    foregroundPropagationPullIssued = false
                     RetichatBridge.setKeepaliveInterval(300.0)
                     Log.d(TAG, "App background — keepalive=300s")
                     stopForegroundPropagationPolling()
@@ -126,22 +133,47 @@ class RetichatApp : Application() {
     // ---- Foreground LXMF propagation polling ----
     //
     // Mirrors iOS `ChatRepository.startPropagationPolling()` — when the app
-    // is in the foreground, fire an initial poll after 5 s and then every
-    // 300 s thereafter. Job is cancelled when the app backgrounds.
+    // is in the foreground, fire one immediate poll as soon as the stack is
+    // ready, then continue every 300 s thereafter. Job is cancelled when the
+    // app backgrounds.
     private var foregroundPollJob: Job? = null
+    @Volatile private var foregroundPropagationPullIssued = false
 
-    private fun startForegroundPropagationPolling() {
+    private fun triggerForegroundPropagationPull() {
+        applicationScope.launch {
+            runCatching { PropagationSync.runOnce(this@RetichatApp) }
+                .onFailure { Log.w(TAG, "foreground propagation pull failed", it) }
+        }
+    }
+
+    internal fun onStackReadyWhileForeground() {
+        if (!isInForeground || foregroundPropagationPullIssued) return
+
+        foregroundPropagationPullIssued = true
+        Log.d(TAG, "Stack ready in foreground — triggering propagation pull")
+        triggerForegroundPropagationPull()
+        restartForegroundPropagationPolling(POLL_INTERVAL_MS)
+    }
+
+    private fun startForegroundPropagationPolling(initialDelayMs: Long) {
         if (foregroundPollJob?.isActive == true) return
         foregroundPollJob = applicationScope.launch {
-            // Initial poll after 5 s, then every 300 s — matches iOS cadence.
-            delay(INITIAL_POLL_DELAY_MS)
+            delay(initialDelayMs)
             while (isActive) {
                 runCatching { PropagationSync.runOnce(this@RetichatApp) }
                     .onFailure { Log.w(TAG, "foreground propagation poll failed", it) }
                 delay(POLL_INTERVAL_MS)
             }
         }
-        Log.d(TAG, "Foreground propagation poll started (interval=${POLL_INTERVAL_MS}ms)")
+        Log.d(
+            TAG,
+            "Foreground propagation poll started (initialDelay=${initialDelayMs}ms interval=${POLL_INTERVAL_MS}ms)",
+        )
+    }
+
+    private fun restartForegroundPropagationPolling(initialDelayMs: Long) {
+        stopForegroundPropagationPolling()
+        startForegroundPropagationPolling(initialDelayMs)
     }
 
     private fun stopForegroundPropagationPolling() {

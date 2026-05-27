@@ -34,19 +34,18 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
-import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.paging.compose.collectAsLazyPagingItems
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
@@ -55,6 +54,7 @@ import com.newendian.retichat.bridge.RetichatBridge
 import com.newendian.retichat.data.db.entity.AttachmentEntity
 import com.newendian.retichat.data.db.entity.ChannelMessageEntity
 import com.newendian.retichat.data.db.entity.MessageEntity
+import com.newendian.retichat.service.ConnectionStateManager
 import com.newendian.retichat.ui.theme.BubbleIncoming
 import com.newendian.retichat.ui.theme.BubbleIncomingDark
 import com.newendian.retichat.ui.theme.BubbleOutgoing
@@ -135,6 +135,8 @@ private fun DmConversationContent(
     }
 
     val context = LocalContext.current
+    val app = context.applicationContext as RetichatApp
+    val scope = rememberCoroutineScope()
     val lazyItems = viewModel?.pagedMessages?.collectAsLazyPagingItems()
     val contactNames = viewModel?.contactNames?.collectAsState()?.value ?: emptyMap()
     val chatEntity = viewModel?.chat?.collectAsState()?.value
@@ -147,12 +149,7 @@ private fun DmConversationContent(
     var pendingAttachmentName by remember { mutableStateOf<String?>(null) }
     var pendingAttachmentData by remember { mutableStateOf<ByteArray?>(null) }
 
-    // Rename dialog state (1:1 chats)
-    var showRenameDialog by remember { mutableStateOf(false) }
-    var renameText by remember { mutableStateOf(TextFieldValue("")) }
-
-    // Group info sheet state
-    var showGroupInfo by remember { mutableStateOf(false) }
+    var showChatInfo by remember { mutableStateOf(false) }
     val groupMembers = viewModel?.groupMembers?.collectAsState()?.value ?: emptyList()
 
     // File picker launcher
@@ -208,9 +205,7 @@ private fun DmConversationContent(
         ?: chatId.removePrefix("dm_").take(12)
 
     // Member count for group chats
-    val memberCount = if (isGroup) {
-        chatEntity?.memberHashes?.split(",")?.size ?: 0
-    } else 0
+    val memberCount = if (isGroup) groupMembers.size else 0
 
     Scaffold(
         topBar = {
@@ -218,13 +213,7 @@ private fun DmConversationContent(
                 title = {
                     Column(
                         modifier = Modifier.clickable {
-                            if (isGroup) {
-                                showGroupInfo = true
-                            } else {
-                                val currentName = chatEntity?.name ?: ""
-                                renameText = TextFieldValue(currentName, TextRange(0, currentName.length))
-                                showRenameDialog = true
-                            }
+                            showChatInfo = true
                         }
                     ) {
                         Text(displayTitle, style = MaterialTheme.typography.titleMedium)
@@ -244,13 +233,7 @@ private fun DmConversationContent(
                 },
                 actions = {
                     IconButton(onClick = {
-                        if (isGroup) {
-                            showGroupInfo = true
-                        } else {
-                            val currentName = chatEntity?.name ?: ""
-                            renameText = TextFieldValue(currentName, TextRange(0, currentName.length))
-                            showRenameDialog = true
-                        }
+                        showChatInfo = true
                     }) {
                         Icon(
                             Icons.Outlined.Info,
@@ -491,54 +474,45 @@ private fun DmConversationContent(
         }
     }
 
-    // ---- Rename contact dialog (1:1 chats) ----
-    if (showRenameDialog) {
-        AlertDialog(
-            onDismissRequest = { showRenameDialog = false },
-            title = { Text("Rename Contact") },
-            text = {
-                val hexPlaceholder = chatEntity?.memberHashes.orEmpty().take(12)
-                val focusRequester = remember { FocusRequester() }
-                LaunchedEffect(Unit) { focusRequester.requestFocus() }
-                OutlinedTextField(
-                    value = renameText,
-                    onValueChange = { renameText = it },
-                    label = { Text("Display name") },
-                    placeholder = { Text(hexPlaceholder, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)) },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words),
-                    modifier = Modifier.fillMaxWidth().focusRequester(focusRequester),
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        val destHashHex = chatEntity?.memberHashes.orEmpty()
-                        if (destHashHex.isNotBlank() && renameText.text.isNotBlank()) {
-                            viewModel?.renameContact(destHashHex, renameText.text.trim())
-                        }
-                        showRenameDialog = false
-                    },
-                    enabled = renameText.text.isNotBlank(),
-                ) {
-                    Text("Save")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showRenameDialog = false }) {
-                    Text("Cancel")
-                }
-            },
-        )
-    }
-
-    // ---- Group info bottom sheet ----
-    if (showGroupInfo && isGroup) {
-        GroupInfoSheet(
-            chatName = displayTitle,
+    if (showChatInfo) {
+        ChatInfoSheet(
+            chatId = chatId,
+            title = displayTitle,
+            isGroup = isGroup,
+            peerHashHex = chatEntity?.memberHashes?.takeIf { !isGroup },
             members = groupMembers,
             contactNames = contactNames,
-            onDismiss = { showGroupInfo = false },
+            onDismiss = { showChatInfo = false },
+            onRename = { newName ->
+                scope.launch {
+                    if (isGroup) {
+                        app.repository.renameGroup(chatId, newName)
+                    } else {
+                        val destHashHex = chatEntity?.memberHashes.orEmpty()
+                        if (destHashHex.isNotBlank()) {
+                            app.repository.renameContact(destHashHex, newName)
+                        }
+                    }
+                }
+            },
+            onArchive = {
+                scope.launch {
+                    app.repository.archiveChat(chatId)
+                    onBack()
+                }
+            },
+            onDelete = {
+                scope.launch {
+                    app.repository.deleteChat(chatId)
+                    onBack()
+                }
+            },
+            onLeave = {
+                scope.launch {
+                    app.repository.leaveGroupChat(chatId)
+                    onBack()
+                }
+            },
         )
     }
 }
@@ -566,24 +540,66 @@ private fun ChannelConversationContent(
         .collectAsState(initial = emptyList())
     val canPullMoreMap by app.rfedChannelClient.canPullMore.collectAsState()
     val pullInFlight by app.rfedChannelClient.pullInFlight.collectAsState()
-    // Only show the button when the rfed node has explicitly told us there
-    // are more messages queued (`more_pending = true`). Unknown (`null`)
-    // and "drained" (`false`) both hide the button.
-    val canPullMore = canPullMoreMap[channelId] == true
-    val isPulling = channelId in pullInFlight
+    val rfedLinkGeneration by app.rfedChannelClient.rfedLinkGeneration.collectAsState()
+    val channelPullKey = channelId.lowercase()
+    // Unknown (`null`) means "might be more" so the manual paging affordance
+    // stays visible until the server explicitly reports `more_pending = false`.
+    val canPullMore = canPullMoreMap[channelPullKey] != false
+    val isPulling = channelPullKey in pullInFlight
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val latestChannel by rememberUpdatedState(channel)
+    val latestIsPulling by rememberUpdatedState(isPulling)
+    var lastAutoPullGeneration by remember(channelId) { mutableStateOf<Int?>(null) }
 
     var draft by remember { mutableStateOf("") }
     var showInfo by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
 
-    // Auto-pull on first open. Subsequent pulls happen via the explicit button
-    // or push wakeups; we don't have an iOS-style link-generation tracker on
-    // Android, so a one-shot pull on screen entry suffices.
+    DisposableEffect(channelId) {
+        app.rfedChannelClient.retainRfedLinkMonitor()
+        onDispose {
+            app.rfedChannelClient.releaseRfedLinkMonitor()
+        }
+    }
+
     LaunchedEffect(channel?.id) {
         val ch = channel ?: return@LaunchedEffect
-        // Reset the flag so the button re-appears whenever the user re-enters.
+        app.rfedChannelClient.markChannelOpenedForStreaming(ch.id)
         app.rfedChannelClient.resetCanPullMore(ch.id)
+    }
+
+    // Auto-pull once per rfed node link establishment while the channel screen
+    // is open. Initial open also flows through this effect because the current
+    // generation is observed immediately when the screen starts collecting it.
+    LaunchedEffect(channel?.id, rfedLinkGeneration) {
+        val ch = channel ?: return@LaunchedEffect
+        if (ConnectionStateManager.rfedNodeLinkStatus() != RetichatBridge.AppLinkStatus.ACTIVE) {
+            return@LaunchedEffect
+        }
+        val generation = rfedLinkGeneration
+        if (lastAutoPullGeneration == generation) return@LaunchedEffect
+        if (isPulling) return@LaunchedEffect
+        lastAutoPullGeneration = generation
         runCatching { app.rfedChannelClient.pullDeferred(ch) }
+    }
+
+    DisposableEffect(lifecycleOwner, channelId) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                val ch = latestChannel ?: return@LifecycleEventObserver
+                lastAutoPullGeneration = rfedLinkGeneration
+                app.rfedChannelClient.resetCanPullMore(ch.id)
+                if (!latestIsPulling) {
+                    scope.launch {
+                        runCatching { app.rfedChannelClient.pullDeferred(ch) }
+                    }
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
     }
 
     val density = LocalDensity.current
@@ -679,8 +695,8 @@ private fun ChannelConversationContent(
                         viewModel = null,
                     )
                 }
-                // "Load earlier messages" — visible only when the rfed node has
-                // not yet reported `more_pending = false` for this channel.
+                // "Load earlier messages" — visible until the server explicitly
+                // reports `more_pending = false` for this channel.
                 if (canPullMore && channel != null) {
                     item(key = "__channel_load_earlier__") {
                         Row(
@@ -787,66 +803,6 @@ private fun ChannelConversationContent(
                 }
             },
         )
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun GroupInfoSheet(
-    chatName: String,
-    members: List<com.newendian.retichat.data.db.entity.GroupMemberEntity>,
-    contactNames: Map<String, String>,
-    onDismiss: () -> Unit,
-) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 24.dp)
-                .padding(bottom = 32.dp),
-        ) {
-            Text(
-                text = chatName,
-                style = MaterialTheme.typography.headlineSmall,
-            )
-            Spacer(Modifier.height(4.dp))
-            Text(
-                text = "${members.size} members",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.height(16.dp))
-            HorizontalDivider()
-            Spacer(Modifier.height(8.dp))
-
-            LazyColumn {
-                items(members) { member ->
-                    val name = contactNames[member.destHashHex]
-                        ?: member.displayName.ifBlank { member.destHashHex.take(12) }
-                    ListItem(
-                        headlineContent = { Text(name) },
-                        supportingContent = {
-                            Text(
-                                member.destHashHex.take(16) + "…",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        },
-                        leadingContent = {
-                            Icon(
-                                Icons.Default.Person,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                            )
-                        },
-                    )
-                }
-            }
-        }
     }
 }
 

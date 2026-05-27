@@ -68,7 +68,11 @@ private const val GRACE_SHUTDOWN_MS = 30_000L  // 30s grace avoids stack teardow
         val newCount = refCount.incrementAndGet()
         Log.d(TAG, "acquire: refCount=$newCount")
 
-        return startIfNeeded(context.applicationContext)
+        val ready = startIfNeeded(context.applicationContext)
+        if (ready) {
+            (context.applicationContext as? RetichatApp)?.onStackReadyWhileForeground()
+        }
+        return ready
     }
 
     /** Synchronous variant for callers without a coroutine scope. */
@@ -144,13 +148,13 @@ private const val GRACE_SHUTDOWN_MS = 30_000L  // 30s grace avoids stack teardow
         var interfaces = app.database.interfaceConfigDao().enabledInterfaces()
         val useDefault = interfaces.isEmpty() && UserPreferences.isDefaultTcpEnabled(app)
         if (useDefault) {
-            val endpoints = DefaultEndpointManager.fallbackEndpoints()
+            val endpoints = DefaultEndpointManager.selectFallbackEndpoints()
             Log.i(
                 TAG,
                 "No interfaces configured — default backbones " +
                     endpoints.joinToString { "${it.first}:${it.second}" },
             )
-            interfaces = DefaultEndpointManager.fallbackInterfaceConfigs()
+            interfaces = DefaultEndpointManager.fallbackInterfaceConfigs(endpoints)
         }
         writeReticulumConfig(configDir, interfaces)
 

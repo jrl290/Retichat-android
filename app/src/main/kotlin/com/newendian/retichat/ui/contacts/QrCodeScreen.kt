@@ -26,6 +26,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import com.newendian.retichat.IdentityShareFormat
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.common.InputImage
 import com.google.zxing.BarcodeFormat
@@ -36,7 +37,7 @@ import java.util.concurrent.Executors
  * Shows the user's own LXMF destination hash as a QR code (SHOW mode)
  * or opens the camera to scan another user's QR code (SCAN mode).
  *
- * The QR payload is the hex-encoded LXMF destination hash (32 hex chars).
+ * The QR payload is a shared contact URI compatible with Columba and Retichat iOS.
  */
 object QrCodeScreen {
     enum class Mode { SHOW, SCAN }
@@ -84,8 +85,10 @@ private fun ShowQrContent(destHashHex: String, publicKeyHex: String = "") {
         return
     }
 
-    val lxmaUri = if (publicKeyHex.isNotBlank()) "lxma://$destHashHex.$publicKeyHex" else "lxma://$destHashHex"
-    val bitmap = remember(lxmaUri) { generateQrBitmap(lxmaUri, 512) }
+    val shareUri = remember(destHashHex, publicKeyHex) {
+        IdentityShareFormat.encode(destHashHex, publicKeyHex) ?: "lxmf://$destHashHex"
+    }
+    val bitmap = remember(shareUri) { generateQrBitmap(shareUri, 512) }
     val context = LocalContext.current
     var copied by remember { mutableStateOf(false) }
 
@@ -99,7 +102,7 @@ private fun ShowQrContent(destHashHex: String, publicKeyHex: String = "") {
         }
         Spacer(Modifier.height(24.dp))
         Text(
-            text = lxmaUri,
+            text = destHashHex,
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -107,7 +110,7 @@ private fun ShowQrContent(destHashHex: String, publicKeyHex: String = "") {
         OutlinedButton(
             onClick = {
                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                clipboard.setPrimaryClip(ClipData.newPlainText("LXMF Address", lxmaUri))
+                clipboard.setPrimaryClip(ClipData.newPlainText("LXMF Destination Hash", destHashHex))
                 copied = true
             },
         ) {
@@ -117,11 +120,11 @@ private fun ShowQrContent(destHashHex: String, publicKeyHex: String = "") {
                 modifier = Modifier.size(18.dp),
             )
             Spacer(Modifier.width(8.dp))
-            Text(if (copied) "Copied!" else "Copy Address")
+            Text(if (copied) "Copied!" else "Copy Hash")
         }
         Spacer(Modifier.height(8.dp))
         Text(
-            text = "Share this QR code or link so others can message you",
+            text = "Share this QR code or hash so others can message you",
             style = MaterialTheme.typography.bodyMedium,
         )
     }
@@ -222,21 +225,9 @@ private fun processBarcode(imageProxy: ImageProxy, onResult: (String) -> Unit) {
         .addOnSuccessListener { barcodes ->
             for (barcode in barcodes) {
                 val value = barcode.rawValue ?: continue
-                // Accept lxma://<hash>[.<pubkey>] (new format)
-                val lxmaMatch = Regex("^lxma://([0-9a-fA-F]{32})(?:\\.[0-9a-fA-F]+)?$", RegexOption.IGNORE_CASE).find(value)
-                if (lxmaMatch != null) {
-                    onResult(lxmaMatch.groupValues[1].lowercase())
-                    break
-                }
-                // Accept lxmf://<hash> (backwards compat)
-                val lxmfMatch = Regex("^lxmf://([0-9a-fA-F]{32})$", RegexOption.IGNORE_CASE).find(value)
-                if (lxmfMatch != null) {
-                    onResult(lxmfMatch.groupValues[1].lowercase())
-                    break
-                }
-                // Also accept a raw 32-char hex string for backwards compat
-                if (value.matches(Regex("^[0-9a-fA-F]{32}$"))) {
-                    onResult(value.lowercase())
+                val sharedPeer = IdentityShareFormat.parse(value)
+                if (sharedPeer != null) {
+                    onResult(sharedPeer.destinationHashHex)
                     break
                 }
             }

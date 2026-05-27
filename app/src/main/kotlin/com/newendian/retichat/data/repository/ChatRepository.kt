@@ -2,6 +2,8 @@ package com.newendian.retichat.data.repository
 
 import android.content.Context
 import android.util.Log
+import com.newendian.retichat.GroupMemberStatuses
+import com.newendian.retichat.MemberStatus
 import com.newendian.retichat.RetichatApp
 import com.newendian.retichat.bridge.LxmfFields
 import com.newendian.retichat.bridge.RetichatBridge
@@ -115,6 +117,12 @@ class ChatRepository(
         chatDao.updateChatName(chatId, newName)
     }
 
+    suspend fun renameGroup(chatId: String, newName: String) {
+        val chat = chatDao.findById(chatId) ?: return
+        if (!chat.isGroup) return
+        chatDao.updateChatName(chatId, newName)
+    }
+
     /** Group members for a given chat (reactive Flow). */
     fun groupMembers(chatId: String): Flow<List<GroupMemberEntity>> =
         messageDao.groupMembers(chatId)
@@ -127,6 +135,11 @@ class ChatRepository(
 
     suspend fun archiveChat(chatId: String) {
         chatDao.archiveChat(chatId)
+    }
+
+    suspend fun deleteChat(chatId: String) {
+        val chat = chatDao.findById(chatId) ?: return
+        deleteChatLocal(chat)
     }
 
     fun messagesForChatPaged(chatId: String) = messageDao.messagesForChatPaged(chatId)
@@ -182,7 +195,7 @@ class ChatRepository(
                     chatId = chatId,
                     destHashHex = hexHash,
                     displayName = contact?.displayName ?: hexHash.take(8),
-                    acked = isSelf,   // self is always acked
+                    inviteStatus = if (isSelf) MemberStatus.ACCEPTED else MemberStatus.INVITED,
                 )
             )
         }
@@ -637,9 +650,10 @@ class ChatRepository(
         val selfHex = selfDestHash.toHex()
         val groupIdHex = chat.groupIdHex ?: return
 
-        // Send to all group members except self
-        val allMembers = chat.memberHashes.split(",")
-        val memberHexes = allMembers.filter { it != selfHex }
+        val memberHexes = GroupMemberStatuses.acceptedMemberHexes(
+            members = messageDao.groupMembersList(chat.id),
+            selfHex = selfHex,
+        )
 
         // Create the outbound message record once (shared ID for the group msg)
         val groupMsgId = "grp_${System.currentTimeMillis()}_${(0..999).random()}"
@@ -815,7 +829,7 @@ class ChatRepository(
 
         if (chat == null && groupMembers != null && groupAction == GroupChatManager.Action.INVITE) {
             // Incoming invite — create the local group record in PENDING state
-            // (self.acked = false; user must Accept/Decline via the UI)
+            // (self inviteStatus = invited; user must Accept/Decline via the UI)
             val name = groupName ?: "Group"
             val chatId = "group_${groupId.take(16)}"
 
@@ -836,7 +850,7 @@ class ChatRepository(
                         chatId = chatId,
                         destHashHex = memberHex,
                         displayName = contact?.displayName ?: memberHex.take(8),
-                        acked = false,   // nobody is "accepted" yet from our POV
+                        inviteStatus = MemberStatus.INVITED,
                     )
                 )
             }
@@ -879,7 +893,7 @@ class ChatRepository(
 
             GroupChatManager.Action.ACCEPT -> {
                 Log.i(TAG, "${actualSenderHex.take(8)} accepted group ${chat.id}")
-                messageDao.markGroupMemberAcked(chat.id, actualSenderHex)
+                messageDao.setGroupMemberStatus(chat.id, actualSenderHex, MemberStatus.ACCEPTED)
 
                 // Insert a system "X joined the group" message (idempotent)
                 val joinerName = contactDao.findByHash(actualSenderHex)?.displayName
@@ -900,17 +914,15 @@ class ChatRepository(
 
             GroupChatManager.Action.LEAVE -> {
                 Log.i(TAG, "${actualSenderHex.take(8)} left group ${chat.id}")
-                messageDao.deleteGroupMember(chat.id, actualSenderHex)
-                val updatedMembers = chat.memberHashes.split(",")
-                    .filter { it != actualSenderHex }
-                    .joinToString(",")
-                chatDao.upsert(chat.copy(memberHashes = updatedMembers))
+                messageDao.setGroupMemberStatus(chat.id, actualSenderHex, MemberStatus.LEFT)
+                val leaverName = contactDao.findByHash(actualSenderHex)?.displayName
+                    ?: actualSenderHex.take(8)
                 messageDao.upsert(
                     MessageEntity(
                         id = msgId,
                         chatId = chat.id,
                         senderHashHex = actualSenderHex,
-                        content = "left the group",
+                        content = "$leaverName left the group",
                         timestamp = (timestamp * 1000).toLong(),
                         isOutbound = false,
                         state = RetichatBridge.MessageState.DELIVERED,
@@ -921,7 +933,10 @@ class ChatRepository(
             GroupChatManager.Action.RELAY_REQUEST -> {
                 val alreadySeen = groupRelaySeen
                     ?.split(",")?.filter { it.isNotEmpty() } ?: emptyList()
-                val allMembers = chat.memberHashes.split(",")
+                val acceptedMembers = GroupMemberStatuses.acceptedMemberHexes(
+                    members = messageDao.groupMembersList(chat.id),
+                    selfHex = selfHex(),
+                )
                 groupChatManager?.performRelay(
                     groupId   = groupId,
                     groupName = chat.name,
@@ -929,7 +944,7 @@ class ChatRepository(
                     originalSender         = actualSenderHex,
                     alreadySeen            = alreadySeen,
                     requesterHex           = srcHex,
-                    allAcceptedMembers     = allMembers,
+                    allAcceptedMembers     = acceptedMembers,
                 ) ?: Log.w(TAG, "relay_req: stack offline, cannot relay")
             }
 
@@ -975,12 +990,12 @@ class ChatRepository(
 
     /**
      * Reactive flow indicating whether [chatId] is a group with an
-     * unaccepted invite (self member's `acked` flag is false).
+     * unaccepted invite (self member's inviteStatus is invited).
      */
     fun isPendingGroupInvite(chatId: String): Flow<Boolean> {
         val selfHex = selfDestHash.toHex()
         return messageDao.groupMembers(chatId).map { members ->
-            members.any { it.destHashHex == selfHex && !it.acked }
+            GroupMemberStatuses.isPendingInvite(members, selfHex)
         }
     }
 
@@ -994,9 +1009,12 @@ class ChatRepository(
         val groupId = chat.groupIdHex ?: return
         val selfHex = selfDestHash.toHex()
 
-        messageDao.markGroupMemberAcked(chatId, selfHex)
+        messageDao.setGroupMemberStatus(chatId, selfHex, MemberStatus.ACCEPTED)
 
-        val allMembers = chat.memberHashes.split(",").filter { it.isNotEmpty() }
+        val allMembers = messageDao.groupMembersList(chatId)
+            .map { it.destHashHex }
+            .filter { it.isNotEmpty() }
+            .distinct()
         groupChatManager?.sendAccept(groupId, allMembers)
             ?: Log.w(TAG, "acceptGroupInvite: stack offline, accept will not be broadcast")
 
@@ -1023,11 +1041,7 @@ class ChatRepository(
         val chat = chatDao.findById(chatId) ?: return
         if (!chat.isGroup) return
         Log.i(TAG, "declineGroupInvite: removing ${chat.id}")
-        // Remove all members for this chat
-        messageDao.groupMembersList(chatId).forEach {
-            messageDao.deleteGroupMember(chatId, it.destHashHex)
-        }
-        chatDao.delete(chat)
+        deleteChatLocal(chat)
     }
 
     private suspend fun handleDirectMessage(
@@ -1058,18 +1072,15 @@ class ChatRepository(
             val chat = chatDao.findByGroupIdPrefix(prefix + "%")
             if (chat != null) {
                 Log.i(TAG, "STOP received from $srcHex for group ${chat.id}")
-                messageDao.deleteGroupMember(chat.id, srcHex)
-                val updatedMembers = chat.memberHashes.split(",")
-                    .filter { it != srcHex }
-                    .joinToString(",")
-                chatDao.upsert(chat.copy(memberHashes = updatedMembers))
+                messageDao.setGroupMemberStatus(chat.id, srcHex, MemberStatus.LEFT)
+                val leaverName = contactDao.findByHash(srcHex)?.displayName ?: srcHex.take(8)
                 // Insert a system message in the group chat
                 messageDao.upsert(
                     MessageEntity(
                         id = msgId,
                         chatId = chat.id,
                         senderHashHex = srcHex,
-                        content = "left the group",
+                        content = "$leaverName left the group",
                         timestamp = (timestamp * 1000).toLong(),
                         isOutbound = false,
                         state = RetichatBridge.MessageState.DELIVERED,
@@ -1120,15 +1131,24 @@ class ChatRepository(
     }
 
     /**
-     * Leave a group chat — broadcast a leave message to all members,
-     * then archive the chat locally.
+     * Leave a group chat — broadcast a leave message to accepted members,
+     * then delete the local chat state.
      */
     suspend fun leaveGroupChat(chatId: String) {
         val chat = chatDao.findById(chatId) ?: return
         if (!chat.isGroup) return
         val groupIdHex = chat.groupIdHex ?: return
         val selfHex = selfDestHash.toHex()
-        val otherMembers = chat.memberHashes.split(",").filter { it != selfHex }
+
+        val otherMembers = GroupMemberStatuses.acceptedMemberHexes(
+            members = messageDao.groupMembersList(chatId),
+            selfHex = selfHex,
+        )
+
+        if (groupChatManager == null) {
+            deleteChatLocal(chat)
+            return
+        }
 
         // Broadcast leave to all members
         otherMembers.forEach { memberHex ->
@@ -1150,11 +1170,27 @@ class ChatRepository(
             }
         }
 
-        // Remove self from local member list and archive
-        val updatedMembers = otherMembers.joinToString(",")
-        chatDao.upsert(chat.copy(memberHashes = updatedMembers, isArchived = true))
-        messageDao.deleteGroupMember(chatId, selfHex)
+        deleteChatLocal(chat)
         Log.i(TAG, "Left group $chatId")
+    }
+
+    private fun selfHex(): String = selfDestHash.toHex()
+
+    private suspend fun deleteChatLocal(chat: ChatEntity) {
+        messageDao.attachmentsForChat(chat.id).forEach { attachment ->
+            runCatching {
+                if (attachment.localPath.isNotBlank()) {
+                    File(attachment.localPath).delete()
+                }
+            }
+        }
+        messageDao.deleteAttachmentsForChat(chat.id)
+        messageDao.deleteDeliveryTrackingForChat(chat.id)
+        messageDao.deleteMessagesForChat(chat.id)
+        messageDao.deleteGroupMembersForChat(chat.id)
+        chatDao.delete(chat)
+        UserPreferences.setChatMuted(appContext, chat.id, false)
+        Log.i(TAG, "Deleted chat ${chat.id}")
     }
 
     /**

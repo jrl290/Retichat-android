@@ -2,6 +2,10 @@ package com.newendian.retichat.service
 
 import android.util.Log
 import com.newendian.retichat.data.db.entity.InterfaceConfigEntity
+import java.net.InetSocketAddress
+import java.net.Socket
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * Manages a shuffled list of well-known public TCP endpoints.
@@ -32,6 +36,10 @@ object DefaultEndpointManager {
     /** Mirror iOS: inject three invisible fallback backbones when needed. */
     const val FALLBACK_ENDPOINT_COUNT = 3
 
+    // Match iOS: a default backbone only counts as usable if TCP connect
+    // succeeds within the same 5-second budget the stack treats as real.
+    private const val PROBE_TIMEOUT_MS = 5_000
+
     /** Index into [shuffled]. */
     @Volatile
     private var index = 0
@@ -56,6 +64,41 @@ object DefaultEndpointManager {
         shuffled.take(FALLBACK_ENDPOINT_COUNT)
 
     /**
+     * Probe the shuffled public endpoint list in serial order and return up to
+     * [FALLBACK_ENDPOINT_COUNT] endpoints that actually accept TCP.
+     *
+     * If fewer than three probes succeed after the full list is exhausted,
+     * pad from the same shuffled order so reconnect has additional candidates
+     * once the network comes back.
+     */
+    suspend fun selectFallbackEndpoints(): List<Pair<String, Int>> = withContext(Dispatchers.IO) {
+        val shuffledEndpoints = shuffled.toList()
+        val selected = mutableListOf<Pair<String, Int>>()
+
+        for (endpoint in shuffledEndpoints) {
+            if (probeConnectability(endpoint, PROBE_TIMEOUT_MS)) {
+                selected += endpoint
+                if (selected.size == FALLBACK_ENDPOINT_COUNT) {
+                    break
+                }
+            }
+        }
+
+        if (selected.size < FALLBACK_ENDPOINT_COUNT) {
+            for (endpoint in shuffledEndpoints) {
+                if (selected.none { it == endpoint }) {
+                    selected += endpoint
+                    if (selected.size == FALLBACK_ENDPOINT_COUNT) {
+                        break
+                    }
+                }
+            }
+        }
+
+        selected
+    }
+
+    /**
     * Build a synthetic [InterfaceConfigEntity] for the current
     * default endpoint. This is **not** persisted to Room — it only
     * exists in memory so the config generator can write it.
@@ -72,8 +115,8 @@ object DefaultEndpointManager {
     }
 
     /** Build synthetic fallback interfaces. Never persisted to Room. */
-    fun fallbackInterfaceConfigs(): List<InterfaceConfigEntity> =
-        fallbackEndpoints().mapIndexed { idx, (host, port) ->
+    fun fallbackInterfaceConfigs(endpoints: List<Pair<String, Int>> = fallbackEndpoints()): List<InterfaceConfigEntity> =
+        endpoints.mapIndexed { idx, (host, port) ->
             InterfaceConfigEntity(
                 id = -(idx + 1L),
                 name = "DefaultBackbone${idx + 1}",
@@ -89,4 +132,12 @@ object DefaultEndpointManager {
         shuffled.addAll(ENDPOINTS.shuffled())
         index = 0
     }
+
+    private fun probeConnectability(endpoint: Pair<String, Int>, timeoutMs: Int): Boolean =
+        runCatching {
+            Socket().use { socket ->
+                socket.connect(InetSocketAddress(endpoint.first, endpoint.second), timeoutMs)
+                true
+            }
+        }.getOrDefault(false)
 }

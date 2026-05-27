@@ -2,6 +2,7 @@ package com.newendian.retichat.data.db.entity
 
 import androidx.room.Entity
 import androidx.room.PrimaryKey
+import com.newendian.retichat.MemberStatus
 
 @Entity(tableName = "contacts")
 data class ContactEntity(
@@ -55,7 +56,8 @@ data class GroupMemberEntity(
     val chatId: String,
     val destHashHex: String,
     val displayName: String,
-    val acked: Boolean = false,
+    /** One of MemberStatus: invited, accepted, left, declined. */
+    val inviteStatus: String = MemberStatus.ACCEPTED,
 )
 
 @Entity(tableName = "delivery_tracking")

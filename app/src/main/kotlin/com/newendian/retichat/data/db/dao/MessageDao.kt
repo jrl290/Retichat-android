@@ -55,6 +55,12 @@ interface MessageDao {
     @Query("SELECT * FROM attachments WHERE messageId = :msgId")
     fun attachmentsForFlow(msgId: String): Flow<List<AttachmentEntity>>
 
+    @Query("SELECT * FROM attachments WHERE messageId IN (SELECT id FROM messages WHERE chatId = :chatId)")
+    suspend fun attachmentsForChat(chatId: String): List<AttachmentEntity>
+
+    @Query("DELETE FROM attachments WHERE messageId IN (SELECT id FROM messages WHERE chatId = :chatId)")
+    suspend fun deleteAttachmentsForChat(chatId: String)
+
     // ---- Delivery tracking (group) ----
 
     @Upsert
@@ -62,6 +68,9 @@ interface MessageDao {
 
     @Query("SELECT * FROM delivery_tracking WHERE messageId = :msgId")
     suspend fun trackingFor(msgId: String): List<DeliveryTrackingEntity>
+
+    @Query("DELETE FROM delivery_tracking WHERE chatId = :chatId")
+    suspend fun deleteDeliveryTrackingForChat(chatId: String)
 
     @Query("""
         SELECT * FROM delivery_tracking
@@ -80,12 +89,18 @@ interface MessageDao {
     @Query("SELECT * FROM group_members WHERE chatId = :chatId ORDER BY destHashHex ASC")
     suspend fun groupMembersList(chatId: String): List<GroupMemberEntity>
 
+    @Query("DELETE FROM group_members WHERE chatId = :chatId")
+    suspend fun deleteGroupMembersForChat(chatId: String)
+
     @Query("DELETE FROM group_members WHERE chatId = :chatId AND destHashHex = :hashHex")
     suspend fun deleteGroupMember(chatId: String, hashHex: String)
 
-    @Query("UPDATE group_members SET acked = 1 WHERE chatId = :chatId AND destHashHex = :hashHex")
-    suspend fun markGroupMemberAcked(chatId: String, hashHex: String)
+    @Query("UPDATE group_members SET inviteStatus = :status WHERE chatId = :chatId AND destHashHex = :hashHex")
+    suspend fun setGroupMemberStatus(chatId: String, hashHex: String, status: String)
 
-    @Query("SELECT * FROM group_members WHERE chatId = :chatId AND acked = 1 AND destHashHex != :selfHex ORDER BY destHashHex ASC")
-    suspend fun ackedMembers(chatId: String, selfHex: String): List<GroupMemberEntity>
+    @Query("SELECT * FROM group_members WHERE chatId = :chatId AND inviteStatus = :status ORDER BY destHashHex ASC")
+    suspend fun groupMembersWithStatus(chatId: String, status: String): List<GroupMemberEntity>
+
+    @Query("DELETE FROM messages WHERE chatId = :chatId")
+    suspend fun deleteMessagesForChat(chatId: String)
 }

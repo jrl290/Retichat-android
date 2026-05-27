@@ -118,6 +118,8 @@ dependencies {
     // (Curve25519 + Ed25519 + SHA-256), matching iOS Swift
     // RfedChannelClient.channelHash(name:) exactly. See ChannelHash.kt.
     implementation(libs.bouncycastle.prov)
+
+    testImplementation("junit:junit:4.13.2")
 }
 
 // ---- Rust NDK build task ----

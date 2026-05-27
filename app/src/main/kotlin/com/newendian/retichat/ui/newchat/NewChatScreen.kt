@@ -16,6 +16,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.newendian.retichat.IdentityShareFormat
 import com.newendian.retichat.data.model.Contact
 import com.newendian.retichat.data.model.toHex
 import com.newendian.retichat.ui.components.AvatarCircle
@@ -34,13 +35,7 @@ fun NewChatScreen(
 ) {
     var destHashInput by remember { mutableStateOf("") }
     var showDestInput by remember { mutableStateOf(false) }
-    // Normalise: strip lxma:// or lxmf:// prefix and optional .<pubkey> suffix
-    val destHashClean = run {
-        var raw = destHashInput.trim().lowercase()
-        if (raw.startsWith("lxma://")) raw = raw.removePrefix("lxma://")
-        else if (raw.startsWith("lxmf://")) raw = raw.removePrefix("lxmf://")
-        raw.split(".").first().filter { it in '0'..'9' || it in 'a'..'f' }
-    }
+    val destHashClean = IdentityShareFormat.normalizeDestinationHash(destHashInput)
     val isValidHash = destHashClean.length == 32 && destHashClean.all { it in '0'..'9' || it in 'a'..'f' }
 
     Scaffold(

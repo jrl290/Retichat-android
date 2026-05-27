@@ -467,7 +467,7 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeR
             // Raw LXMF fields (msgpack bytes — Kotlin decodes)
             let j_fields = env.byte_array_from_slice(&msg.fields_raw).unwrap();
 
-            let _ = env.call_method(
+            let call_result = env.call_method(
                 cb_ref.as_obj(),
                 "onMessage",
                 "([B[B[BLjava/lang/String;Ljava/lang/String;DZ[B)V",
@@ -482,6 +482,20 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeR
                     JValue::Object(&j_fields),
                 ],
             );
+            if let Err(e) = call_result {
+                android_log(&format!("delivery callback call_method failed: {}", e));
+            }
+            match env.exception_check() {
+                Ok(true) => {
+                    android_log("delivery callback raised Java exception");
+                    let _ = env.exception_describe();
+                    let _ = env.exception_clear();
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    android_log(&format!("delivery callback exception_check failed: {}", e));
+                }
+            }
         }),
     );
 

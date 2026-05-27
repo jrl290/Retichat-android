@@ -71,11 +71,11 @@ class RfedChannelClient(
         fun rfedDestHash(identityHashHex: String, app: String, aspects: List<String>): String? =
             FcmTokenRegistrar.rnsDestHash(identityHashHex, app, aspects)
 
-        internal fun pullStateKey(rfedNodeIdentityHashHex: String): String =
-            rfedNodeIdentityHashHex.lowercase()
+        internal fun pullStateKey(channelId: String): String =
+            channelId.lowercase()
 
         internal fun pullStateKey(channel: ChannelEntity): String =
-            pullStateKey(channel.rfedNodeIdentityHashHex)
+            pullStateKey(channel.id)
 
         internal fun channelsForWakePull(channels: List<ChannelEntity>): List<ChannelEntity> =
             channels.distinctBy { pullStateKey(it) }
@@ -91,6 +91,21 @@ class RfedChannelClient(
             currentGeneration + 1
         } else {
             currentGeneration
+        }
+
+        internal fun liveStreamFilterIds(
+            channels: List<ChannelEntity>,
+            nodeIdentityHashHex: String,
+            openedChannelIds: Set<String>,
+        ): List<String> {
+            val normalizedNode = nodeIdentityHashHex.lowercase()
+            val normalizedOpened = openedChannelIds.mapTo(mutableSetOf()) { it.lowercase() }
+            return channels
+                .asSequence()
+                .filter { it.rfedNodeIdentityHashHex.equals(normalizedNode, ignoreCase = true) }
+                .map { it.id.lowercase() }
+                .filter { normalizedOpened.contains(it) }
+                .toList()
         }
     }
 
@@ -109,9 +124,9 @@ class RfedChannelClient(
     val rfedLinkGeneration: StateFlow<Int> = _rfedLinkGeneration.asStateFlow()
 
     /**
-     * Whether the rfed node reported `more_pending = true` on the most recent
-     * `/rfed/pull` for a given rfed node. Keyed by **rfed node identity hash**
-     * so every channel on the same node shares the same queue state.
+     * Whether the addressed channel reported `more_pending = true` on the most
+     * recent `/rfed/pull`. Keyed by **channel id** because `rfed.channel.pull`
+     * is channel-scoped.
      *
      * - `null`  → never pulled this session, or screen just opened (treat as
      *             "might be more, show the button").
@@ -122,13 +137,13 @@ class RfedChannelClient(
     private val _canPullMore = MutableStateFlow<Map<String, Boolean?>>(emptyMap())
     val canPullMore: StateFlow<Map<String, Boolean?>> = _canPullMore.asStateFlow()
 
-    /** True while a `/rfed/pull` request is in flight for the given rfed node. */
+    /** True while a `/rfed/pull` request is in flight for the given channel. */
     private val _pullInFlight = MutableStateFlow<Set<String>>(emptySet())
     val pullInFlight: StateFlow<Set<String>> = _pullInFlight.asStateFlow()
 
-    /** Reset `canPullMore` for an rfed node — e.g. when one of its channels reopens. */
-    fun resetCanPullMore(rfedNodeIdentityHashHex: String) {
-        _canPullMore.value = _canPullMore.value - pullStateKey(rfedNodeIdentityHashHex)
+    /** Reset `canPullMore` for a channel — e.g. when its screen reopens. */
+    fun resetCanPullMore(channelId: String) {
+        _canPullMore.value = _canPullMore.value - pullStateKey(channelId)
     }
 
     /** Retain the rfed.node status monitor while a UI surface needs reconnect generation. */
@@ -174,6 +189,8 @@ class RfedChannelClient(
     private val failedBlobKeys = mutableSetOf<Int>()
     /** RFed node identity hashes whose channel.stream link we have already wired. */
     private val trackedChannelStreamNodes = mutableSetOf<String>()
+    /** Runtime-only channel ids whose conversation screen opened in this process. */
+    private val openedChannelStreamIds = mutableSetOf<String>()
     private val channelStreamMutex = Mutex()
     private val sendMutex = Mutex()
     private val rfedLinkMonitorLock = Any()
@@ -194,6 +211,16 @@ class RfedChannelClient(
                 nextStatus = nextStatus,
             )
             lastRfedNodeLinkStatus = nextStatus
+        }
+    }
+
+    suspend fun markChannelOpenedForStreaming(channelId: String) {
+        val normalized = channelId.lowercase()
+        val inserted = channelStreamMutex.withLock {
+            openedChannelStreamIds.add(normalized)
+        }
+        if (inserted) {
+            reconfigureChannelStreams()
         }
     }
 
@@ -273,6 +300,9 @@ class RfedChannelClient(
         channelDao.deleteById(channelId)
         UserPreferences.setChannelNotificationsEnabled(appContext, channelId, false)
         UserPreferences.setChannelPushEnabled(appContext, channelId, false)
+        channelStreamMutex.withLock {
+            openedChannelStreamIds.remove(channelId.lowercase())
+        }
         reconfigureChannelStreams()
         true
     }
@@ -392,10 +422,15 @@ class RfedChannelClient(
         val identityHandle = StackRuntime.identityHandle
         if (identityHandle == 0L) return@withContext
 
-        val channelsByNode = channelDao.activeChannels()
+        val activeChannels = channelDao.activeChannels()
+        val openedChannelIds = channelStreamMutex.withLock {
+            openedChannelStreamIds.toSet()
+        }
+        val openedChannelsByNode = activeChannels
+            .filter { openedChannelIds.contains(it.id.lowercase()) }
             .groupBy { it.rfedNodeIdentityHashHex.lowercase() }
         val nodes = mutableSetOf<String>()
-        nodes.addAll(channelsByNode.keys)
+        nodes.addAll(activeChannels.map { it.rfedNodeIdentityHashHex.lowercase() })
         channelStreamMutex.withLock {
             nodes.addAll(trackedChannelStreamNodes)
         }
@@ -409,9 +444,9 @@ class RfedChannelClient(
             val streamDest = FcmTokenRegistrar.hexToBytes(streamDestHex) ?: continue
             ensureChannelStreamTracked(nodeIdentityHashHex, streamDest)
 
-            val filters = channelsByNode[nodeIdentityHashHex]
+            val filters = openedChannelsByNode[nodeIdentityHashHex]
                 .orEmpty()
-                .mapNotNull { FcmTokenRegistrar.hexToBytes(it.id) }
+                .mapNotNull { FcmTokenRegistrar.hexToBytes(it.id.lowercase()) }
 
             val status = ConnectionStateManager.appLinkStatus(streamDest)
             if (filters.isEmpty()) {
@@ -466,11 +501,12 @@ class RfedChannelClient(
             listOf("channel", "stream"),
         ) ?: return
         val streamDest = FcmTokenRegistrar.hexToBytes(streamDestHex) ?: return
-        val filters = channelDao.activeChannels()
-            .asSequence()
-            .filter { it.rfedNodeIdentityHashHex.equals(nodeIdentityHashHex, ignoreCase = true) }
-            .mapNotNull { FcmTokenRegistrar.hexToBytes(it.id) }
-            .toList()
+        val activeChannels = channelDao.activeChannels()
+        val openedChannelIds = channelStreamMutex.withLock {
+            openedChannelStreamIds.toSet()
+        }
+        val filters = liveStreamFilterIds(activeChannels, nodeIdentityHashHex, openedChannelIds)
+            .mapNotNull { FcmTokenRegistrar.hexToBytes(it) }
         sendChannelStreamConfig(nodeIdentityHashHex, streamDest, filters)
     }
 
@@ -725,30 +761,32 @@ class RfedChannelClient(
         withContext(Dispatchers.IO) {
             val identityHandle = StackRuntime.identityHandle
             if (identityHandle == 0L) return@withContext 0 to false
-            val nodeKey = pullStateKey(channel)
-            val rfedDeliveryDest = FcmTokenRegistrar.rnsDestHash(
-                channel.rfedNodeIdentityHashHex, "rfed", listOf("delivery"),
+            val channelKey = pullStateKey(channel)
+            val channelHashBytes = FcmTokenRegistrar.hexToBytes(channel.id)
+                ?: return@withContext 0 to false
+            val rfedChannelPullDest = FcmTokenRegistrar.rnsDestHash(
+                channel.rfedNodeIdentityHashHex, "rfed", listOf("channel", "pull"),
             )?.let { FcmTokenRegistrar.hexToBytes(it) } ?: return@withContext 0 to false
 
-            _pullInFlight.value = _pullInFlight.value + nodeKey
+            _pullInFlight.value = _pullInFlight.value + channelKey
             try {
-                Log.i(TAG, "PULL start: channel='${channel.channelName}' rfedDest=${rfedDeliveryDest.toHex()}")
+                Log.i(TAG, "PULL start: channel='${channel.channelName}' rfedDest=${rfedChannelPullDest.toHex()}")
                 // Single-shot via AppLinks readiness plus a transient
-                // identified request on rfed.delivery.
+                // identified request on rfed.channel.pull.
                 // // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1
                 val resp = ConnectionStateManager.appLinkSend(
-                    rfedDeliveryDest, "rfed", "delivery",
-                    "/rfed/pull", ByteArray(0),
+                    rfedChannelPullDest, "rfed", "channel.pull",
+                    "/rfed/pull", msgpackBin(channelHashBytes),
                 ) ?: run {
-                    Log.w(TAG, "PULL: rfed.delivery request failed after AppLinks readiness gate")
-                    _canPullMore.value = _canPullMore.value + (nodeKey to null)
+                    Log.w(TAG, "PULL: rfed.channel.pull request failed after AppLinks readiness gate")
+                    _canPullMore.value = _canPullMore.value + (channelKey to null)
                     return@withContext 0 to false
                 }
                 Log.i(TAG, "PULL response: ${resp.size} bytes")
 
                 val decoded = decodePullResponse(resp) ?: run {
                     Log.w(TAG, "PULL: malformed response (${resp.size} bytes)")
-                    _canPullMore.value = _canPullMore.value + (nodeKey to null)
+                    _canPullMore.value = _canPullMore.value + (channelKey to null)
                     return@withContext 0 to false
                 }
                 val (pairs, morePending) = decoded
@@ -756,10 +794,10 @@ class RfedChannelClient(
                 for ((channelHashBytes, blob) in pairs) {
                     dispatchBlob(channelHashBytes.toHex(), blob)
                 }
-                _canPullMore.value = _canPullMore.value + (nodeKey to morePending)
+                _canPullMore.value = _canPullMore.value + (channelKey to morePending)
                 pairs.size to morePending
             } finally {
-                _pullInFlight.value = _pullInFlight.value - nodeKey
+                _pullInFlight.value = _pullInFlight.value - channelKey
             }
         }
 

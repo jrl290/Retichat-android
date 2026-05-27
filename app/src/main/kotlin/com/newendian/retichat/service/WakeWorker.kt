@@ -69,7 +69,10 @@ class WakeWorker(
                 }
 
                 // LXMF propagation sync.
-                PropagationSync.runOnce(applicationContext)
+                // Force a fresh propagation app-link ACTIVE edge here so a
+                // wake-triggered pull does not reuse a stale held link from
+                // before the transport reconnect completed.
+                PropagationSync.runOnce(applicationContext, requireFreshTransport = true)
 
                 Result.success()
             } finally {

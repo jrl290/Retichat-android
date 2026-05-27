@@ -23,7 +23,7 @@ import com.newendian.retichat.data.db.entity.*
         ChannelEntity::class,
         ChannelMessageEntity::class,
     ],
-    version = 8,
+    version = 9,
     exportSchema = false,
 )
 abstract class RetichatDatabase : RoomDatabase() {

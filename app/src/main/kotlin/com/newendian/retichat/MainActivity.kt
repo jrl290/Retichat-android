@@ -3,7 +3,6 @@ package com.newendian.retichat
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
@@ -86,15 +85,11 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        // Handle lxma:// or lxmf:// deep link  (e.g. lxma://ab01cd23ef... or lxma://ab01cd23ef....<pubkey>)
+        // Handle direct-contact deep links from Retichat iOS, Android, or Columba.
         val uri = intent?.data
         val scheme = uri?.scheme?.lowercase()
         if (uri != null && (scheme == "lxma" || scheme == "lxmf")) {
-            // host may contain <hash>.<pubkey> — take only the hash part
-            val hostRaw = uri.host?.lowercase() ?: return
-            val hashPart = hostRaw.split(".").first()
-            val hexHash = hashPart.filter { it in '0'..'9' || it in 'a'..'f' }
-            if (hexHash.isEmpty()) return
+            val hexHash = IdentityShareFormat.extractDestinationHash(uri.toString()) ?: return
             Log.i(TAG, "Deep link: $scheme://$hexHash")
             intent?.data = null  // consume so rotation doesn't re-trigger
 
