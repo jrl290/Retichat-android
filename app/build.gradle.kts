@@ -15,17 +15,17 @@ if (file("google-services.json").exists()) {
 
 android {
     namespace = "com.newendian.retichat"
-    compileSdk = 34
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "com.newendian.retichat"
         minSdk = 26
-        targetSdk = 34
-        versionCode = 1
+        targetSdk = 35
+        versionCode = 2
         versionName = "0.1.0"
 
         ndk {
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
         }
     }
 
@@ -134,7 +134,6 @@ tasks.register<Exec>("buildRustNdk") {
         "cargo", "ndk",
         "-t", "arm64-v8a",
         "-t", "armeabi-v7a",
-        "-t", "x86_64",
         "-o", "${projectDir}/src/main/jniLibs",
         "build", "--release"
     )
