@@ -1,8 +1,11 @@
 package com.newendian.retichat.bridge
 
+import androidx.annotation.Keep
+
 /**
  * Callback interface for receiving inbound LXMF messages from the Rust layer.
  */
+@Keep
 interface MessageCallback {
     fun onMessage(
         hash: ByteArray,
@@ -19,6 +22,7 @@ interface MessageCallback {
 /**
  * Callback interface for receiving LXMF delivery announces from the Rust layer.
  */
+@Keep
 interface AnnounceCallback {
     fun onAnnounce(destHash: ByteArray, displayName: String?)
 }
@@ -31,6 +35,7 @@ interface AnnounceCallback {
  * call [RetichatBridge.channelLxmUnpack] on the full blob to validate
  * the LXMF signature.
  */
+@Keep
 interface RfedBlobCallback {
     fun onBlob(blob: ByteArray)
 }
@@ -42,11 +47,13 @@ interface RfedBlobCallback {
  *
  * `status` is one of [RetichatBridge.AppLinkStatus] constants.
  */
+@Keep
 interface AppLinkStatusCallback {
     fun onStatus(destHash: ByteArray, status: Int)
 }
 
 /** Packet callback for DATA received on a persistent APP_LINK. */
+@Keep
 interface AppLinkPacketCallback {
     fun onPacket(bytes: ByteArray)
 }
@@ -58,11 +65,13 @@ interface AppLinkPacketCallback {
  * `status`: see [RetichatBridge.AppLinkRequestStatus] (0=ok, 1=timeout,
  * 2=failed). `bytes` is non-null only when `status == 0`.
  */
+@Keep
 interface AppLinkRequestCallback {
     fun onResult(status: Int, bytes: ByteArray?)
 }
 
 /** One-shot callback for [RetichatBridge.appLinkSendAsync]. */
+@Keep
 interface AppLinkSendCallback {
     fun onResult(status: Int)
 }
@@ -74,6 +83,7 @@ interface AppLinkSendCallback {
  * `libretichat_jni.so`.  Handle values (`Long`) are opaque references
  * to Rust objects; 0 means error — call [lastError] for details.
  */
+@Keep
 object RetichatBridge {
 
     /** Whether the native library loaded successfully. */
