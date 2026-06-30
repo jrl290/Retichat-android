@@ -53,6 +53,11 @@ interface ChannelDao {
     @Query("UPDATE channel_messages SET sendState = :state WHERE id = :id")
     suspend fun updateMessageSendState(id: String, state: Int)
 
+    /** Any outbound row still marked SENDING after a process restart cannot
+     *  still be in flight; recover it as FAILED on startup. */
+    @Query("UPDATE channel_messages SET sendState = 2 WHERE isOutbound = 1 AND sendState = 0")
+    suspend fun failStaleOutboundSendingMessages(): Int
+
     /** Drop a single channel message row by id (used to clean up the optimistic
      *  placeholder row once the canonical id is known). */
     @Query("DELETE FROM channel_messages WHERE id = :id")

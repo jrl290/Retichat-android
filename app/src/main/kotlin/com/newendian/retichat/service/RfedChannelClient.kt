@@ -9,9 +9,11 @@ import com.newendian.retichat.bridge.RetichatBridge
 import com.newendian.retichat.data.db.dao.ChannelDao
 import com.newendian.retichat.data.db.entity.ChannelEntity
 import com.newendian.retichat.data.db.entity.ChannelMessageEntity
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -42,6 +44,15 @@ class RfedChannelClient(
     private val channelDao: ChannelDao,
     private val scope: CoroutineScope,
 ) {
+
+    init {
+        scope.launch {
+            val recovered = channelDao.failStaleOutboundSendingMessages()
+            if (recovered > 0) {
+                Log.w(TAG, "Recovered $recovered stale outbound channel message(s) stuck in SENDING")
+            }
+        }
+    }
 
     companion object {
         private const val TAG = "RfedChannel"
@@ -569,39 +580,59 @@ class RfedChannelClient(
             channelDao.bumpLastMessageTime(channel.id, optimistic.timestamp)
             _activity.value = System.currentTimeMillis()
 
-            // Step 1: refresh stampCost once per session.
-            var liveChannel = channel
-            if (channel.id !in stampCostRefreshedThisSession) {
-                runCatching { refreshStampCost(channel) }
+            try {
+                // Step 1: refresh stampCost once per session.
+                var liveChannel = channel
+                if (channel.id !in stampCostRefreshedThisSession) {
+                    runCatching { refreshStampCost(channel) }
+                        .onSuccess {
+                            stampCostRefreshedThisSession.add(channel.id)
+                            liveChannel = channelDao.findById(channel.id) ?: liveChannel
+                        }
+                }
+
+                if (trySend(liveChannel, content, optimisticId, ownHashHex, identityHandle)) {
+                    return@withLock true
+                }
+
+                // Step 2: refresh + single retry.
+                Log.w(TAG, "SEND failed once — refreshing stampCost and retrying")
+                runCatching { refreshStampCost(liveChannel) }
                     .onSuccess {
-                        stampCostRefreshedThisSession.add(channel.id)
-                        liveChannel = channelDao.findById(channel.id) ?: liveChannel
+                        stampCostRefreshedThisSession.add(liveChannel.id)
+                        liveChannel = channelDao.findById(liveChannel.id) ?: liveChannel
                     }
-            }
-
-            if (trySend(liveChannel, content, optimisticId, ownHashHex, identityHandle)) {
-                return@withLock true
-            }
-
-            // Step 2: refresh + single retry.
-            Log.w(TAG, "SEND failed once — refreshing stampCost and retrying")
-            runCatching { refreshStampCost(liveChannel) }
-                .onSuccess {
-                    stampCostRefreshedThisSession.add(liveChannel.id)
-                    liveChannel = channelDao.findById(liveChannel.id) ?: liveChannel
+                    .onFailure {
+                        Log.w(TAG, "stampCost refresh on retry failed: ${it.message}")
+                    }
+                if (!trySend(liveChannel, content, optimisticId, ownHashHex, identityHandle)) {
+                    Log.w(TAG, "SEND failed twice — marking optimistic row FAILED for user retry")
+                    channelDao.updateMessageSendState(
+                        optimisticId,
+                        ChannelMessageEntity.SEND_STATE_FAILED,
+                    )
+                    return@withLock false
                 }
-                .onFailure {
-                    Log.w(TAG, "stampCost refresh on retry failed: ${it.message}")
+                true
+            } catch (cancelled: CancellationException) {
+                Log.w(TAG, "SEND cancelled — marking optimistic row FAILED", cancelled)
+                withContext(NonCancellable) {
+                    channelDao.updateMessageSendState(
+                        optimisticId,
+                        ChannelMessageEntity.SEND_STATE_FAILED,
+                    )
                 }
-            if (!trySend(liveChannel, content, optimisticId, ownHashHex, identityHandle)) {
-                Log.w(TAG, "SEND failed twice — marking optimistic row FAILED for user retry")
-                channelDao.updateMessageSendState(
-                    optimisticId,
-                    ChannelMessageEntity.SEND_STATE_FAILED,
-                )
-                return@withLock false
+                throw cancelled
+            } catch (t: Throwable) {
+                Log.e(TAG, "SEND aborted unexpectedly — marking optimistic row FAILED", t)
+                withContext(NonCancellable) {
+                    channelDao.updateMessageSendState(
+                        optimisticId,
+                        ChannelMessageEntity.SEND_STATE_FAILED,
+                    )
+                }
+                false
             }
-            true
         }
 
     private suspend fun trySend(

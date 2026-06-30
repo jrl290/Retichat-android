@@ -201,6 +201,9 @@ private const val GRACE_SHUTDOWN_MS = 30_000L  // 30s grace avoids stack teardow
         val repo = app.repository
         repo.configure(selfDestHash, routerHandle, identityHandle)
 
+        // Seed core delivery privacy settings from persisted preferences
+        repo.primeCoreDeliveryPrivacy()
+
         RetichatBridge.routerSetDeliveryCallback(routerHandle, object : MessageCallback {
             override fun onMessage(
                 hash: ByteArray, srcHash: ByteArray, destHash: ByteArray,

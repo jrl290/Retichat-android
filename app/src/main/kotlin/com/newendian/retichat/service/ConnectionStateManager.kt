@@ -429,6 +429,22 @@ object ConnectionStateManager {
         val rh = routerHandle
         if (rh == 0L) return@withContext false
 
+        val usePersistentLink = prefersPersistentAppLink(app, aspectsCsv)
+        when (requestOpenMode(usePersistentLink, RetichatBridge.appLinkStatus(rh, destHash))) {
+            RequestOpenMode.PERSISTENT -> {
+                RetichatBridge.appLinkOpenPersistent(rh, destHash, app, aspectsCsv)
+            }
+            RequestOpenMode.EPHEMERAL -> {
+                RetichatBridge.appLinkOpen(rh, destHash, app, aspectsCsv)
+            }
+            RequestOpenMode.NONE -> Unit
+        }
+        // DATA sends must also wait for the AppLink readiness edge so we do
+        // not start a fresh tier-3 race from DISCONNECTED immediately after a
+        // successful request to the same destination.
+        // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1
+        if (!awaitAppLinkActive(destHash, timeoutMs = 5_000L)) return@withContext false
+
         suspendCoroutine { cont ->
             val ok = RetichatBridge.appLinkSendAsync(
                 rh,

@@ -628,6 +628,51 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeR
     ok_or_neg(lxmf::router_watch_destination(router as u64, &h))
 }
 
+/// `RetichatBridge.nativeRouterSetFilterStrangers(router: Long, enabled: Boolean): Int`
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeRouterSetFilterStrangers(
+    _env: JNIEnv,
+    _class: JClass,
+    router: jlong,
+    enabled: jni::sys::jboolean,
+) -> jint {
+    ok_or_neg(lxmf::router_set_delivery_filter_strangers(router as u64, enabled != 0))
+}
+
+/// `RetichatBridge.nativeRouterClearDeliveryAllowlist(router: Long): Int`
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeRouterClearDeliveryAllowlist(
+    _env: JNIEnv,
+    _class: JClass,
+    router: jlong,
+) -> jint {
+    ok_or_neg(lxmf::router_clear_delivery_allowlist(router as u64))
+}
+
+/// `RetichatBridge.nativeRouterAllowDeliveryIdentity(router: Long, identityHash: ByteArray): Int`
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeRouterAllowDeliveryIdentity(
+    env: JNIEnv,
+    _class: JClass,
+    router: jlong,
+    identity_hash: JByteArray,
+) -> jint {
+    let hash = jbytes_to_vec(&env, &identity_hash);
+    ok_or_neg(lxmf::router_allow_delivery_identity(router as u64, &hash))
+}
+
+/// `RetichatBridge.nativeRouterDisallowDeliveryIdentity(router: Long, identityHash: ByteArray): Int`
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeRouterDisallowDeliveryIdentity(
+    env: JNIEnv,
+    _class: JClass,
+    router: jlong,
+    identity_hash: JByteArray,
+) -> jint {
+    let hash = jbytes_to_vec(&env, &identity_hash);
+    ok_or_neg(lxmf::router_disallow_delivery_identity(router as u64, &hash))
+}
+
 /// `RetichatBridge.nativeRouterProcessOutbound(router: Long): Int`
 #[no_mangle]
 pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeRouterProcessOutbound(

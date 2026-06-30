@@ -77,6 +77,32 @@ class ChatRepository(
         }
     }
 
+    /**
+     * Apply persisted core delivery privacy settings to the running router.
+     * Called once at stack startup after [configure] to seed the router with
+     * the user's saved preferences (filter strangers, drop announces, etc.).
+     */
+    fun primeCoreDeliveryPrivacy() {
+        if (routerHandle == 0L) return
+        val ctx = appContext ?: return
+        val enabled = UserPreferences.isFilterStrangersEnabled(ctx)
+        RetichatBridge.routerSetFilterStrangers(routerHandle, enabled)
+        Log.d(TAG, "primeCoreDeliveryPrivacy: filterStrangers=$enabled")
+    }
+
+    /**
+     * Toggle the "filter strangers" delivery privacy setting on the live router
+     * and persist the preference. Called from Settings whenever the user flips
+     * the toggle.
+     */
+    fun setCoreFilterStrangers(enabled: Boolean) {
+        if (routerHandle != 0L) {
+            RetichatBridge.routerSetFilterStrangers(routerHandle, enabled)
+        }
+        val ctx = appContext ?: return
+        UserPreferences.setFilterStrangersEnabled(ctx, enabled)
+    }
+
     /** Network-available listener, registered once. */
     private val networkListener: () -> Unit = {
         scope.launch(Dispatchers.IO) { flushPendingMessages() }
@@ -99,6 +125,7 @@ class ChatRepository(
                 destHashHex = destHash.toHex(),
                 displayName = name,
                 publicKeyHex = publicKey?.toHex(),
+                isNameManual = false,
             )
         )
     }
@@ -110,7 +137,7 @@ class ChatRepository(
     suspend fun renameContact(destHashHex: String, newName: String) {
         val existing = contactDao.findByHash(destHashHex)
         if (existing != null) {
-            contactDao.upsert(existing.copy(displayName = newName))
+            contactDao.upsert(existing.copy(displayName = newName, isNameManual = true))
         }
         // Also update the 1:1 chat display name
         val chatId = "dm_$destHashHex"
@@ -1196,6 +1223,7 @@ class ChatRepository(
     /**
      * Called when we receive a delivery announce from the network.
      * Updates the contact's display name and, if a DM chat exists, its name too.
+     * Does NOT overwrite a name that the user has manually set.
      */
     fun onAnnounceReceived(destHash: ByteArray, displayName: String?) {
         if (displayName.isNullOrBlank()) return
@@ -1203,6 +1231,8 @@ class ChatRepository(
         scope.launch(Dispatchers.IO) {
             val existing = contactDao.findByHash(hex)
             if (existing != null) {
+                // Never overwrite a name the user has manually set
+                if (existing.isNameManual) return@launch
                 // Only update if the name actually changed
                 if (existing.displayName != displayName) {
                     contactDao.upsert(existing.copy(displayName = displayName))
@@ -1317,5 +1347,6 @@ class ChatRepository(
         displayName = displayName,
         publicKey = publicKeyHex?.hexToBytes(),
         addedAt = addedAt,
+        isNameManual = isNameManual,
     )
 }

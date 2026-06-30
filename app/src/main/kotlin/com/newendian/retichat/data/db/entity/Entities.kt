@@ -10,6 +10,9 @@ data class ContactEntity(
     val displayName: String,
     val publicKeyHex: String? = null,
     val addedAt: Long = System.currentTimeMillis(),
+    /** True when the user has manually renamed this contact; protects the name from
+     *  being overwritten by a later delivery announce. */
+    val isNameManual: Boolean = false,
 )
 
 @Entity(tableName = "chats")

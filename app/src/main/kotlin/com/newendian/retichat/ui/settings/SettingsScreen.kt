@@ -501,7 +501,9 @@ private fun PrivacyCard() {
                     checked = filterStrangers,
                     onCheckedChange = {
                         filterStrangers = it
-                        UserPreferences.setFilterStrangersEnabled(context, it)
+						(context.applicationContext as? com.newendian.retichat.RetichatApp)
+							?.repository
+							?.setCoreFilterStrangers(it)
                     },
                 )
             }

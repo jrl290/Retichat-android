@@ -237,6 +237,18 @@ object RetichatBridge {
     fun routerWatchDestination(router: Long, destHash: ByteArray): Boolean =
         nativeRouterWatchDestination(router, destHash) == 0
 
+    fun routerSetFilterStrangers(router: Long, enabled: Boolean): Boolean =
+        nativeRouterSetFilterStrangers(router, enabled) == 0
+
+    fun routerClearDeliveryAllowlist(router: Long): Boolean =
+        nativeRouterClearDeliveryAllowlist(router) == 0
+
+    fun routerAllowDeliveryIdentity(router: Long, identityHash: ByteArray): Boolean =
+        nativeRouterAllowDeliveryIdentity(router, identityHash) == 0
+
+    fun routerDisallowDeliveryIdentity(router: Long, identityHash: ByteArray): Boolean =
+        nativeRouterDisallowDeliveryIdentity(router, identityHash) == 0
+
     /** Kick the outbound processor. */
     fun routerProcessOutbound(router: Long): Boolean =
         nativeRouterProcessOutbound(router) == 0
@@ -251,6 +263,10 @@ object RetichatBridge {
     private external fun nativeRouterSetAnnounceCallback(router: Long, callback: AnnounceCallback): Int
     private external fun nativeRouterAnnounce(router: Long, destHash: ByteArray): Int
     private external fun nativeRouterWatchDestination(router: Long, destHash: ByteArray): Int
+	private external fun nativeRouterSetFilterStrangers(router: Long, enabled: Boolean): Int
+	private external fun nativeRouterClearDeliveryAllowlist(router: Long): Int
+	private external fun nativeRouterAllowDeliveryIdentity(router: Long, identityHash: ByteArray): Int
+	private external fun nativeRouterDisallowDeliveryIdentity(router: Long, identityHash: ByteArray): Int
     private external fun nativeRouterProcessOutbound(router: Long): Int
     private external fun nativeRouterDestroy(router: Long): Int
     private external fun nativeTransportPublishDestination(destHash: ByteArray, refreshSecs: Double): Int

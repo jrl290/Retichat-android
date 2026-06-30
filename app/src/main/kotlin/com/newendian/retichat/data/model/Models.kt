@@ -8,6 +8,8 @@ data class Contact(
     val displayName: String,
     val publicKey: ByteArray? = null,
     val addedAt: Long = System.currentTimeMillis(),
+    /** True when the user has manually renamed this contact. */
+    val isNameManual: Boolean = false,
 ) {
     val destHashHex: String get() = destHash.toHex()
 
