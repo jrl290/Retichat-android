@@ -239,6 +239,12 @@ class GroupChatManager(
                 Log.w(TAG, "send: bad hex $targetHex")
                 return@launch
             }
+            // Register the AppLinks spec synchronously before send so
+            // the POB loop takes the AppLinks-owned DIRECT path (which
+            // sends LINKREQUEST in tier-3) instead of the legacy path
+            // (which may never create a link when no path is cached).
+            RetichatBridge.appLinkOpen(routerHandle, destBytes, "lxmf", "delivery")
+
             val handle = RetichatBridge.messageCreate(
                 destHash = destBytes,
                 srcHash = selfDestHash,

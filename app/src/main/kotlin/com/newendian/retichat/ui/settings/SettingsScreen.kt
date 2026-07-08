@@ -899,10 +899,6 @@ private fun buildSummary(iface: InterfaceConfigEntity): String {
     val json = try { JSONObject(iface.configJson) } catch (_: Exception) { return "" }
     return when (iface.type) {
         "TCPClientInterface" -> "${json.optString("target_host")}:${json.optString("target_port")}"
-        "TCPServerInterface" -> "${json.optString("listen_ip")}:${json.optString("listen_port")}"
-        "UDPInterface" -> "${json.optString("listen_ip")}:${json.optString("listen_port")} → ${json.optString("forward_ip")}:${json.optString("forward_port")}"
-        "AutoInterface" -> json.optString("group_id", "reticulum")
-        "I2PInterface" -> json.optString("peers").take(30)
         else -> ""
     }
 }

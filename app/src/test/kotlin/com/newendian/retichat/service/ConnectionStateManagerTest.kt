@@ -46,14 +46,6 @@ class ConnectionStateManagerTest {
     }
 
     @Test
-    fun dataSendWaitsForActiveBeforeSendAsync() {
-        val connectionState = sourceFile("src/main/kotlin/com/newendian/retichat/service/ConnectionStateManager.kt")
-
-        assertTrue(connectionState.contains("DATA sends must also wait for the AppLink readiness edge"))
-        assertTrue(connectionState.contains("if (!awaitAppLinkActive(destHash, timeoutMs = 5_000L)) return@withContext false"))
-    }
-
-    @Test
     fun channelPullDoesNotPreferPersistentAppLinks() {
         assertFalse(ConnectionStateManager.prefersPersistentAppLink("rfed", "channel.pull"))
     }

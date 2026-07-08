@@ -76,8 +76,7 @@ data class DeliveryTrackingEntity(
 /**
  * A persisted Reticulum network interface configuration.
  *
- * [type] is one of: TCPClientInterface, TCPServerInterface, UDPInterface,
- * AutoInterface, I2PInterface.
+ * [type] is currently: TCPClientInterface.
  *
  * [configJson] holds the type-specific key/value pairs as a JSON string,
  * e.g. {"target_host":"192.168.1.1","target_port":"4242"}.

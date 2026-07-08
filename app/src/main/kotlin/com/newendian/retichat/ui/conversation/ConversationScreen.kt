@@ -770,7 +770,7 @@ private fun ChannelConversationContent(
                             val ch = channel ?: return@FilledIconButton
                             val text = draft
                             draft = ""
-                            app.applicationScope.launch {
+                            scope.launch {
                                 app.rfedChannelClient.sendMessage(ch, text)
                             }
                         },

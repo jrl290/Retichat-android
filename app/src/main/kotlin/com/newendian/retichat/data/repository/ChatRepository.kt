@@ -268,6 +268,12 @@ class ChatRepository(
 
             val destHash = chat.memberHashes.hexToBytes()
             try {
+                // Register the AppLinks spec synchronously before send so
+                // the POB loop takes the AppLinks-owned DIRECT path (which
+                // sends LINKREQUEST in tier-3) instead of the legacy path
+                // (which may never create a link when no path is cached).
+                RetichatBridge.appLinkOpen(routerHandle, destHash, "lxmf", "delivery")
+
                 val handle = RetichatBridge.messageCreate(
                     destHash = destHash,
                     srcHash = selfDestHash,
@@ -373,14 +379,18 @@ class ChatRepository(
                 val readinessFailed = ConnectionStateManager.appLinkStatus(destHash) ==
                     RetichatBridge.AppLinkStatus.DISCONNECTED
 
-                // Ensure an APP_LINK to the peer is opening (idempotent).
-                // Keep the direct cascade unchanged; only the propagation
-                // fallback delay changes. A currently DISCONNECTED peer skips
-                // the local 5 s wait and starts the propagated copy immediately
-                // in parallel with the fresh direct attempt.
+                // Register the AppLinks spec synchronously on this IO thread
+                // BEFORE messageSendViaAppLinks triggers process_outbound.
+                // openConversation() is fire-and-forget via a separate coroutine
+                // scope and does NOT guarantee the spec is registered before the
+                // POB loop checks AppLinks::contains().  If contains() is false
+                // and Transport::has_path() is also false (fresh install, expired
+                // cache), the legacy DIRECT path only requests a path without
+                // creating a link — no LINKREQUEST is ever sent.  The synchronous
+                // call below closes that race.
                 // // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1
-                ConnectionStateManager.openConversation(destHash)
-                Log.d(TAG, "sendDirect: openConversation OK, submitting DIRECT")
+                RetichatBridge.appLinkOpen(routerHandle, destHash, "lxmf", "delivery")
+                Log.d(TAG, "sendDirect: appLinkOpen OK, submitting DIRECT")
 
                 val msgHandle = RetichatBridge.messageCreate(
                     destHash = destHash,
@@ -718,6 +728,10 @@ class ChatRepository(
         memberHexes.forEach { memberHex ->
             scope.launch(Dispatchers.IO) {
                 val destHash = memberHex.hexToBytes()
+                // Register the AppLinks spec synchronously before send so
+                // the POB loop takes the AppLinks-owned DIRECT path.
+                RetichatBridge.appLinkOpen(routerHandle, destHash, "lxmf", "delivery")
+
                 val handle = RetichatBridge.messageCreate(
                     destHash = destHash,
                     srcHash = selfDestHash,
@@ -1180,8 +1194,12 @@ class ChatRepository(
         // Broadcast leave to all members
         otherMembers.forEach { memberHex ->
             scope.launch(Dispatchers.IO) {
+                val destHash = memberHex.hexToBytes()
+                // Register the AppLinks spec synchronously before send.
+                RetichatBridge.appLinkOpen(routerHandle, destHash, "lxmf", "delivery")
+
                 val handle = RetichatBridge.messageCreate(
-                    destHash = memberHex.hexToBytes(),
+                    destHash = destHash,
                     srcHash = selfDestHash,
                     content = "left the group",
                     method = RetichatBridge.DeliveryMethod.DIRECT,
