@@ -1,6 +1,7 @@
 package com.newendian.retichat.data.repository
 
 import android.content.Context
+import android.util.Base64
 import android.util.Log
 import com.newendian.retichat.GroupMemberStatuses
 import com.newendian.retichat.MemberStatus
@@ -62,7 +63,7 @@ class ChatRepository(
         identityHandle = identity
 
         groupChatManager = if (router != 0L) {
-            GroupChatManager(scope, selfHash, router, identity)
+            GroupChatManager(appContext, scope, selfHash, router, identity)
         } else null
 
         // When the service comes up (or network returns), flush queued messages
@@ -75,6 +76,10 @@ class ChatRepository(
         scope.launch(Dispatchers.IO) {
             messageDao.failStaleOutbound()
         }
+    }
+
+    fun onMessageState(hash: ByteArray, state: Int) {
+        groupChatManager?.onMessageState(hash, state)
     }
 
     /**
@@ -229,7 +234,18 @@ class ChatRepository(
 
         // Broadcast invites to all members (except self) via GroupChatManager
         val allMemberHexes = sorted.map { it.toHex() }
-        groupChatManager?.sendInvites(groupIdHex, name, allMemberHexes) ?: run {
+        val memberPublicKeys = buildMap {
+            sorted.forEach { hash ->
+                val hashHex = hash.toHex()
+                val publicKey = if (hashHex == selfDestHash.toHex()) {
+                    RetichatBridge.identityPublicKey(identityHandle)?.toHex()
+                } else {
+                    contactDao.findByHash(hashHex)?.publicKeyHex
+                }
+                if (publicKey?.length == 128) put(hashHex, publicKey.lowercase())
+            }
+        }
+        groupChatManager?.sendInvites(groupIdHex, name, allMemberHexes, memberPublicKeys) ?: run {
             // Fallback: offline — invites will be sent when stack comes back up
             Log.w(TAG, "createGroupChat: stack offline, invites deferred")
         }
@@ -819,14 +835,23 @@ class ChatRepository(
             val srcHex = srcHash.toHex()
             val msgId = hash.toHex()
 
-            // Auto-create contact if unknown
+            // Auto-create contact if unknown.
+            // Prefer FIELD_SENDER_NAME from the message fields (privacy-preserving,
+            // only message recipients see it), fall back to truncated hash.
+            val senderName = fields.getString(LxmfFields.FIELD_SENDER_NAME)
             if (contactDao.findByHash(srcHex) == null) {
                 contactDao.upsert(
                     ContactEntity(
                         destHashHex = srcHex,
-                        displayName = srcHex.take(8),
+                        displayName = senderName ?: srcHex.take(8),
                     )
                 )
+            } else if (senderName != null) {
+                // Update existing contact name if not manually set
+                val existing = contactDao.findByHash(srcHex)
+                if (existing != null && !existing.isNameManual && existing.displayName != senderName) {
+                    contactDao.upsert(existing.copy(displayName = senderName))
+                }
             }
 
             if (groupId != null) {
@@ -853,6 +878,7 @@ class ChatRepository(
         val groupAction = fields.getString(LxmfFields.GROUP_ACTION)
         val groupRelayFor = fields.getString(LxmfFields.GROUP_RELAY_FOR)
         val groupRelaySeen = fields.getString(LxmfFields.GROUP_RELAY_SEEN)
+        val groupMemberKeys = fields.getString(LxmfFields.GROUP_MEMBER_KEYS)
 
         // Determine the actual sender (may be relayed on behalf of another member)
         val actualSenderHex = groupSender ?: srcHex
@@ -867,6 +893,30 @@ class ChatRepository(
 
         // Look up existing group chat by groupId
         var chat = chatDao.findByGroupId(groupId!!)
+
+        if (groupAction == GroupChatManager.Action.INVITE && groupMembers != null && groupMemberKeys != null) {
+            val invitedMembers = (groupMembers.split(",") + srcHex).toSet()
+            groupMemberKeys.split(",").forEach { entry ->
+                val parts = entry.split(":", limit = 2)
+                if (parts.size != 2) return@forEach
+                val memberHash = parts[0].lowercase()
+                val encodedPublicKey = parts[1]
+                if (memberHash !in invitedMembers || memberHash.length != 32) return@forEach
+                val hashBytes = memberHash.hexToBytes() ?: return@forEach
+                val publicKey = runCatching { Base64.decode(encodedPublicKey, Base64.DEFAULT) }.getOrNull()
+                    ?.takeIf { it.size == 64 } ?: return@forEach
+                val publicKeyHex = publicKey.toHex()
+                if (!RetichatBridge.identityRememberLxmfDelivery(hashBytes, publicKey)) {
+                    Log.w(TAG, "Ignored mismatched group member key for ${memberHash.take(8)}")
+                    return@forEach
+                }
+                val existing = contactDao.findByHash(memberHash)
+                contactDao.upsert(
+                    existing?.copy(publicKeyHex = publicKeyHex)
+                        ?: ContactEntity(destHashHex = memberHash, displayName = memberHash.take(8), publicKeyHex = publicKeyHex)
+                )
+            }
+        }
 
         if (chat == null && groupMembers != null && groupAction == GroupChatManager.Action.INVITE) {
             // Incoming invite — create the local group record in PENDING state
@@ -884,14 +934,18 @@ class ChatRepository(
                 )
             )
 
-            groupMembers.split(",").forEach { memberHex ->
+            (groupMembers.split(",") + srcHex).filter { it.isNotEmpty() }.distinct().forEach { memberHex ->
                 val contact = contactDao.findByHash(memberHex)
                 messageDao.upsertGroupMember(
                     GroupMemberEntity(
                         chatId = chatId,
                         destHashHex = memberHex,
                         displayName = contact?.displayName ?: memberHex.take(8),
-                        inviteStatus = MemberStatus.INVITED,
+                        inviteStatus = if (memberHex == srcHex) {
+                            MemberStatus.ACCEPTED
+                        } else {
+                            MemberStatus.INVITED
+                        },
                     )
                 )
             }
@@ -907,10 +961,29 @@ class ChatRepository(
 
         when (groupAction) {
             GroupChatManager.Action.INVITE -> {
+                // The authenticated invite source implicitly accepted when it
+                // created and sent the invitation. Apply this on duplicate
+                // pending invites as well.
+                val inviter = messageDao.groupMembersList(chat.id)
+                    .firstOrNull { it.destHashHex == srcHex }
+                if (inviter == null) {
+                    val contact = contactDao.findByHash(srcHex)
+                    messageDao.upsertGroupMember(
+                        GroupMemberEntity(
+                            chatId = chat.id,
+                            destHashHex = srcHex,
+                            displayName = contact?.displayName ?: srcHex.take(8),
+                            inviteStatus = MemberStatus.ACCEPTED,
+                        )
+                    )
+                } else {
+                    messageDao.setGroupMemberStatus(chat.id, srcHex, MemberStatus.ACCEPTED)
+                }
                 // Insert a system invite message (idempotent on inviteMsgId)
                 val senderName = contactDao.findByHash(actualSenderHex)?.displayName
                     ?: actualSenderHex.take(8)
                 val inviteMsgId = "inv_${groupId.take(16)}"
+                val firstInviteChunk = messageDao.findById(inviteMsgId) == null
                 messageDao.upsert(
                     MessageEntity(
                         id = inviteMsgId,
@@ -922,7 +995,7 @@ class ChatRepository(
                         state = RetichatBridge.MessageState.DELIVERED,
                     )
                 )
-                if (RetichatApp.activeChatId != chat.id) {
+                if (firstInviteChunk && RetichatApp.activeChatId != chat.id) {
                     MessageNotificationHelper.notify(
                         appContext,
                         "Group invite",
@@ -1050,12 +1123,18 @@ class ChatRepository(
         val groupId = chat.groupIdHex ?: return
         val selfHex = selfDestHash.toHex()
 
-        messageDao.setGroupMemberStatus(chatId, selfHex, MemberStatus.ACCEPTED)
-
         val allMembers = messageDao.groupMembersList(chatId)
             .map { it.destHashHex }
             .filter { it.isNotEmpty() }
             .distinct()
+        val missingKeys = allMembers.filter { it != selfHex }
+            .filter { contactDao.findByHash(it)?.publicKeyHex?.length != 128 }
+        if (missingKeys.isNotEmpty()) {
+            Log.i(TAG, "acceptGroupInvite deferred: still receiving ${missingKeys.size} member key(s)")
+            return
+        }
+
+        messageDao.setGroupMemberStatus(chatId, selfHex, MemberStatus.ACCEPTED)
         groupChatManager?.sendAccept(groupId, allMembers)
             ?: Log.w(TAG, "acceptGroupInvite: stack offline, accept will not be broadcast")
 

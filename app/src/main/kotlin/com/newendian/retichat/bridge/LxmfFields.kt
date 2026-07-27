@@ -75,6 +75,7 @@ class LxmfFields private constructor(
         const val GROUP_RELAY_SEEN     = 0xA5  // str: comma-sep hashes already delivered
         const val GROUP_RELAY_FOR      = 0xA6  // str: hash of member requesting relay
         const val GROUP_RELAY_DONE     = 0xA7  // bool: relay-complete confirmation
+        const val GROUP_MEMBER_KEYS    = 0xA8  // str: one hash:base64-public-key pair per invite chunk
 
         /** Standard LXMF field IDs (for reference). */
         const val FIELD_EMBEDDED_LXMS    = 0x01
@@ -87,6 +88,7 @@ class LxmfFields private constructor(
         const val FIELD_RESULTS          = 0x0A
         const val FIELD_GROUP            = 0x0B
         const val FIELD_TICKET           = 0x0C
+        const val FIELD_SENDER_NAME      = 0x10   // sender display name (UTF-8) — per-message
 
         /** Empty fields instance. */
         val EMPTY = LxmfFields(emptyMap())

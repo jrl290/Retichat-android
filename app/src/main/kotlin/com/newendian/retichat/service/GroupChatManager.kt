@@ -1,5 +1,7 @@
 package com.newendian.retichat.service
 
+import android.content.Context
+import android.util.Base64
 import android.util.Log
 import com.newendian.retichat.bridge.LxmfFields
 import com.newendian.retichat.bridge.RetichatBridge
@@ -9,6 +11,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Network-level group chat protocol operations.
@@ -21,6 +24,7 @@ import kotlinx.coroutines.launch
  * See RFed-spec/Group.md for the full protocol specification.
  */
 class GroupChatManager(
+    private val appContext: Context,
     private val scope: CoroutineScope,
     private val selfDestHash: ByteArray,
     private val routerHandle: Long,
@@ -40,6 +44,8 @@ class GroupChatManager(
     }
 
     private val selfHex: String get() = selfDestHash.toHex()
+    private val trackedHandles = ConcurrentHashMap<String, Long>()
+    private val fallbackStarted = ConcurrentHashMap.newKeySet<Long>()
 
     // ---- Invite ---------------------------------------------------------
 
@@ -53,16 +59,28 @@ class GroupChatManager(
         groupId: String,
         groupName: String,
         allMembers: List<String>,
+        memberPublicKeys: Map<String, String>,
     ) {
         val membersCSV = allMembers.joinToString(",")
-        val content = "You've been invited to \"$groupName\""
+        if (allMembers.any { memberPublicKeys[it]?.length != 128 }) {
+            Log.w(TAG, "invite aborted: missing member public key")
+            return
+        }
+        val memberKeyEntries = allMembers.sorted().map { hash ->
+            val publicKey = memberPublicKeys.getValue(hash).hexToBytes() ?: return
+            "$hash:${Base64.encodeToString(publicKey, Base64.NO_WRAP)}"
+        }
+        val content = ""
         allMembers.filter { it != selfHex }.forEach { target ->
-            send(target, content) { handle ->
-                setField(handle, LxmfFields.GROUP_ID,      groupId)
-                setField(handle, LxmfFields.GROUP_NAME,    groupName)
-                setField(handle, LxmfFields.GROUP_MEMBERS, membersCSV)
-                setField(handle, LxmfFields.GROUP_ACTION,  Action.INVITE)
-                setField(handle, LxmfFields.GROUP_SENDER,  selfHex)
+            memberKeyEntries.forEach { memberKeyEntry ->
+                send(target, content) { handle ->
+                    setField(handle, LxmfFields.GROUP_ID, groupId)
+                    setField(handle, LxmfFields.GROUP_NAME, groupName)
+                    setField(handle, LxmfFields.GROUP_MEMBERS, membersCSV)
+                    setField(handle, LxmfFields.GROUP_MEMBER_KEYS, memberKeyEntry)
+                    setField(handle, LxmfFields.GROUP_ACTION, Action.INVITE)
+                    setField(handle, LxmfFields.GROUP_SENDER, selfHex)
+                }
             }
         }
     }
@@ -158,6 +176,7 @@ class GroupChatManager(
                 setField(handle, LxmfFields.GROUP_SENDER, selfHex)
                 val ok = RetichatBridge.messageSendViaAppLinks(handle)
                 if (ok) {
+                    track(handle)
                     onHandle?.invoke(handle, target)
                 } else {
                     Log.w(TAG, "fanout: messageSend failed for $target")
@@ -262,10 +281,63 @@ class GroupChatManager(
                 Log.w(TAG, "send: messageSend failed for $targetHex: ${RetichatBridge.lastError()}")
                 destroyAfterDelay(handle)
             } else {
-                // Allow 60s for delivery confirmation before releasing the handle
-                destroyAfterDelay(handle, delayMs = 60_000L)
+                track(handle)
             }
         }
+    }
+
+    fun onMessageState(hash: ByteArray, state: Int): Boolean {
+        val hashHex = hash.toHex()
+        val handle = trackedHandles[hashHex] ?: return false
+        if (state == RetichatBridge.MessageState.PROP_FALLBACK_REQUESTED) {
+            if (fallbackStarted.add(handle)) {
+                scope.launch(Dispatchers.IO) { startPropagationFallback(handle) }
+            }
+            return true
+        }
+        if (state == RetichatBridge.MessageState.SENT ||
+            state == RetichatBridge.MessageState.DELIVERED ||
+            state == RetichatBridge.MessageState.REJECTED ||
+            state == RetichatBridge.MessageState.CANCELLED ||
+            state == RetichatBridge.MessageState.FAILED
+        ) {
+            trackedHandles.remove(hashHex)
+            fallbackStarted.remove(handle)
+            RetichatBridge.messageDestroy(handle)
+        }
+        return true
+    }
+
+    private fun track(handle: Long) {
+        val hash = RetichatBridge.messageGetHash(handle) ?: run {
+            RetichatBridge.messageDestroy(handle)
+            return
+        }
+        trackedHandles[hash.toHex()] = handle
+    }
+
+    private fun startPropagationFallback(directHandle: Long) {
+        val node = PropagationNodeManager(
+            userConfiguredHash = PropagationSync.resolvePropagationOverride(appContext),
+        ).primaryNode
+        if (!RetichatBridge.routerSetPropagationNode(routerHandle, node)) {
+            Log.w(TAG, "group fallback: setPropagationNode failed: ${RetichatBridge.lastError()}")
+            return
+        }
+        val propagated = RetichatBridge.messageClonePropagated(directHandle)
+        if (propagated == 0L) {
+            Log.w(TAG, "group fallback: clone failed: ${RetichatBridge.lastError()}")
+            return
+        }
+        if (!RetichatBridge.messageSendViaAppLinks(propagated)) {
+            Log.w(TAG, "group fallback: send failed: ${RetichatBridge.lastError()}")
+            RetichatBridge.messageDestroy(propagated)
+            return
+        }
+        // The router retains the message Arc; release the registry handle so it
+        // cannot replace the direct handle under their shared canonical hash.
+        RetichatBridge.messageDestroy(propagated)
+        Log.i(TAG, "group propagation fallback dispatched")
     }
 
     private fun setField(handle: Long, key: Int, value: String) {

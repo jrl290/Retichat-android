@@ -27,6 +27,11 @@ interface AnnounceCallback {
     fun onAnnounce(destHash: ByteArray, displayName: String?)
 }
 
+@Keep
+interface MessageStateCallback {
+    fun onState(hash: ByteArray, state: Int)
+}
+
 /**
  * Callback interface for receiving inbound RFed channel blobs (push fanout).
  *
@@ -168,6 +173,9 @@ object RetichatBridge {
     fun transportIdentityKnown(destHash: ByteArray): Boolean =
         nativeTransportIdentityKnown(destHash) == 1
 
+    fun identityRememberLxmfDelivery(destHash: ByteArray, publicKey: ByteArray): Boolean =
+        nativeIdentityRememberLxmfDelivery(destHash, publicKey) == 0
+
     fun transportRequestPath(destHash: ByteArray): Boolean =
         nativeTransportRequestPath(destHash) == 0
 
@@ -184,6 +192,7 @@ object RetichatBridge {
     private external fun nativeTransportHasPath(destHash: ByteArray): Int
     private external fun nativeTransportIsPathVerifiedThisSession(destHash: ByteArray): Int
     private external fun nativeTransportIdentityKnown(destHash: ByteArray): Int
+    private external fun nativeIdentityRememberLxmfDelivery(destHash: ByteArray, publicKey: ByteArray): Int
     private external fun nativeTransportRequestPath(destHash: ByteArray): Int
     private external fun nativeTransportClonePathAndIdentity(
         sourceHash: ByteArray,
@@ -333,6 +342,12 @@ object RetichatBridge {
     fun messageAddFieldBool(handle: Long, key: Int, value: Boolean): Boolean =
         nativeMessageAddFieldBool(handle, key, value) == 0
 
+    /** Clone a message as a fresh PROPAGATED copy, preserving fields/attachments. */
+    fun messageClonePropagated(handle: Long): Long = nativeMessageClonePropagated(handle)
+
+    fun routerSetMessageStateCallback(router: Long, callback: MessageStateCallback): Boolean =
+        nativeRouterSetMessageStateCallback(router, callback) == 0
+
     /** Submit the message to the router for delivery. */
     @Deprecated(
         "Use messageSendViaAppLinks(msg) so AppLinks owns path race, readiness, and propagation fallback timing.",
@@ -372,6 +387,8 @@ object RetichatBridge {
     private external fun nativeMessageAddAttachment(handle: Long, filename: String, data: ByteArray): Int
     private external fun nativeMessageAddFieldString(handle: Long, key: Int, value: String): Int
     private external fun nativeMessageAddFieldBool(handle: Long, key: Int, value: Boolean): Int
+    private external fun nativeMessageClonePropagated(handle: Long): Long
+    private external fun nativeRouterSetMessageStateCallback(router: Long, callback: MessageStateCallback): Int
     private external fun nativeMessageSend(router: Long, msg: Long): Int
     private external fun nativeMessageSendViaAppLinks(msg: Long): Int
     private external fun nativeAppLinksInvalidateLiveness(destHash: ByteArray): Int
@@ -388,6 +405,7 @@ object RetichatBridge {
         const val SENDING    = 0x02
         const val SENT       = 0x04
         const val DELIVERED  = 0x08
+        const val PROP_FALLBACK_REQUESTED = 0x10
         const val REJECTED   = 0xFD
         const val CANCELLED  = 0xFE
         const val FAILED     = 0xFF

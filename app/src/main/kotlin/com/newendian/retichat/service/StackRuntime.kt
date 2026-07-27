@@ -5,6 +5,7 @@ import android.util.Log
 import com.newendian.retichat.RetichatApp
 import com.newendian.retichat.bridge.AnnounceCallback
 import com.newendian.retichat.bridge.MessageCallback
+import com.newendian.retichat.bridge.MessageStateCallback
 import com.newendian.retichat.bridge.RetichatBridge
 import com.newendian.retichat.bridge.RfedBlobCallback
 import kotlinx.coroutines.CompletableDeferred
@@ -219,6 +220,12 @@ private const val GRACE_SHUTDOWN_MS = 30_000L  // 30s grace avoids stack teardow
         RetichatBridge.routerSetAnnounceCallback(routerHandle, object : AnnounceCallback {
             override fun onAnnounce(destHash: ByteArray, displayName: String?) {
                 repo.onAnnounceReceived(destHash, displayName)
+            }
+        })
+
+        RetichatBridge.routerSetMessageStateCallback(routerHandle, object : MessageStateCallback {
+            override fun onState(hash: ByteArray, state: Int) {
+                repo.onMessageState(hash, state)
             }
         })
 

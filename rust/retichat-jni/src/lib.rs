@@ -120,6 +120,7 @@ fn vec_to_jbytes(env: &JNIEnv, data: &[u8]) -> jbyteArray {
 
 static DELIVERY_CB: Mutex<Option<(JavaVM, GlobalRef)>> = Mutex::new(None);
 static ANNOUNCE_CB: Mutex<Option<(JavaVM, GlobalRef)>> = Mutex::new(None);
+static MESSAGE_STATE_CB: Mutex<Option<(JavaVM, GlobalRef)>> = Mutex::new(None);
 
 /// Process-wide APP_LINK status callback (mirrors iOS
 /// `lxmf_app_link_register_status_callback`).  Only one callback is
@@ -343,6 +344,32 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeT
     ok_or_neg(rns::transport_request_path(&h))
 }
 
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeIdentityRememberLxmfDelivery(
+    env: JNIEnv,
+    _class: JClass,
+    dest_hash: JByteArray,
+    public_key: JByteArray,
+) -> jint {
+    let claimed_hash = jbytes_to_vec(&env, &dest_hash);
+    let public_key = jbytes_to_vec(&env, &public_key);
+    let identity = match Identity::from_public_key(&public_key) {
+        Ok(identity) => identity,
+        Err(error) => { rns::set_error(error); return -1; }
+    };
+    let destination = match Destination::new_outbound(
+        Some(identity), DestinationType::Single, "lxmf".into(), vec!["delivery".into()],
+    ) {
+        Ok(destination) => destination,
+        Err(error) => { rns::set_error(error); return -1; }
+    };
+    if destination.hash != claimed_hash {
+        rns::set_error("public key does not match claimed lxmf.delivery hash".into());
+        return -1;
+    }
+    ok_or_neg(Identity::remember_destination(&claimed_hash, &public_key, None))
+}
+
 /// `RetichatBridge.nativeTransportClonePathAndIdentity(sourceHash, destHash): Int`
 #[no_mangle]
 pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeTransportClonePathAndIdentity(
@@ -500,6 +527,41 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeR
     );
 
     ok_or_neg(result)
+}
+
+/// `RetichatBridge.nativeRouterSetMessageStateCallback(router: Long, callback: MessageStateCallback): Int`
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeRouterSetMessageStateCallback(
+    mut env: JNIEnv,
+    _class: JClass,
+    router: jlong,
+    callback: JObject,
+) -> jint {
+    let jvm = match env.get_java_vm() {
+        Ok(vm) => vm,
+        Err(e) => { rns::set_error(format!("Failed to get JavaVM: {e}")); return -1; }
+    };
+    let global_ref = match env.new_global_ref(&callback) {
+        Ok(reference) => reference,
+        Err(e) => { rns::set_error(format!("Failed to create state callback ref: {e}")); return -1; }
+    };
+    *MESSAGE_STATE_CB.lock().unwrap() = Some((jvm, global_ref));
+
+    ok_or_neg(lxmf::router_set_message_state_callback(
+        router as u64,
+        Arc::new(move |hash, state| {
+            let guard = MESSAGE_STATE_CB.lock().unwrap();
+            let (jvm, cb_ref) = match guard.as_ref() { Some(pair) => pair, None => return };
+            let mut env = match jvm.attach_current_thread() { Ok(env) => env, Err(_) => return };
+            let j_hash = match env.byte_array_from_slice(hash) { Ok(value) => value, Err(_) => return };
+            let _ = env.call_method(
+                cb_ref.as_obj(),
+                "onState",
+                "([BI)V",
+                &[JValue::Object(&j_hash), JValue::Int(state as jint)],
+            );
+        }),
+    ))
 }
 
 /// `RetichatBridge.nativeRouterSetAnnounceCallback(routerHandle: Long, callback: AnnounceCallback): Int`
@@ -751,6 +813,22 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeM
     value: jni::sys::jboolean,
 ) -> jint {
     ok_or_neg(lxmf::message_add_field_bool(handle as u64, key as u8, value != 0))
+}
+
+/// `RetichatBridge.nativeMessageClonePropagated(handle: Long): Long`
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeMessageClonePropagated(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) -> jlong {
+    match lxmf::message_clone_propagated(handle as u64) {
+        Ok(copy) => copy as jlong,
+        Err(e) => {
+            rns::set_error(e);
+            0
+        }
+    }
 }
 
 /// `RetichatBridge.nativeMessageSend(router: Long, msg: Long): Int`
