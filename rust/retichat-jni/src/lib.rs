@@ -1422,6 +1422,9 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeC
     let transient_id = reticulum_rust::identity::full_hash(&data);
     let workblock = LXStamper::stamp_workblock(&transient_id, 16);
     let (stamp, value) = LXStamper::generate_stamp(&transient_id, cost_u, 16);
+    // None when the search is cancelled or times out; an empty stamp fails the
+    // length check in stamp_valid and takes the error path below.
+    let stamp = stamp.unwrap_or_default();
     if value < cost_u || !LXStamper::stamp_valid(&stamp, cost_u, &workblock) {
         rns::set_error(format!(
             "stamp PoW failed: required cost={} but achieved value={} (payload_len={})",
