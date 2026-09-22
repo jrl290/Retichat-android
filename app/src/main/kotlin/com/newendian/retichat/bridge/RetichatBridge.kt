@@ -226,14 +226,14 @@ object RetichatBridge {
     /**
      * Opt a destination into Transport's auto-announce daemon.
      *
-     * Once published, Transport automatically re-announces the destination:
-     *   * once on every interface false→true `online` transition, and
-     *   * every [refreshSecs] seconds (pass `0.0` to disable periodic
-     *     refresh and only re-announce on interface up-edges).
+     * Once published, Transport re-announces the destination every
+     * [refreshSecs] seconds (pass `0.0` for no periodic refresh). Nothing
+     * announces on interface state changes: that matches the Python
+     * reference, and public transport nodes rate-limit announces per
+     * destination (Reticulum-rust PARITY-AUDIT-1.5.2.md B22).
      *
      * Idempotent: a second call updates the existing entry without
-     * triggering an immediate announce. Replaces the per-app pattern of
-     * Timer-based + reconnect-driven + foreground-driven re-announces.
+     * triggering an immediate announce. Replaces an app-side announce timer.
      */
     fun transportPublishDestination(destHash: ByteArray, refreshSecs: Double): Boolean =
         nativeTransportPublishDestination(destHash, refreshSecs) == 0
