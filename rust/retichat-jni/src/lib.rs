@@ -653,7 +653,10 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeR
 /// Opt the given destination hash into Transport's auto-announce daemon.
 /// Transport will then re-announce automatically:
 ///   * once on every interface false→true online transition, and
-///   * every `refresh_secs` seconds (pass 0.0 for up-edge-only).
+///   * every `refresh_secs` seconds (pass 0.0 for up-edge-only),
+/// both held per destination and per interface to one announce per
+/// period (`refresh_secs`, or 30 min when 0.0) since the last announce
+/// there, including the app's own announces, which always go out.
 #[no_mangle]
 pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeTransportPublishDestination(
     env: JNIEnv,
@@ -1268,7 +1271,8 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeR
     // Opt rfed.delivery into the auto-announce daemon so the RFed node
     // always has a fresh path back to this device:
     //   * re-announced on every interface false→true transition, and
-    //   * every 30 minutes for as long as the stack is running.
+    //   * every 30 minutes for as long as the stack is running,
+    // both held per interface to one announce per 30 minutes.
     // This replaces the old manual one-shot rfedDeliveryAnnounce() calls
     // from Kotlin — the daemon is strictly superior because it fires on
     // interface up-edges that happen while the app is backgrounded.

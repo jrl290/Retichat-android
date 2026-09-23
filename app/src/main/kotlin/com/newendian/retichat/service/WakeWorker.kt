@@ -18,8 +18,10 @@ import kotlinx.coroutines.withTimeoutOrNull
  *
  * Lifecycle:
  *   1. [StackRuntime.acquire] — bring the Reticulum stack up if not already.
- *      Transport's auto-announce daemon re-announces rfed.delivery on the
- *      interface up-edge that occurs when the network is acquired.
+ *      A cold start produces no up-edge announce: what reaches the network
+ *      is the first announce at start (the app's own, or the publish
+ *      daemon's first refresh sweep), which starts the 30-min period per
+ *      interface; later up-edges inside that period stay quiet.
  *   2. Pull the per-channel deferred queue once.
  *   3. Run a propagation poll for LXMF.
  *   4. [StackRuntime.release] — stack tears down after the grace period
@@ -55,9 +57,10 @@ class WakeWorker(
                     return@withTimeoutOrNull Result.success()
                 }
 
-                // rfed.delivery re-announce is handled by Transport's publish daemon
-                // on the interface up-edge when the stack acquires the network —
-                // no manual one-shot needed here.
+                // rfed.delivery re-announce is handled by Transport's publish daemon.
+                // A cold start produces no up-edge announce; the announce at stack
+                // start is what reaches the network, and up-edges are held to the
+                // 30-min period per interface — no manual one-shot here.
 
                 // Per-channel pull (drain one page each).
                 val channels = app.database.channelDao().activeChannels()

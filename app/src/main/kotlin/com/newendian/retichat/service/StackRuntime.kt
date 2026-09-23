@@ -236,7 +236,8 @@ private const val GRACE_SHUTDOWN_MS = 30_000L  // 30s grace avoids stack teardow
         if (selfDestHash.isNotEmpty()) {
             // Hand the delivery destination off to Transport's auto-announce
             // daemon: it will announce immediately, on every interface
-            // false→true online transition, and every 30 minutes thereafter.
+            // false→true online transition, and every 30 minutes thereafter,
+            // each held per interface to one announce per 30 minutes.
             // Replaces the old "announce once at startup + hope" pattern.
             RetichatBridge.transportPublishDestination(selfDestHash, 30.0 * 60.0)
         }
