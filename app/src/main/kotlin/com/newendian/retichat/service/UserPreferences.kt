@@ -11,7 +11,8 @@ import android.content.SharedPreferences
  * identical across platforms.
  */
 object UserPreferences {
-    private const val HIDDEN_DEFAULT_RFED_NODE_IDENTITY_HASH = "7e5ff856dc2aa0fbc9fc8831b62d2834"
+    /** The RFed node the app uses unless Settings names another (shown there explicitly). */
+    const val DEFAULT_RFED_NODE_IDENTITY_HASH = "7e5ff856dc2aa0fbc9fc8831b62d2834"
 
     const val PREF_NAME = "user_prefs"
 
@@ -104,7 +105,7 @@ object UserPreferences {
     fun getEffectiveRfedNodeIdentityHash(context: Context): String {
         val configured = getRfedNodeIdentityHash(context)
         if (configured.isNotEmpty()) return configured
-        return HIDDEN_DEFAULT_RFED_NODE_IDENTITY_HASH
+        return DEFAULT_RFED_NODE_IDENTITY_HASH
     }
 
     fun setRfedNodeIdentityHash(context: Context, hex: String) {

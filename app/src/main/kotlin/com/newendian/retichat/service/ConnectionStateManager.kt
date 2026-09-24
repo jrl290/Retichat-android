@@ -554,21 +554,13 @@ object ConnectionStateManager {
         _rfedNodeLinkStatusFlow.value = RetichatBridge.AppLinkStatus.NONE
     }
 
-    /** Current path reachability status for the rfed node, or NONE if unconfigured. */
-    fun rfedNodeLinkStatus(): Int {
-        val rh = routerHandle
-        if (rh == 0L) return RetichatBridge.AppLinkStatus.NONE
-        val dest = rfedNodeDestHash(
-            RetichatApp.appInstance ?: return RetichatBridge.AppLinkStatus.NONE,
-            includeHiddenDefault = false,
-        )
-            ?: return RetichatBridge.AppLinkStatus.NONE
-        return if (RetichatBridge.transportHasPath(dest)) {
-            RetichatBridge.AppLinkStatus.ACTIVE
-        } else {
-            RetichatBridge.AppLinkStatus.DISCONNECTED
-        }
-    }
+    /**
+     * Current path reachability of the RFed node in use — the configured one,
+     * or the default. NONE only while the stack is down. Until 2026-09-24 this
+     * ignored the default node, so with no node typed into Settings the dot
+     * stayed grey even though every rfed service was reachable.
+     */
+    fun rfedNodeLinkStatus(): Int = rfedNodeLinkStatusRuntime()
 
     /** Wait for rfed.node reachability, mirroring iOS `waitForRfedReachable`. */
     suspend fun waitForRfedReachable(timeoutMs: Long): Boolean = withContext(Dispatchers.IO) {

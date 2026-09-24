@@ -56,6 +56,12 @@ object RfedDistroClient {
     @Volatile private var registeredForHandle: Long = 0L
     private val statusHandlerArmed = mutableSetOf<String>()
 
+    /** The stack went down: the next start registers again (the node may differ). */
+    fun onStackStopped() {
+        registeredForHandle = 0L
+        _status.value = Status()
+    }
+
     /** Called at stack start and after generate/import. No-op without a distro. */
     fun registerIfNeeded(context: Context) {
         val distro = DistroManager.identityHandle

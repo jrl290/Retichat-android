@@ -40,6 +40,7 @@ object Routes {
     const val QR_CODE      = "qr_code"
     const val QR_SCAN      = "qr_scan"
     const val SETTINGS     = "settings"
+    const val IDENTITY     = "identity"
     const val JOIN_CHANNEL = "join_channel"
     const val CHANNEL      = "channel/{channelId}"
 
@@ -190,17 +191,23 @@ fun RetichatNavHost(navController: NavHostController) {
                     dao = app.database.interfaceConfigDao(),
                     serviceState = app.serviceState,
                     onRestart = {
-                        // Force a stack restart so freshly-saved interface
-                        // settings take effect. The next acquire() (e.g.
-                        // when MainActivity returns to onStart) re-bootstraps.
-                        com.newendian.retichat.service.StackRuntime.forceShutdown(context)
+                        // Tear down and re-bootstrap now so freshly-saved
+                        // interface and RFed settings take effect.
+                        app.applicationScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                            com.newendian.retichat.service.StackRuntime.restart(context)
+                        }
                     },
                 ),
             )
             SettingsScreen(
                 onBack = { navController.popBackStack() },
                 viewModel = vm,
+                onOpenIdentity = { navController.navigate(Routes.IDENTITY) },
             )
+        }
+
+        composable(Routes.IDENTITY) {
+            com.newendian.retichat.ui.settings.IdentityScreen(onBack = { navController.popBackStack() })
         }
 
         composable(Routes.JOIN_CHANNEL) {

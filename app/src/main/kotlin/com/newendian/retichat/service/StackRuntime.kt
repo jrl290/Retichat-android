@@ -317,9 +317,11 @@ private const val GRACE_SHUTDOWN_MS = 30_000L  // 30s grace avoids stack teardow
     }
 
     private fun shutdownNow(app: RetichatApp) {
-        Log.i(TAG, "Shutting down stack (refCount=0)")
+        Log.i(TAG, "Shutting down stack (refCount=${refCount.get()})")
         isReady = false
         readyDeferred = null
+        // The next start registers the distro again (the node may have changed).
+        RfedDistroClient.onStackStopped()
 
         ConnectionStateManager.unregister()
 
@@ -345,7 +347,25 @@ private const val GRACE_SHUTDOWN_MS = 30_000L  // 30s grace avoids stack teardow
         app.updateServiceState()
     }
 
-    /** Force teardown ignoring ref count; only used by tests / settings restart. */
+    /**
+     * Settings "Restart": tear the stack down and bring it straight back up so
+     * new interface / RFed settings take effect. Holders keep their references
+     * (the activity that is open still owns one), so the count is untouched.
+     *
+     * Until 2026-09-24 the button called [forceShutdown], which zeroed the
+     * count and waited for some later acquire() to re-bootstrap; with the app
+     * already in the foreground nothing acquired again and the status stayed
+     * "Not started".
+     */
+    suspend fun restart(context: Context): Boolean {
+        val app = context.applicationContext as RetichatApp
+        shutdownJob?.cancel()
+        shutdownJob = null
+        initLock.withLock { shutdownNow(app) }
+        return startIfNeeded(app)
+    }
+
+    /** Force teardown ignoring ref count; only used by tests. */
     fun forceShutdown(context: Context) {
         val app = context.applicationContext as RetichatApp
         refCount.set(0)

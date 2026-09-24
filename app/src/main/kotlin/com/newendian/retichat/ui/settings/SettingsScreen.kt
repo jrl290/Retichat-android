@@ -38,6 +38,7 @@ import org.json.JSONObject
 fun SettingsScreen(
     onBack: () -> Unit,
     viewModel: SettingsViewModel,
+    onOpenIdentity: () -> Unit = {},
 ) {
     val interfaces by viewModel.interfaces.collectAsState()
     val state by viewModel.serviceState.collectAsState()
@@ -67,9 +68,9 @@ fun SettingsScreen(
                 ServiceStatusCard(state = state, onRestart = { viewModel.restartService() })
             }
 
-            // ---- Section: Distro identity (one address shared by all your devices) ----
+            // ---- Section: Identity (device + distro addresses), as on retichat.com ----
             item {
-                DistroIdentityCard()
+                IdentityNavRow(onClick = onOpenIdentity)
             }
 
             // ---- Section: Profile (display name + channel display name) ----
@@ -766,15 +767,20 @@ private fun ServiceStatusCard(state: ServiceState, onRestart: () -> Unit) {
 @Composable
 private fun RfedConfigCard() {
     val context = LocalContext.current
+    // The node in use is always shown: the configured one, or the default.
     var nodeHash by remember {
-        mutableStateOf(UserPreferences.getRfedNodeIdentityHash(context))
+        mutableStateOf(UserPreferences.getEffectiveRfedNodeIdentityHash(context))
     }
+    val isDefaultNode = nodeHash == UserPreferences.DEFAULT_RFED_NODE_IDENTITY_HASH
     var lxmfPropOverride by remember {
         mutableStateOf(UserPreferences.getRfedLxmfPropOverride(context))
     }
 
     DisposableEffect(Unit) {
         ConnectionStateManager.retainRfedNodeStatusMonitor()
+        // Ask for a path now so the dot reflects reachability, not just
+        // whatever happened to be in the path table.
+        ConnectionStateManager.openRfedNodeLink()
         onDispose { ConnectionStateManager.releaseRfedNodeStatusMonitor() }
     }
 
@@ -795,8 +801,17 @@ private fun RfedConfigCard() {
                     style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
                 )
                 Spacer(Modifier.width(8.dp))
-                AppLinkStatusDot(
-                    status = ConnectionStateManager.rfedNodeLinkStatusFlow.collectAsState().value,
+                val nodeStatus = ConnectionStateManager.rfedNodeLinkStatusFlow.collectAsState().value
+                AppLinkStatusDot(status = nodeStatus)
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    when (nodeStatus) {
+                        RetichatBridge.AppLinkStatus.ACTIVE -> "Reachable"
+                        RetichatBridge.AppLinkStatus.DISCONNECTED -> "No path yet"
+                        else -> "Stack not started"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             Spacer(Modifier.height(12.dp))
@@ -809,7 +824,10 @@ private fun RfedConfigCard() {
             OutlinedTextField(
                 value = nodeHash,
                 onValueChange = { nodeHash = it.trim().lowercase() },
-                placeholder = { Text("32-char hex") },
+                placeholder = { Text(UserPreferences.DEFAULT_RFED_NODE_IDENTITY_HASH) },
+                supportingText = {
+                    Text(if (isDefaultNode) "Default RFed node" else "Custom RFed node")
+                },
                 singleLine = true,
                 isError = nodeHash.isNotEmpty() && !isHex32(nodeHash),
                 textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
@@ -843,7 +861,7 @@ private fun RfedConfigCard() {
 
             Spacer(Modifier.height(8.dp))
             Text(
-                "Enter the RFed Node's public identity hash. Notify, channel, delivery, " +
+                "The RFed Node's public identity hash. Notify, channel, delivery, distro " +
                     "and LXMF propagation hashes are derived automatically. Leave the propagation " +
                     "field empty to use the derived address, or enter a different one to override it. " +
                     "Changes take effect on next service restart.",
@@ -852,10 +870,23 @@ private fun RfedConfigCard() {
             )
 
             Spacer(Modifier.height(12.dp))
+            Row(modifier = Modifier.align(Alignment.End), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (!isDefaultNode) {
+                TextButton(onClick = { nodeHash = UserPreferences.DEFAULT_RFED_NODE_IDENTITY_HASH }) {
+                    Text("Use default")
+                }
+            }
             Button(
                 onClick = {
                     if (nodeHash.isEmpty() || isHex32(nodeHash)) {
-                        UserPreferences.setRfedNodeIdentityHash(context, nodeHash)
+                        // Storing the default explicitly or as blank is the same node;
+                        // keep blank so a future default change still applies.
+                        UserPreferences.setRfedNodeIdentityHash(
+                            context,
+                            if (nodeHash.isEmpty() || nodeHash == UserPreferences.DEFAULT_RFED_NODE_IDENTITY_HASH) "" else nodeHash,
+                        )
+                        if (nodeHash.isEmpty()) nodeHash = UserPreferences.DEFAULT_RFED_NODE_IDENTITY_HASH
+                        ConnectionStateManager.openRfedNodeLink()
                     }
                     if (lxmfPropOverride.isEmpty() || isHex32(lxmfPropOverride)) {
                         UserPreferences.setRfedLxmfPropOverride(context, lxmfPropOverride)
@@ -863,9 +894,9 @@ private fun RfedConfigCard() {
                 },
                 enabled = (nodeHash.isEmpty() || isHex32(nodeHash)) &&
                     (lxmfPropOverride.isEmpty() || isHex32(lxmfPropOverride)),
-                modifier = Modifier.align(Alignment.End),
             ) {
                 Text("Apply")
+            }
             }
         }
     }
