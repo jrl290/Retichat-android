@@ -2367,8 +2367,11 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeD
 /// Decrypt a fan-out blob (`distro_lxmf_hash(16) | lxmf_blob`) with the
 /// distro identity. Returns a JSON object with the same keys iOS uses
 /// (`source_hash`, `timestamp`, `title`, `content`,
-/// `is_delivery_notification`, `ticket`, `distro_transfer_key`), an empty
-/// string when the blob is addressed to a different distro, or null on error.
+/// `is_delivery_notification`, `ticket`, `distro_transfer_key`, `sent_to`,
+/// `sent_by`), an empty string when the blob is addressed to a different
+/// distro, or null on error. `sent_to`/`sent_by` are the RFed SPEC §17.11
+/// sent-message sync marker (null unless the message is a sync copy; a
+/// non-null `sent_by` with a null `sent_to` is a copy with a malformed 0xFC).
 #[no_mangle]
 pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeDistroUnwrap(
     mut env: JNIEnv,
@@ -2383,7 +2386,8 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeD
         Ok(Some(msg)) => format!(
             concat!(
                 r#"{{"source_hash":"{}","timestamp":{},"title":{},"content":{},"#,
-                r#""is_delivery_notification":{},"ticket":{},"distro_transfer_key":{}}}"#
+                r#""is_delivery_notification":{},"ticket":{},"distro_transfer_key":{},"#,
+                r#""sent_to":{},"sent_by":{}}}"#
             ),
             msg.source_hash.iter().map(|b| format!("{b:02x}")).collect::<String>(),
             msg.timestamp,
@@ -2392,6 +2396,8 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeD
             msg.is_delivery_notification,
             msg.ticket.as_deref().map(json_string).unwrap_or_else(|| "null".into()),
             msg.distro_transfer_key.as_deref().map(json_string).unwrap_or_else(|| "null".into()),
+            msg.sent_to.as_deref().map(json_string).unwrap_or_else(|| "null".into()),
+            msg.sent_by.as_deref().map(json_string).unwrap_or_else(|| "null".into()),
         ),
         Err(e) => {
             rns::set_error(e);

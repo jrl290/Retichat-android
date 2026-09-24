@@ -155,7 +155,8 @@ object RfedDistroClient {
     /**
      * One fanned-out copy, without the rfed.delivery prefix: `dest(16) |
      * encrypted`. Decrypt with the distro key, dedupe on source+timestamp,
-     * then hand it to the repository as an inbound DM.
+     * then hand it to the repository as an inbound DM, or, when it is a
+     * sibling's §17.11 sent-copy, as an outgoing message in the recipient's chat.
      */
     suspend fun handleBlob(context: Context, blob: ByteArray) {
         val distro = DistroManager.identityHandle
@@ -176,6 +177,11 @@ object RfedDistroClient {
         val title = o.optString("title", "")
         val transferKey = o.optString("distro_transfer_key", "").takeIf { it.isNotEmpty() && !o.isNull("distro_transfer_key") }
         val isNotification = o.optBoolean("is_delivery_notification", false)
+        // RFed SPEC §17.11 sent-copy marker (lxmf_rust::distro::DistroMessage
+        // sent_to / sent_by). org.json's optString turns null into "null", so
+        // read null explicitly; an empty sent_by is still a marker.
+        val sentTo = if (o.isNull("sent_to")) null else o.optString("sent_to")
+        val sentBy = if (o.isNull("sent_by")) null else o.optString("sent_by")
 
         val key = DistroCodec.seenKey(srcHex, timestamp)
         if (!UserPreferences.markDistroSeen(context, key)) {
@@ -187,8 +193,33 @@ object RfedDistroClient {
             return
         }
         if (isNotification) return
-        val srcHash = DistroCodec.hexToBytes(srcHex) ?: return
         val app = context.applicationContext as? RetichatApp ?: return
+        // A message a sibling device sent as the distro (RFed SPEC §17.11
+        // receiver rules; the iOS counterpart is RfedDistroClient.swift).
+        // Checked after the seen-mark so our own echo is still recorded.
+        when (val copy = DistroCodec.classifySentCopy(
+            sourceHex = srcHex,
+            ownDistroHex = DistroManager.deliveryHashHex,
+            ownDeviceHex = StackRuntime.selfDestHash.toHex(),
+            sentTo = sentTo,
+            sentBy = sentBy,
+        )) {
+            DistroCodec.SentCopy.NotACopy -> Unit
+            DistroCodec.SentCopy.OwnEcho -> return
+            DistroCodec.SentCopy.Foreign -> {
+                Log.w(TAG, "sent-copy marker from ${srcHex.take(8)}, not our distro — ignored")
+                return
+            }
+            is DistroCodec.SentCopy.Malformed -> {
+                Log.w(TAG, "sent-copy with unusable recipient '${copy.sentTo}' — dropped")
+                return
+            }
+            is DistroCodec.SentCopy.Store -> {
+                app.repository.onDistroSentCopy(copy.recipientHex, title, content, timestamp)
+                return
+            }
+        }
+        val srcHash = DistroCodec.hexToBytes(srcHex) ?: return
         app.repository.onDistroMessageReceived(srcHash, title, content, timestamp)
     }
 

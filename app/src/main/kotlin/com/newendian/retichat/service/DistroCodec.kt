@@ -108,6 +108,60 @@ object DistroCodec {
         return md.digest().copyOf(16).toHex()
     }
 
+    private val HEX32 = Regex("^[0-9a-f]{32}$")
+
+    /** A 16-byte address as 32 lowercase hex, the only form §17.11's fields carry. */
+    fun isHex32(s: String?): Boolean = s != null && HEX32.matches(s)
+
+    /**
+     * RFed SPEC §17.11: a message sent AS the distro to anyone but the distro
+     * itself gets one sent-copy to the distro, so sibling devices see it.
+     * [sentAsHex] is the source the message actually went out with; a device
+     * without a distro (or one that sent as the device) sends no copy.
+     */
+    fun shouldSendSentCopy(sentAsHex: String, distroHex: String?, recipientHex: String): Boolean =
+        isHex32(distroHex) && sentAsHex == distroHex && recipientHex != distroHex
+
+    /** What to do with an unwrapped fan-out message, per RFed SPEC §17.11. */
+    sealed class SentCopy {
+        /** No `rfed.distro.sent` marker: today's inbound handling. */
+        object NotACopy : SentCopy()
+        /** This device sent it; drop silently (it is already dedupe-recorded). */
+        object OwnEcho : SentCopy()
+        /** Marker on a message not from our own distro: nobody else can make a genuine copy. */
+        object Foreign : SentCopy()
+        /** Marker with a 0xFC that is not a usable 32-hex recipient. */
+        data class Malformed(val sentTo: String?) : SentCopy()
+        /** A sibling's sent message: file it as outgoing in the chat with [recipientHex]. */
+        data class Store(val recipientHex: String) : SentCopy()
+    }
+
+    /**
+     * Classify one unwrapped fan-out message by its §17.11 marker. [sentTo] /
+     * [sentBy] are the unwrap JSON's `sent_to` / `sent_by`: lxmf_rust sets
+     * `sent_by` (possibly empty) whenever 0xFB is `rfed.distro.sent`, and
+     * `sent_to` only when 0xFC is also 32 hex, so a `sent_by` without a
+     * `sent_to` is a copy with a bad recipient. The own-echo check comes
+     * before the recipient check, as the spec orders them; an own-device
+     * address that is not 32 hex (stack not up) never matches, so an empty
+     * `sent_by` can not be mistaken for our echo.
+     */
+    fun classifySentCopy(
+        sourceHex: String,
+        ownDistroHex: String?,
+        ownDeviceHex: String,
+        sentTo: String?,
+        sentBy: String?,
+    ): SentCopy {
+        if (sentBy == null && sentTo == null) return SentCopy.NotACopy
+        if (!isHex32(ownDistroHex) || sourceHex != ownDistroHex) return SentCopy.Foreign
+        if (isHex32(ownDeviceHex) && sentBy == ownDeviceHex) return SentCopy.OwnEcho
+        // No device sends a copy of a message to the distro itself (§17.11),
+        // so a copy naming the distro as recipient is as unusable as a bad one.
+        if (!isHex32(sentTo) || sentTo == ownDistroHex) return SentCopy.Malformed(sentTo)
+        return SentCopy.Store(sentTo!!)
+    }
+
     private fun readArrayCount(data: ByteArray, h: IntArray): Int? {
         if (h[0] >= data.size) return null
         val tag = data[h[0]].toInt() and 0xff

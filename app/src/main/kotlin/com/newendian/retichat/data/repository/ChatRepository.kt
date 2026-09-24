@@ -82,6 +82,7 @@ class ChatRepository(
     }
 
     fun onMessageState(hash: ByteArray, state: Int) {
+        if (finishSentCopy(hash.toHex(), state)) return
         groupChatManager?.onMessageState(hash, state)
     }
 
@@ -293,12 +294,16 @@ class ChatRepository(
                 // (which may never create a link when no path is cached).
                 RetichatBridge.appLinkOpen(routerHandle, destHash, "lxmf", "delivery")
 
+                // Same identity as sendDirectMessage: a queued message is
+                // still the user's message, so with a distro held it goes
+                // out as the distro and replies reach every device.
+                val (sendSrc, sendIdentity) = DistroManager.sendingIdentity(selfDestHash, identityHandle)
                 val handle = RetichatBridge.messageCreate(
                     destHash = destHash,
-                    srcHash = selfDestHash,
+                    srcHash = sendSrc,
                     content = msg.content,
                     method = RetichatBridge.DeliveryMethod.DIRECT,
-                    identityHandle = identityHandle,
+                    identityHandle = sendIdentity,
                 )
                 if (handle == 0L) {
                     messageDao.updateState(msg.id, RetichatBridge.MessageState.FAILED)
@@ -309,6 +314,12 @@ class ChatRepository(
                     messageDao.updateState(msg.id, RetichatBridge.MessageState.FAILED)
                     continue
                 }
+                // RFed SPEC §17.11: this is the queued message's dispatch
+                // (sendDirectMessage returned before sending it), and the
+                // flush has no propagated fallback, so this is its one copy
+                // (as in sendDirectMessage; iOS: ChatRepository.swift
+                // sendDistroSentCopy).
+                sendDistroSentCopy(destHash, sendSrc, title = "", content = msg.content)
                 val state = RetichatBridge.messageGetState(handle)
                 messageDao.updateHandle(msg.id, handle)
                 messageDao.updateState(msg.id, state)
@@ -406,7 +417,12 @@ class ChatRepository(
                     UserPreferences.isDistroContact(appContext, destHash.toHex())
                 ) {
                     Log.i(TAG, "sendDirect: ${destHash.toHex().take(16)} is a distro address — propagating")
-                    schedulePropagationFallback(localId, destHash, content, attachments, immediate = true)
+                    // No DIRECT attempt here, so the propagated send is this
+                    // message's only dispatch and carries the §17.11 sent-copy.
+                    schedulePropagationFallback(
+                        localId, destHash, content, attachments,
+                        immediate = true, sendsSentCopy = true,
+                    )
                     return@launch
                 }
 
@@ -452,6 +468,12 @@ class ChatRepository(
                     messageDao.updateState(localId, RetichatBridge.MessageState.FAILED)
                     return@launch
                 }
+
+                // RFed SPEC §17.11: the message is out, so tell our other
+                // devices. Sent here, where the DIRECT send is accepted, and
+                // never from the propagated fallback scheduled below: DIRECT
+                // plus fallback is still one message and gets one copy.
+                sendDistroSentCopy(destHash, sendSrc, title = "", content = content)
 
                 val state = RetichatBridge.messageGetState(msgHandle)
                 Log.d(TAG, "sendDirect: post-send state=$state")
@@ -597,6 +619,11 @@ class ChatRepository(
     * DISCONNECTED (red) when send started, the delay collapses to zero while
     * the direct cascade continues in parallel. Polling continues on the new
     * handle so the bubble updates as the propagated copy progresses.
+     *
+     * [sendsSentCopy] is true only when this propagated send is the message's
+     * first and only dispatch (a distro recipient, no DIRECT attempt); the
+     * DIRECT path sends its §17.11 sent-copy itself, so a fallback behind it
+     * must not send a second one.
      */
     private fun schedulePropagationFallback(
         localId: String,
@@ -604,6 +631,7 @@ class ChatRepository(
         content: String,
         attachments: List<Pair<String, ByteArray>>,
         immediate: Boolean = false,
+        sendsSentCopy: Boolean = false,
     ) {
         scope.launch(Dispatchers.IO) {
             val fallbackDelayMs = if (immediate) 0L else 5_000L
@@ -624,38 +652,7 @@ class ChatRepository(
                 return@launch
             }
 
-            // Pick the propagation node deterministically.  Priority:
-            //   1. explicit user override (Settings)
-            //   2. legacy `lxmf_propagation_hash` pref
-            //   3. derived `lxmf.propagation` destination of the configured
-            //      RFed node identity (mirrors the RFed config blob's
-            //      `destinations.lxmf.propagation` value)
-            //   4. random pick from PropagationNodeManager's bundled list
-            // // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1: a random
-            // node almost always has no path on a fresh install, so the
-            // first PROPAGATED send hangs at state=1 until §1 fires.  The
-            // RFed-derived hash is the only one we know is reachable
-            // because we already have a path to its rfed.notify aspect.
-            val derivedFromRfed: String = run {
-                val rfedId = UserPreferences.getEffectiveRfedNodeIdentityHash(appContext)
-                if (rfedId.length == 32) {
-                    com.newendian.retichat.service.FcmTokenRegistrar
-                        .rnsDestHash(rfedId, "lxmf", listOf("propagation"))
-                        .orEmpty()
-                } else ""
-            }
-            val override = UserPreferences.getRfedLxmfPropOverride(appContext)
-                .ifEmpty { UserPreferences.getLxmfPropagationHash(appContext) }
-                .ifEmpty { derivedFromRfed }
-            val nodeMgr = PropagationNodeManager(
-                userConfiguredHash = override.ifEmpty { null }
-            )
-            val nodeHash = nodeMgr.primaryNode
-
-            if (!RetichatBridge.routerSetPropagationNode(routerHandle, nodeHash)) {
-                Log.w(TAG, "fallback: setPropagationNode failed: ${RetichatBridge.lastError()}")
-                return@launch
-            }
+            val nodeHash = selectPropagationNode() ?: return@launch
 
             Log.i(
                 TAG,
@@ -685,6 +682,7 @@ class ChatRepository(
                 RetichatBridge.messageDestroy(propHandle)
                 return@launch
             }
+            if (sendsSentCopy) sendDistroSentCopy(destHash, sendSrc, title = "", content = content)
 
             // Re-point the bubble at the propagated handle and continue polling,
             // BUT only if the direct send hasn't already succeeded.  If direct
@@ -713,6 +711,141 @@ class ChatRepository(
                 pollMessageState(localId, propHandle, initialDeadlineMs = 600_000L)
             }
         }
+    }
+
+    /**
+     * Point the router at the propagation node and return it, or null when
+     * the router refused it (logged). Shared by the propagated fallback and
+     * the §17.11 sent-copy, which both go out PROPAGATED.
+     */
+    private fun selectPropagationNode(): ByteArray? {
+        // Pick the propagation node deterministically.  Priority:
+        //   1. explicit user override (Settings)
+        //   2. legacy `lxmf_propagation_hash` pref
+        //   3. derived `lxmf.propagation` destination of the configured
+        //      RFed node identity (mirrors the RFed config blob's
+        //      `destinations.lxmf.propagation` value)
+        //   4. random pick from PropagationNodeManager's bundled list
+        // // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1: a random
+        // node almost always has no path on a fresh install, so the
+        // first PROPAGATED send hangs at state=1 until §1 fires.  The
+        // RFed-derived hash is the only one we know is reachable
+        // because we already have a path to its rfed.notify aspect.
+        val derivedFromRfed: String = run {
+            val rfedId = UserPreferences.getEffectiveRfedNodeIdentityHash(appContext)
+            if (rfedId.length == 32) {
+                com.newendian.retichat.service.FcmTokenRegistrar
+                    .rnsDestHash(rfedId, "lxmf", listOf("propagation"))
+                    .orEmpty()
+            } else ""
+        }
+        val override = UserPreferences.getRfedLxmfPropOverride(appContext)
+            .ifEmpty { UserPreferences.getLxmfPropagationHash(appContext) }
+            .ifEmpty { derivedFromRfed }
+        val nodeMgr = PropagationNodeManager(
+            userConfiguredHash = override.ifEmpty { null }
+        )
+        val nodeHash = nodeMgr.primaryNode
+
+        if (!RetichatBridge.routerSetPropagationNode(routerHandle, nodeHash)) {
+            Log.w(TAG, "setPropagationNode failed: ${RetichatBridge.lastError()}")
+            return null
+        }
+        return nodeHash
+    }
+
+    /** §17.11 sent-copies in flight, by LXMF hash hex, until a terminal state. */
+    private val sentCopyHandles = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /**
+     * RFed SPEC §17.11 "Sent-message sync": after the user's message to
+     * [recipient] went out as the distro ([sentAs] is the source it actually
+     * used), send the distro one copy so every sibling device can file it as
+     * sent. Destination and source are the distro, signed with its key; text
+     * only (attachments are not copied); 0xFB/0xFC/0xFD carry the marker, the
+     * recipient and this device's own address, so this device recognises and
+     * drops its own echo of the fan-out. PROPAGATED at once, because only
+     * RFed answers for the distro address. iOS counterpart: ChatRepository.swift.
+     *
+     * Fire-and-forget: no bubble, and the copy never touches the user's
+     * message state. Its outcome arrives through [onMessageState] and is
+     * only logged, so a failed copy is visible without a retry (§3).
+     */
+    private fun sendDistroSentCopy(recipient: ByteArray, sentAs: ByteArray, title: String, content: String) {
+        val recipientHex = recipient.toHex()
+        if (!DistroCodec.shouldSendSentCopy(sentAs.toHex(), DistroManager.deliveryHashHex, recipientHex)) return
+        val distro = DistroManager.deliveryHash ?: return
+        val distroHandle = DistroManager.identityHandle
+        val deviceHex = selfDestHash.toHex()
+        if (distroHandle == 0L || !DistroCodec.isHex32(deviceHex)) {
+            Log.w(TAG, "sent-copy: distro or device identity gone — no copy for ${recipientHex.take(8)}")
+            return
+        }
+        // The router encrypts to the distro by recalling its public key. We
+        // hold that key, so remember it rather than depend on having heard
+        // RFed's announce of our own distro (§5: readiness before the send).
+        if (!RetichatBridge.transportIdentityKnown(distro)) {
+            val pub = RetichatBridge.identityPublicKey(distroHandle)
+            if (pub == null || !RetichatBridge.identityRememberLxmfDelivery(distro, pub)) {
+                Log.e(TAG, "sent-copy: could not remember the distro's key: ${RetichatBridge.lastError()}")
+                return
+            }
+        }
+        selectPropagationNode() ?: return
+        val h = RetichatBridge.messageCreate(
+            destHash = distro,
+            srcHash = distro,
+            content = content,
+            title = title,
+            method = RetichatBridge.DeliveryMethod.PROPAGATED,
+            identityHandle = distroHandle,
+        )
+        if (h == 0L) {
+            Log.e(TAG, "sent-copy: messageCreate failed: ${RetichatBridge.lastError()}")
+            return
+        }
+        val marked =
+            RetichatBridge.messageAddFieldString(h, LxmfFields.FIELD_CUSTOM_TYPE, LxmfFields.DISTRO_SENT_TYPE) &&
+            RetichatBridge.messageAddFieldString(h, LxmfFields.FIELD_CUSTOM_DATA, recipientHex) &&
+            RetichatBridge.messageAddFieldString(h, LxmfFields.FIELD_CUSTOM_META, deviceHex)
+        if (!marked) {
+            Log.e(TAG, "sent-copy: marking fields failed: ${RetichatBridge.lastError()}")
+            RetichatBridge.messageDestroy(h)
+            return
+        }
+        if (!RetichatBridge.messageSendViaAppLinks(h)) {
+            Log.e(TAG, "sent-copy: messageSendViaAppLinks failed: ${RetichatBridge.lastError()}")
+            RetichatBridge.messageDestroy(h)
+            return
+        }
+        val hash = RetichatBridge.messageGetHash(h)?.toHex()
+        if (hash == null) {
+            Log.w(TAG, "sent-copy for ${recipientHex.take(8)} submitted without a hash — its outcome will not be logged")
+            RetichatBridge.messageDestroy(h)
+            return
+        }
+        Log.i(TAG, "sent-copy for ${recipientHex.take(8)} submitted (${hash.take(16)})")
+        sentCopyHandles[hash] = h
+        // A state that landed before the entry above had nobody listening.
+        finishSentCopy(hash, RetichatBridge.messageGetState(h))
+    }
+
+    /**
+     * Log a §17.11 sent-copy's terminal state and release its handle.
+     * Returns true when [hashHex] is a sent-copy, so other state consumers
+     * skip it.
+     */
+    private fun finishSentCopy(hashHex: String, state: Int): Boolean {
+        if (!sentCopyHandles.containsKey(hashHex)) return false
+        if (!isTerminalState(state)) return true
+        val handle = sentCopyHandles.remove(hashHex) ?: return true
+        if (isSuccessState(state)) {
+            Log.i(TAG, "sent-copy ${hashHex.take(16)} accepted (state=$state)")
+        } else {
+            Log.w(TAG, "sent-copy ${hashHex.take(16)} ended in state=$state — sibling devices will not see this message")
+        }
+        RetichatBridge.messageDestroy(handle)
+        return true
     }
 
     private suspend fun sendGroupMessage(
@@ -906,6 +1039,60 @@ class ChatRepository(
                 contactDao.upsert(ContactEntity(destHashHex = srcHex, displayName = srcHex.take(8)))
             }
             handleDirectMessage(msgId, srcHash, srcHex, content, timestamp, LxmfFields.decode(ByteArray(0)))
+        }
+    }
+
+    /**
+     * RFed SPEC §17.11: a message another of our devices sent as the distro
+     * to [recipientHex], reaching us as the distro's sent-copy (RfedDistroClient
+     * has already unwrapped it, deduplicated on source+timestamp, dropped our
+     * own echo and checked the recipient). Filed as OUR outgoing message in
+     * the direct chat with the recipient, the way iOS ChatRepository.swift
+     * files it: sender is the distro (it is "me"), state SENT and never
+     * DELIVERED (only the sending device could learn that), and the id is
+     * derived like any distro fan-out message so a copy that arrives both
+     * live and via /rfed/pull is stored once. No contact is created and no
+     * notification is posted: the user wrote this message.
+     */
+    fun onDistroSentCopy(recipientHex: String, title: String, content: String, timestamp: Double) {
+        val distroHex = DistroManager.deliveryHashHex ?: run {
+            Log.w(TAG, "onDistroSentCopy: no distro loaded — dropped copy for ${recipientHex.take(8)}")
+            return
+        }
+        val recipient = DistroCodec.hexToBytes(recipientHex) ?: return
+        val msgId = DistroCodec.messageId(distroHex, timestamp, content)
+        Log.i(TAG, "onDistroSentCopy: to=${recipientHex.take(16)} content='${content.take(40)}'")
+        scope.launch(Dispatchers.IO) {
+            if (messageDao.findById(msgId) != null) {
+                Log.d(TAG, "onDistroSentCopy: dup msgId=${msgId.take(16)}, skipping")
+                return@launch
+            }
+            val chatId = directChatId(recipient)
+            val existingChat = chatDao.findById(chatId)
+            if (existingChat == null) {
+                val contact = contactDao.findByHash(recipientHex)
+                chatDao.upsert(
+                    ChatEntity(
+                        id = chatId,
+                        isGroup = false,
+                        name = contact?.displayName ?: recipientHex.take(8),
+                        memberHashes = recipientHex,
+                    )
+                )
+            } else if (existingChat.isArchived) {
+                chatDao.unarchiveChat(chatId)
+            }
+            messageDao.upsert(
+                MessageEntity(
+                    id = msgId,
+                    chatId = chatId,
+                    senderHashHex = distroHex,
+                    content = content,
+                    timestamp = (timestamp * 1000).toLong(),
+                    isOutbound = true,
+                    state = RetichatBridge.MessageState.SENT,
+                )
+            )
         }
     }
 

@@ -97,7 +97,15 @@ class LxmfFields private constructor(
          */
         const val FIELD_CUSTOM_TYPE      = 0xFB
         const val FIELD_CUSTOM_DATA      = 0xFC
+        /**
+         * LXMF's FIELD_CUSTOM_META. The distro sent-message copy (RFed SPEC
+         * §17.11) is type [DISTRO_SENT_TYPE] with the recipient's address in
+         * [FIELD_CUSTOM_DATA] and the sending device's address here, so the
+         * sender can recognise its own echo (lxmf_rust::distro mirrors these).
+         */
+        const val FIELD_CUSTOM_META      = 0xFD
         const val DISTRO_TRANSFER_TYPE   = "rfed.distro.transfer"
+        const val DISTRO_SENT_TYPE       = "rfed.distro.sent"
         const val FIELD_SENDER_NAME      = 0x10   // sender display name (UTF-8) — per-message
 
         /** Empty fields instance. */
