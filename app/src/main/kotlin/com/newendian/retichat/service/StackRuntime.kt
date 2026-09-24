@@ -243,6 +243,10 @@ private const val GRACE_SHUTDOWN_MS = 30_000L  // 30s grace avoids stack teardow
         }
 
         // Start the RFed delivery callback so channel/group blobs are dispatched
+        // The distro identity, if this device holds one, is the identity the app
+        // sends from — load it before anything can send.
+        runCatching { DistroManager.init(app) }
+            .onFailure { Log.e(TAG, "DistroManager.init failed", it) }
         RetichatBridge.rfedDeliveryStart(identityHandle, object : RfedBlobCallback {
             override fun onBlob(blob: ByteArray) {
                 Log.i(TAG, "rfed.delivery blob received: ${blob.size} bytes")
@@ -303,6 +307,10 @@ private const val GRACE_SHUTDOWN_MS = 30_000L  // 30s grace avoids stack teardow
         if (identityHandle != 0L) {
             RfedNotifyRegistrar.registerIfNeeded(app, identityHandle)
         }
+        // Distro (RFed SPEC §17): register this device for the shared identity
+        // and have RFed announce it. No-op when no distro is loaded.
+        runCatching { RfedDistroClient.registerIfNeeded(app) }
+            .onFailure { Log.e(TAG, "RfedDistroClient.registerIfNeeded failed", it) }
 
         Log.i(TAG, "StackRuntime ready — dest=$hashHex, ${interfaces.size} interface(s)")
         return true

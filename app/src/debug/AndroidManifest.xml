@@ -9,5 +9,12 @@
                 <action android:name="com.newendian.retichat.DEBUG_SIMULATE_FCM_WAKE" />
             </intent-filter>
         </receiver>
+        <receiver
+            android:name=".debug.DistroDebugReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.newendian.retichat.DEBUG_DISTRO" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

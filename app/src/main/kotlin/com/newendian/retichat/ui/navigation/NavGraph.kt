@@ -6,6 +6,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.platform.LocalContext
+import com.newendian.retichat.service.DistroContacts
+import com.newendian.retichat.service.DistroManager
+import com.newendian.retichat.ui.settings.DistroTransferOfferDialog
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
@@ -48,6 +51,8 @@ object Routes {
 fun RetichatNavHost(navController: NavHostController) {
     val app = LocalContext.current.applicationContext as RetichatApp
     val repository = app.repository
+    // Another of our devices may offer us its distro identity at any time.
+    DistroTransferOfferDialog()
 
     NavHost(navController = navController, startDestination = Routes.CHAT_LIST) {
 
@@ -98,6 +103,7 @@ fun RetichatNavHost(navController: NavHostController) {
                     scope.launch {
                         val destBytes = hexHash.hexToBytes()
                         repository.addContact(destBytes, hexHash.take(8))
+                        DistroContacts.adopt(app, hexHash)
                         val contact = Contact(destBytes, hexHash.take(8))
                         val chatId = repository.getOrCreateDirectChat(contact)
                         navController.navigate(Routes.conversation(chatId)) {
@@ -136,10 +142,13 @@ fun RetichatNavHost(navController: NavHostController) {
         }
 
         composable(Routes.QR_CODE) {
-            val selfHex = remember {
+            // Like the web client's sidebar: the distro address is the one to
+            // share when this device holds one; otherwise the device address.
+            val distro by DistroManager.state.collectAsState()
+            val selfHex = distro?.deliveryHashHex ?: remember {
                 repository.selfDestHash.joinToString("") { "%02x".format(it) }
             }
-            val selfPubKeyHex = remember {
+            val selfPubKeyHex = distro?.publicKeyHex ?: remember {
                 RetichatBridge.identityPublicKey(repository.identityHandle)
                     ?.joinToString("") { "%02x".format(it) } ?: ""
             }
@@ -163,6 +172,7 @@ fun RetichatNavHost(navController: NavHostController) {
                     scope.launch {
                         val destBytes = destHashHex.hexToBytes()
                         repository.addContact(destBytes, destHashHex.take(8))
+                        DistroContacts.adopt(app, destHashHex)
                         val contact = Contact(destBytes, destHashHex.take(8))
                         val chatId = repository.getOrCreateDirectChat(contact)
                         navController.navigate(Routes.conversation(chatId)) {

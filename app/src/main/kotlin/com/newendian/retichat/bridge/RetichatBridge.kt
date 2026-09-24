@@ -453,6 +453,40 @@ object RetichatBridge {
     fun transportSavePaths(): Boolean = nativeTransportSavePaths() == 0
 
     private external fun nativeIdentitySign(handle: Long, data: ByteArray): ByteArray?
+
+    // ── Distro (RFed SPEC §17): one LXMF identity shared by all your devices ──
+    // The distro identity is an ordinary identity handle (identityFromBytes on
+    // the 64-byte private key). These mirror the iOS `retichat_distro_*` FFI.
+
+    /** A fresh 64-byte distro private key (X25519 || Ed25519). */
+    fun distroGenerate(): ByteArray? = nativeDistroGenerate()
+    /** The 64-byte private key behind an identity handle. */
+    fun distroPrivateKey(handle: Long): ByteArray? = nativeDistroPrivateKey(handle)
+    /** The distro's lxmf.delivery hash — the address senders use. */
+    fun distroDeliveryHash(handle: Long): ByteArray? = nativeDistroDeliveryHash(handle)
+    /** msgpack [device_pubkey, distro_pubkey, sig(device_pubkey)] for /rfed/distro/register|unregister. */
+    fun distroRegisterPayload(deviceHandle: Long, distroHandle: Long): ByteArray? =
+        nativeDistroRegisterPayload(deviceHandle, distroHandle)
+    /** msgpack [distro_hash, distro_pubkey, sig(distro_hash)] for /rfed/distro/list. */
+    fun distroListPayload(distroHandle: Long): ByteArray? = nativeDistroListPayload(distroHandle)
+    /** The pre-signed lxmf.delivery announce RFed replays on the distro's behalf. */
+    fun distroAnnouncePayload(distroHandle: Long, appData: ByteArray? = null): ByteArray? =
+        nativeDistroAnnouncePayload(distroHandle, appData)
+    /**
+     * Decrypt a fan-out blob with the distro identity. Returns JSON
+     * (source_hash, timestamp, title, content, is_delivery_notification,
+     * ticket, distro_transfer_key), "" when the blob belongs to another
+     * distro, or null on error (see lastError()).
+     */
+    fun distroUnwrap(distroHandle: Long, blob: ByteArray): String? = nativeDistroUnwrap(distroHandle, blob)
+
+    private external fun nativeDistroGenerate(): ByteArray?
+    private external fun nativeDistroPrivateKey(handle: Long): ByteArray?
+    private external fun nativeDistroDeliveryHash(handle: Long): ByteArray?
+    private external fun nativeDistroRegisterPayload(deviceHandle: Long, distroHandle: Long): ByteArray?
+    private external fun nativeDistroListPayload(distroHandle: Long): ByteArray?
+    private external fun nativeDistroAnnouncePayload(distroHandle: Long, appData: ByteArray?): ByteArray?
+    private external fun nativeDistroUnwrap(distroHandle: Long, blob: ByteArray): String?
     private external fun nativeWatchAnnounce(destHash: ByteArray)
     private external fun nativeUnwatchAnnounce(destHash: ByteArray)
     private external fun nativeTransportSavePaths(): Int

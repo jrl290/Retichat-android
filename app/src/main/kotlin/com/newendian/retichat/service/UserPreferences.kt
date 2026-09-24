@@ -166,6 +166,31 @@ object UserPreferences {
             .apply()
     }
 
+    /** Newest-first list of `source:timestamp` keys of distro copies already stored (cap 500). */
+    const val PREF_KEY_DISTRO_SEEN = "distro_seen"
+    /** Comma-separated contact hashes added from an `lxma://` link with a key (distro addresses). */
+    const val PREF_KEY_DISTRO_CONTACTS = "distro_contacts"
+
+    /** Record a fan-out copy; false when this copy was already stored. */
+    @Synchronized
+    fun markDistroSeen(context: Context, key: String): Boolean {
+        val raw = prefs(context).getString(PREF_KEY_DISTRO_SEEN, "") ?: ""
+        val existing = if (raw.isEmpty()) emptyList() else raw.split('\n')
+        if (existing.contains(key)) return false
+        val next = DistroCodec.appendSeen(existing, key)
+        prefs(context).edit().putString(PREF_KEY_DISTRO_SEEN, next.joinToString("\n")).apply()
+        return true
+    }
+
+    fun getDistroContacts(context: Context): Set<String> = getCsvSet(context, PREF_KEY_DISTRO_CONTACTS)
+    fun isDistroContact(context: Context, destHashHex: String): Boolean =
+        getDistroContacts(context).contains(destHashHex.lowercase())
+    fun setDistroContact(context: Context, destHashHex: String, isDistro: Boolean) {
+        val current = getDistroContacts(context).toMutableSet()
+        if (isDistro) current.add(destHashHex.lowercase()) else current.remove(destHashHex.lowercase())
+        putCsvSet(context, PREF_KEY_DISTRO_CONTACTS, current)
+    }
+
     fun getMutedChatIds(context: Context): Set<String> =
         getCsvSet(context, PREF_KEY_MUTED_CHAT_IDS)
 

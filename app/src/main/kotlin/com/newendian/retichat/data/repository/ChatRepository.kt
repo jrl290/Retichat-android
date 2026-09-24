@@ -7,6 +7,9 @@ import com.newendian.retichat.GroupMemberStatuses
 import com.newendian.retichat.MemberStatus
 import com.newendian.retichat.RetichatApp
 import com.newendian.retichat.bridge.LxmfFields
+import com.newendian.retichat.service.DistroCodec
+import com.newendian.retichat.service.DistroManager
+import com.newendian.retichat.service.RfedDistroClient
 import com.newendian.retichat.bridge.RetichatBridge
 import com.newendian.retichat.service.ConnectionStateManager
 import com.newendian.retichat.service.GroupChatManager
@@ -394,6 +397,15 @@ class ChatRepository(
 
                 val readinessFailed = ConnectionStateManager.appLinkStatus(destHash) ==
                     RetichatBridge.AppLinkStatus.DISCONNECTED
+                // A distro address has no device behind it to prove a direct
+                // link; RFed fans the message out from the propagation node
+                // (Retichat-js: propagationDelay 0 and no _sendPacket for
+                // isDistro contacts).
+                if (UserPreferences.isDistroContact(appContext, destHash.toHex())) {
+                    Log.i(TAG, "sendDirect: ${destHash.toHex().take(16)} is a distro address — propagating")
+                    schedulePropagationFallback(localId, destHash, content, attachments, immediate = true)
+                    return@launch
+                }
 
                 // Register the AppLinks spec synchronously on this IO thread
                 // BEFORE messageSendViaAppLinks triggers process_outbound.
@@ -408,12 +420,15 @@ class ChatRepository(
                 RetichatBridge.appLinkOpen(routerHandle, destHash, "lxmf", "delivery")
                 Log.d(TAG, "sendDirect: appLinkOpen OK, submitting DIRECT")
 
+                // Send as the distro identity when this device holds one
+                // (Retichat-js sendingIdentity()): replies then reach every device.
+                val (sendSrc, sendIdentity) = DistroManager.sendingIdentity(selfDestHash, identityHandle)
                 val msgHandle = RetichatBridge.messageCreate(
                     destHash = destHash,
-                    srcHash = selfDestHash,
+                    srcHash = sendSrc,
                     content = content,
                     method = RetichatBridge.DeliveryMethod.DIRECT,
-                    identityHandle = identityHandle,
+                    identityHandle = sendIdentity,
                 )
                 if (msgHandle == 0L) {
                     val err = RetichatBridge.lastError()
@@ -645,12 +660,13 @@ class ChatRepository(
                     "sending PROPAGATED via ${nodeHash.toHex().take(16)}"
             )
 
+            val (sendSrc, sendIdentity) = DistroManager.sendingIdentity(selfDestHash, identityHandle)
             val propHandle = RetichatBridge.messageCreate(
                 destHash = destHash,
-                srcHash = selfDestHash,
+                srcHash = sendSrc,
                 content = content,
                 method = RetichatBridge.DeliveryMethod.PROPAGATED,
-                identityHandle = identityHandle,
+                identityHandle = sendIdentity,
             )
             if (propHandle == 0L) {
                 Log.e(TAG, "fallback: messageCreate failed: ${RetichatBridge.lastError()}")
@@ -831,6 +847,13 @@ class ChatRepository(
         val fields = LxmfFields.decode(fieldsRaw)
         val groupId = fields.getString(LxmfFields.GROUP_ID)
         Log.i(TAG, "onMessageReceived: src=${srcHash.toHex().take(16)}, groupId=$groupId, content='${content.take(40)}'")
+        // A distro identity transfer from another of our devices (RFed SPEC §17.9):
+        // not a message to display — offer to import it. Checked before anything
+        // else, as the web client does (app.js 921-928).
+        fields.getString(LxmfFields.FIELD_DISTRO_ID)?.let { keyHex ->
+            RfedDistroClient.offerTransfer(srcHash.toHex(), keyHex)
+            return
+        }
         scope.launch(Dispatchers.IO) {
             val srcHex = srcHash.toHex()
             val msgId = hash.toHex()
@@ -859,6 +882,24 @@ class ChatRepository(
             } else {
                 handleDirectMessage(msgId, srcHash, srcHex, content, timestamp, fields)
             }
+        }
+    }
+
+    /**
+     * A message that reached us through the distro fan-out (already decrypted
+     * with the distro key by RfedDistroClient). The fan-out never hands over
+     * the LXMF hash, so the id is derived from source, timestamp and content;
+     * RfedDistroClient has already deduplicated on source+timestamp.
+     */
+    fun onDistroMessageReceived(srcHash: ByteArray, title: String, content: String, timestamp: Double) {
+        val srcHex = srcHash.toHex()
+        val msgId = DistroCodec.messageId(srcHex, timestamp, content)
+        Log.i(TAG, "onDistroMessageReceived: src=${srcHex.take(16)} via=distro content='${content.take(40)}'")
+        scope.launch(Dispatchers.IO) {
+            if (contactDao.findByHash(srcHex) == null) {
+                contactDao.upsert(ContactEntity(destHashHex = srcHex, displayName = srcHex.take(8)))
+            }
+            handleDirectMessage(msgId, srcHash, srcHex, content, timestamp, LxmfFields.decode(ByteArray(0)))
         }
     }
 

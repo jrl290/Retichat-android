@@ -75,6 +75,10 @@ class WakeWorker(
                 // Force a fresh propagation app-link ACTIVE edge here so a
                 // wake-triggered pull does not reuse a stale held link from
                 // before the transport reconnect completed.
+                if (DistroManager.hasDistro) {
+                    runCatching { RfedDistroClient.pull(applicationContext) }
+                        .onFailure { Log.w(TAG, "distro pull failed", it) }
+                }
                 PropagationSync.runOnce(applicationContext, requireFreshTransport = true)
 
                 Result.success()

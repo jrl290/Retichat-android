@@ -17,6 +17,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.newendian.retichat.IdentityShareFormat
+import com.newendian.retichat.service.DistroContacts
 import com.newendian.retichat.data.model.Contact
 import com.newendian.retichat.data.model.toHex
 import com.newendian.retichat.ui.components.AvatarCircle
@@ -105,7 +106,10 @@ fun NewChatScreen(
                         )
                         Spacer(Modifier.height(8.dp))
                         Button(
-                            onClick = { onDestHashChat(destHashClean) },
+                            onClick = {
+                                DistroContacts.noteShared(IdentityShareFormat.parse(destHashInput))
+                                onDestHashChat(destHashClean)
+                            },
                             enabled = isValidHash,
                             modifier = Modifier.fillMaxWidth(),
                         ) {

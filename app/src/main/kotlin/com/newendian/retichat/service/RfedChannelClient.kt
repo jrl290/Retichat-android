@@ -845,6 +845,14 @@ class RfedChannelClient(
         }
         val channelHashHex = blob.copyOfRange(0, 16).toHex()
         val inner = blob.copyOfRange(16, blob.size)
+        // Distro fan-out shares rfed.delivery with channels: the prefix is the
+        // distro's lxmf.delivery hash and the rest is `dest(16) | encrypted`
+        // (Retichat-js app.js _handleChannelPacket → _handleDistroBlob).
+        if (channelHashHex == DistroManager.deliveryHashHex) {
+            Log.i(TAG, "dispatchInboundBlob distro fan-out inner=${inner.size}B")
+            RfedDistroClient.handleBlob(appContext, inner)
+            return
+        }
         Log.i(TAG, "dispatchInboundBlob channel=$channelHashHex inner=${inner.size}B")
         dispatchBlob(channelHashHex, inner)
     }

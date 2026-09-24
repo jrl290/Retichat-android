@@ -2233,3 +2233,176 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeA
 
     0
 }
+
+// ---------------------------------------------------------------------------
+// Distro — one LXMF identity shared by all of a person's devices (RFed SPEC §17)
+//
+// Thin wrappers over `lxmf_rust::distro`, the same helpers the iOS FFI wraps
+// (Retichat-ios/rust/retichat-ffi/src/lib.rs `retichat_distro_*`). Kotlin
+// holds the distro identity as an ordinary identity handle from
+// `identityFromBytes` on the 64-byte private key.
+// ---------------------------------------------------------------------------
+
+fn distro_identity(handle: jlong, label: &str) -> Option<Identity> {
+    match rns::get_handle::<Identity>(handle as u64) {
+        Some(id) => Some(id),
+        None => {
+            rns::set_error(format!("invalid {label} identity handle"));
+            None
+        }
+    }
+}
+
+fn bytes_or_null(env: &JNIEnv, r: Result<Vec<u8>, String>) -> jbyteArray {
+    match r {
+        Ok(bytes) => vec_to_jbytes(env, &bytes),
+        Err(e) => {
+            rns::set_error(e);
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// `RetichatBridge.nativeDistroGenerate(): ByteArray?` — a fresh 64-byte
+/// private key (X25519 || Ed25519), the same layout the web client and iOS
+/// export as 128 hex characters.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeDistroGenerate(
+    env: JNIEnv,
+    _class: JClass,
+) -> jbyteArray {
+    let identity = Identity::new(true);
+    bytes_or_null(&env, identity.get_private_key())
+}
+
+/// `RetichatBridge.nativeDistroPrivateKey(handle: Long): ByteArray?` — the
+/// 64-byte private key behind an identity handle (export / transfer).
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeDistroPrivateKey(
+    env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) -> jbyteArray {
+    let Some(identity) = distro_identity(handle, "distro") else { return std::ptr::null_mut() };
+    bytes_or_null(&env, identity.get_private_key())
+}
+
+/// `RetichatBridge.nativeDistroDeliveryHash(handle: Long): ByteArray?` — the
+/// distro's `lxmf.delivery` hash: the address senders use.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeDistroDeliveryHash(
+    env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) -> jbyteArray {
+    let Some(identity) = distro_identity(handle, "distro") else { return std::ptr::null_mut() };
+    bytes_or_null(&env, lxmf_rust::distro::delivery_hash(&identity))
+}
+
+/// `RetichatBridge.nativeDistroRegisterPayload(deviceHandle: Long, distroHandle: Long): ByteArray?`
+/// msgpack `[device_pubkey, distro_pubkey, sig_distro(device_pubkey)]`, the
+/// body of `/rfed/distro/register` and `/rfed/distro/unregister`.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeDistroRegisterPayload(
+    env: JNIEnv,
+    _class: JClass,
+    device_handle: jlong,
+    distro_handle: jlong,
+) -> jbyteArray {
+    let Some(device) = distro_identity(device_handle, "device") else { return std::ptr::null_mut() };
+    let Some(distro) = distro_identity(distro_handle, "distro") else { return std::ptr::null_mut() };
+    bytes_or_null(&env, lxmf_rust::distro::register_payload(&device, &distro))
+}
+
+/// `RetichatBridge.nativeDistroListPayload(distroHandle: Long): ByteArray?`
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeDistroListPayload(
+    env: JNIEnv,
+    _class: JClass,
+    distro_handle: jlong,
+) -> jbyteArray {
+    let Some(distro) = distro_identity(distro_handle, "distro") else { return std::ptr::null_mut() };
+    bytes_or_null(&env, lxmf_rust::distro::list_payload(&distro))
+}
+
+/// `RetichatBridge.nativeDistroAnnouncePayload(distroHandle: Long, appData: ByteArray?): ByteArray?`
+/// The pre-signed `lxmf.delivery` announce RFed replays on the distro's
+/// behalf: msgpack `[flags|announce_data, distro_pubkey, sig_distro(value)]`.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeDistroAnnouncePayload(
+    env: JNIEnv,
+    _class: JClass,
+    distro_handle: jlong,
+    app_data: JByteArray,
+) -> jbyteArray {
+    let Some(distro) = distro_identity(distro_handle, "distro") else { return std::ptr::null_mut() };
+    let app: Option<Vec<u8>> = if app_data.is_null() {
+        None
+    } else {
+        let v = jbytes_to_vec(&env, &app_data);
+        if v.is_empty() { None } else { Some(v) }
+    };
+    bytes_or_null(&env, lxmf_rust::distro::announce_payload(&distro, app.as_deref()))
+}
+
+/// `RetichatBridge.nativeDistroUnwrap(distroHandle: Long, blob: ByteArray): String?`
+/// Decrypt a fan-out blob (`distro_lxmf_hash(16) | lxmf_blob`) with the
+/// distro identity. Returns a JSON object with the same keys iOS uses
+/// (`source_hash`, `timestamp`, `title`, `content`,
+/// `is_delivery_notification`, `ticket`, `distro_transfer_key`), an empty
+/// string when the blob is addressed to a different distro, or null on error.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeDistroUnwrap(
+    mut env: JNIEnv,
+    _class: JClass,
+    distro_handle: jlong,
+    blob: JByteArray,
+) -> jstring {
+    let Some(mut distro) = distro_identity(distro_handle, "distro") else { return std::ptr::null_mut() };
+    let data = jbytes_to_vec(&env, &blob);
+    let json = match lxmf_rust::distro::unwrap_blob(&mut distro, &data) {
+        Ok(None) => String::new(),
+        Ok(Some(msg)) => format!(
+            concat!(
+                r#"{{"source_hash":"{}","timestamp":{},"title":{},"content":{},"#,
+                r#""is_delivery_notification":{},"ticket":{},"distro_transfer_key":{}}}"#
+            ),
+            msg.source_hash.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+            msg.timestamp,
+            json_string(&msg.title),
+            json_string(&msg.content),
+            msg.is_delivery_notification,
+            msg.ticket.as_deref().map(json_string).unwrap_or_else(|| "null".into()),
+            msg.distro_transfer_key.as_deref().map(json_string).unwrap_or_else(|| "null".into()),
+        ),
+        Err(e) => {
+            rns::set_error(e);
+            return std::ptr::null_mut();
+        }
+    };
+    match env.new_string(json) {
+        Ok(s) => s.into_raw(),
+        Err(e) => {
+            rns::set_error(format!("jstring: {e}"));
+            std::ptr::null_mut()
+        }
+    }
+}
+
+fn json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}

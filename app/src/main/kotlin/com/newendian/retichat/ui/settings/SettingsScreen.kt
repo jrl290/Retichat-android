@@ -67,6 +67,11 @@ fun SettingsScreen(
                 ServiceStatusCard(state = state, onRestart = { viewModel.restartService() })
             }
 
+            // ---- Section: Distro identity (one address shared by all your devices) ----
+            item {
+                DistroIdentityCard()
+            }
+
             // ---- Section: Profile (display name + channel display name) ----
             item {
                 ProfileCard()

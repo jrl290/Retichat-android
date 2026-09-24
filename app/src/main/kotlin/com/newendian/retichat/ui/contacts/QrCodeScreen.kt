@@ -27,6 +27,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.newendian.retichat.IdentityShareFormat
+import com.newendian.retichat.service.DistroContacts
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.common.InputImage
 import com.google.zxing.BarcodeFormat
@@ -227,6 +228,7 @@ private fun processBarcode(imageProxy: ImageProxy, onResult: (String) -> Unit) {
                 val value = barcode.rawValue ?: continue
                 val sharedPeer = IdentityShareFormat.parse(value)
                 if (sharedPeer != null) {
+                    DistroContacts.noteShared(sharedPeer)
                     onResult(sharedPeer.destinationHashHex)
                     break
                 }

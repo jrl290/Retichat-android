@@ -26,6 +26,8 @@ import com.newendian.retichat.ServiceState
 import com.newendian.retichat.ui.components.AvatarCircle
 import java.text.SimpleDateFormat
 import java.util.*
+import androidx.compose.runtime.collectAsState
+import com.newendian.retichat.service.DistroManager
 
 @Composable
 fun ChatListScreen(
@@ -125,7 +127,7 @@ fun ChatListScreen(
                     else
                         MaterialTheme.colorScheme.error
                     Text(
-                        text = dot + (if (serviceState.isInitialized) serviceState.identityHashHex.take(16) else "Error"),
+                        text = dot + (if (serviceState.isInitialized) (DistroManager.state.collectAsState().value?.deliveryHashHex ?: serviceState.identityHashHex).take(16) else "Error"),
                         style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
                         color = color.copy(alpha = 0.7f),
                     )

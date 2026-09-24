@@ -135,6 +135,9 @@ object ConnectionStateManager {
             RetichatBridge.appLinkRegisterReconnect(routerHandle, "rfed.propagation.stream")
             RetichatBridge.appLinkRegisterReconnect(routerHandle, "rfed.notify.register")
             RetichatBridge.appLinkRegisterReconnect(routerHandle, "rfed.notify.unregister")
+            RetichatBridge.appLinkRegisterReconnect(routerHandle, "rfed.distro.register")
+            RetichatBridge.appLinkRegisterReconnect(routerHandle, "rfed.distro.unregister")
+            RetichatBridge.appLinkRegisterReconnect(routerHandle, "rfed.distro.list")
             RetichatBridge.appLinkRegisterReconnect(routerHandle, "fcm.register")
             RetichatBridge.appLinkRegisterReconnect(routerHandle, "fcm.unregister")
             RetichatBridge.appLinkRegisterReconnect(routerHandle, "apns.relay")
@@ -699,6 +702,9 @@ object ConnectionStateManager {
                 "rfed.channel.publish" to listOf("channel", "publish"),
                 "rfed.channel.pull" to listOf("channel", "pull"),
                 "rfed.propagation.stream" to listOf("propagation", "stream"),
+                "rfed.distro.register" to listOf("distro", "register"),
+                "rfed.distro.unregister" to listOf("distro", "unregister"),
+                "rfed.distro.list" to listOf("distro", "list"),
             )
             for ((label, aspects) in splitAspects) {
                 val hash = RfedChannelClient.rfedDestHash(rfedIdentityHex, "rfed", aspects)

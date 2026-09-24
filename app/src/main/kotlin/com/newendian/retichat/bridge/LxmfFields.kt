@@ -88,6 +88,8 @@ class LxmfFields private constructor(
         const val FIELD_RESULTS          = 0x0A
         const val FIELD_GROUP            = 0x0B
         const val FIELD_TICKET           = 0x0C
+        /** A distro private key in transit between a person's own devices (RFed SPEC §17.9). */
+        const val FIELD_DISTRO_ID        = 0x0D
         const val FIELD_SENDER_NAME      = 0x10   // sender display name (UTF-8) — per-message
 
         /** Empty fields instance. */

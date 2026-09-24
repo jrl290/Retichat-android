@@ -26,6 +26,7 @@ import com.newendian.retichat.ui.theme.RetichatTheme
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import com.newendian.retichat.service.DistroContacts
 
 class MainActivity : ComponentActivity() {
 
@@ -91,12 +92,14 @@ class MainActivity : ComponentActivity() {
         if (uri != null && (scheme == "lxma" || scheme == "lxmf")) {
             val hexHash = IdentityShareFormat.extractDestinationHash(uri.toString()) ?: return
             Log.i(TAG, "Deep link: $scheme://$hexHash")
+            DistroContacts.noteShared(IdentityShareFormat.parse(uri.toString()))
             intent?.data = null  // consume so rotation doesn't re-trigger
 
             val app = applicationContext as RetichatApp
             CoroutineScope(Dispatchers.Main).launch {
                 val destBytes = hexHash.hexToBytes()
                 app.repository.addContact(destBytes, hexHash.take(8))
+                DistroContacts.adopt(applicationContext, hexHash)
                 val contact = Contact(destBytes, hexHash.take(8))
                 val destChatId = app.repository.getOrCreateDirectChat(contact)
                 navigateToChat(destChatId)
