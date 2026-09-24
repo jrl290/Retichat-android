@@ -165,7 +165,10 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeS
     _env: JNIEnv,
     _class: JClass,
 ) -> jint {
-    ok_or_neg(rns::shutdown())
+    // The whole stack, not just Reticulum: the app-link and runtime-link
+    // registries are process-global and a restart in this process must not
+    // inherit links whose interfaces are gone (2026-09-24).
+    ok_or_neg(lxmf::shutdown())
 }
 
 /// `RetichatBridge.nativeLastError(): String?`

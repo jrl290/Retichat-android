@@ -6,6 +6,7 @@ import android.content.Intent
 import android.util.Log
 import com.newendian.retichat.service.DistroManager
 import com.newendian.retichat.service.RfedDistroClient
+import com.newendian.retichat.service.StackRuntime
 import com.newendian.retichat.service.UserPreferences
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -17,7 +18,7 @@ import kotlinx.coroutines.launch
  *
  *   adb shell am broadcast -a com.newendian.retichat.DEBUG_DISTRO \
  *     -n com.newendian.retichat/.debug.DistroDebugReceiver --es op import --es key <128 hex>
- *   ... --es op generate | forget | register | pull | status
+ *   ... --es op generate | forget | register | pull | status | restart
  *
  * Results are logged under the "DistroDebug" tag.
  */
@@ -44,6 +45,11 @@ class DistroDebugReceiver : BroadcastReceiver() {
             "register" -> CoroutineScope(Dispatchers.IO).launch {
                 Log.i(TAG, "register -> ${RfedDistroClient.register(app)}")
             }
+            // Same as the Settings "Restart" button: stop and start the stack
+            // in this process (the case that left dead links behind).
+            "restart" -> CoroutineScope(Dispatchers.IO).launch {
+                Log.i(TAG, "restart -> ${StackRuntime.restart(app)}")
+            }
             "pull" -> CoroutineScope(Dispatchers.IO).launch {
                 Log.i(TAG, "pull -> ${RfedDistroClient.pull(app)} blob(s)")
             }
@@ -69,12 +75,16 @@ class DistroDebugReceiver : BroadcastReceiver() {
                 UserPreferences.setDefaultTcpEnabled(app, false)
                 Log.i(TAG, "staging -> rfed=$rfed backbone=$host:$port (restart the app)")
             }
+            // Back to production: drops the staging row and the RFed override.
+            // `--ez defaults false` keeps the built-in backbones off (a phone
+            // that runs on its own LAN interface only).
             "production" -> CoroutineScope(Dispatchers.IO).launch {
+                val defaults = intent.getBooleanExtra("defaults", true)
                 val dao = (app as com.newendian.retichat.RetichatApp).database.interfaceConfigDao()
                 dao.enabledInterfaces().filter { it.name == "Staging RPi" }.forEach { dao.delete(it) }
                 UserPreferences.setRfedNodeIdentityHash(app, "")
-                UserPreferences.setDefaultTcpEnabled(app, true)
-                Log.i(TAG, "production -> defaults restored (restart the app)")
+                UserPreferences.setDefaultTcpEnabled(app, defaults)
+                Log.i(TAG, "production -> staging row removed, default backbones=$defaults (restart the app)")
             }
             // Send a DM from this phone (as the distro when one is loaded):
             //   --es op send --es to <32 hex> --es text "hello"

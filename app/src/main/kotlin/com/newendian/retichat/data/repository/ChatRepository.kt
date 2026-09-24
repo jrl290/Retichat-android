@@ -696,10 +696,11 @@ class ChatRepository(
 
             messageDao.updateHandle(localId, propHandle)
             val newState = RetichatBridge.messageGetState(propHandle)
-            // Only write prop initial state if direct hasn't won
-            if (!isSuccessState(newState)) {
-                messageDao.updateState(localId, newState)
-            }
+            // Direct did not win (checked just above), so the bubble now
+            // shows the propagated copy's state whatever it is. Until
+            // 2026-09-24 a copy that was already SENT here was skipped and
+            // the bubble stayed on the direct attempt's SENDING arrow.
+            messageDao.updateState(localId, newState)
             if (!isTerminalState(newState)) {
                 // PROPAGATED delivery can legitimately take several minutes
                 // (the propagation node buffers and re-delivers to the
