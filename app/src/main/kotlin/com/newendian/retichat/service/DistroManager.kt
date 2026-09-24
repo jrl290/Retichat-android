@@ -84,6 +84,11 @@ object DistroManager {
     @Synchronized
     fun importKey(context: Context, key: ByteArray): Boolean {
         if (key.size != DistroCodec.PRIVATE_KEY_BYTES) return false
+        // A different key already on this device is a distro the person may
+        // hold nowhere else. Keep it beside the store before it is replaced:
+        // on 2026-09-24 a test import overwrote a fresh distro and the only
+        // copy of its key was gone.
+        backupExistingKey(context, key)
         val previous = identityHandle
         if (!adopt(key)) return false
         runCatching { file(context).writeBytes(key) }
@@ -91,6 +96,28 @@ object DistroManager {
         if (previous != 0L && previous != identityHandle) RetichatBridge.identityDestroy(previous)
         return true
     }
+
+    /**
+     * Copy the stored key to `distro_identity.bak-<hash8>-<unix time>` when
+     * [incoming] would replace a different one. Backups are never deleted by
+     * the app; the Identity screen's import can bring one back.
+     */
+    private fun backupExistingKey(context: Context, incoming: ByteArray) {
+        val current = file(context)
+        if (!current.exists()) return
+        val existing = runCatching { current.readBytes() }.getOrNull() ?: return
+        if (existing.contentEquals(incoming)) return
+        val label = deliveryHashHex?.take(8) ?: "unknown"
+        val backup = File(context.filesDir, "$FILE_NAME.bak-$label-${System.currentTimeMillis() / 1000}")
+        runCatching { backup.writeBytes(existing) }
+            .onSuccess { Log.w(TAG, "replacing distro $label — previous key kept as ${backup.name}") }
+            .onFailure { Log.e(TAG, "could not back up the previous distro key", it) }
+    }
+
+    /** Backups written by [backupExistingKey], newest first. */
+    fun backups(context: Context): List<File> =
+        context.filesDir.listFiles { f -> f.name.startsWith("$FILE_NAME.bak-") }
+            ?.sortedByDescending { it.lastModified() } ?: emptyList()
 
     /** The 128-hex private key, for the device-to-device transfer only. */
     fun exportHex(): String? {

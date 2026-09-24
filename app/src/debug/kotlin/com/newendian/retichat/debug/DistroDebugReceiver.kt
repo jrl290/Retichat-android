@@ -4,6 +4,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.util.Log
+import com.newendian.retichat.service.DistroCodec
 import com.newendian.retichat.service.DistroManager
 import com.newendian.retichat.service.RfedDistroClient
 import com.newendian.retichat.service.StackRuntime
@@ -26,8 +27,19 @@ class DistroDebugReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val app = context.applicationContext
         when (val op = intent.getStringExtra("op") ?: "status") {
+            // Refuses to replace a loaded distro unless `--ez replace true`: a
+            // harness import overwrote a person's only copy of a key on 2026-09-24.
+            // (DistroManager keeps a backup on replace regardless.)
             "import" -> {
                 val key = intent.getStringExtra("key") ?: ""
+                val incoming = DistroCodec.parsePrivateKey(key)
+                val current = DistroManager.exportHex()
+                if (DistroManager.hasDistro && incoming != null && !incoming.contentEquals(DistroCodec.hexToBytes(current ?: ""))
+                    && !intent.getBooleanExtra("replace", false)
+                ) {
+                    Log.w(TAG, "import -> REFUSED: device holds distro ${DistroManager.deliveryHashHex}; pass --ez replace true to replace it (a backup is kept)")
+                    return
+                }
                 val ok = DistroManager.importText(app, key)
                 Log.i(TAG, "import -> $ok address=${DistroManager.deliveryHashHex}")
                 if (ok) RfedDistroClient.registerIfNeeded(app)
