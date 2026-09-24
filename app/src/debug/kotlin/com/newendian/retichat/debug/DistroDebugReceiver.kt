@@ -76,6 +76,25 @@ class DistroDebugReceiver : BroadcastReceiver() {
                 UserPreferences.setDefaultTcpEnabled(app, true)
                 Log.i(TAG, "production -> defaults restored (restart the app)")
             }
+            // Send a DM from this phone (as the distro when one is loaded):
+            //   --es op send --es to <32 hex> --es text "hello"
+            "send" -> CoroutineScope(Dispatchers.IO).launch {
+                val to = intent.getStringExtra("to") ?: ""
+                val text = intent.getStringExtra("text") ?: "ping"
+                val dest = com.newendian.retichat.service.DistroCodec.hexToBytes(to.lowercase())
+                if (dest == null || dest.size != 16) { Log.w(TAG, "send: bad address"); return@launch }
+                val repo = (app as com.newendian.retichat.RetichatApp).repository
+                repo.addContact(dest, to.take(8))
+                val chatId = repo.getOrCreateDirectChat(com.newendian.retichat.data.model.Contact(dest, to.take(8)))
+                repo.sendMessage(chatId, text)
+                Log.i(TAG, "send -> queued '$text' to ${to.take(8)} in $chatId")
+            }
+            // Send this phone's distro identity to another device (LXMF field 0x0D):
+            //   --es op transfer --es to <32 hex>
+            "transfer" -> CoroutineScope(Dispatchers.IO).launch {
+                val to = intent.getStringExtra("to") ?: ""
+                Log.i(TAG, "transfer -> ${RfedDistroClient.sendIdentityTo(app, to)} to ${to.take(8)}")
+            }
             else -> Log.i(
                 TAG,
                 "status: has=${DistroManager.hasDistro} address=${DistroManager.deliveryHashHex} " +
