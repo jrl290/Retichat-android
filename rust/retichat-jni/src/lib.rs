@@ -863,6 +863,21 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeM
     ok_or_neg(lxmf::message_send_via_app_links(msg as u64))
 }
 
+/// `RetichatBridge.nativePeerIsDistro(destHash: ByteArray): Boolean`
+///
+/// RFed SPEC §17.10: true when the destination's last announce carried the
+/// distro flag; the app then propagates at once instead of trying a direct
+/// link that nothing answers.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativePeerIsDistro(
+    env: JNIEnv,
+    _class: JClass,
+    dest_hash: JByteArray,
+) -> jni::sys::jboolean {
+    let bytes = jbytes_to_vec(&env, &dest_hash);
+    if lxmf::peer_is_distro(&bytes) { 1 } else { 0 }
+}
+
 /// `RetichatBridge.nativeAppLinksInvalidateLiveness(destHash: ByteArray): Int`
 ///
 /// Forget the cached liveness winner for `destHash`. Call from your

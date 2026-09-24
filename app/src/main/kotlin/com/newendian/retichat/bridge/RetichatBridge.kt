@@ -376,6 +376,9 @@ object RetichatBridge {
     fun appLinksInvalidateLiveness(destHash: ByteArray): Boolean =
         nativeAppLinksInvalidateLiveness(destHash) == 0
 
+    /** RFed SPEC §17.10: the destination's last announce carried the distro flag. */
+    fun peerIsDistro(destHash: ByteArray): Boolean = nativePeerIsDistro(destHash)
+
     fun messageGetState(handle: Long): Int = nativeMessageGetState(handle)
     fun messageGetProgress(handle: Long): Float = nativeMessageGetProgress(handle)
     fun messageGetHash(handle: Long): ByteArray? = nativeMessageGetHash(handle)
@@ -394,6 +397,7 @@ object RetichatBridge {
     private external fun nativeMessageSend(router: Long, msg: Long): Int
     private external fun nativeMessageSendViaAppLinks(msg: Long): Int
     private external fun nativeAppLinksInvalidateLiveness(destHash: ByteArray): Int
+    private external fun nativePeerIsDistro(destHash: ByteArray): Boolean
     private external fun nativeMessageGetState(handle: Long): Int
     private external fun nativeMessageGetProgress(handle: Long): Float
     private external fun nativeMessageGetHash(handle: Long): ByteArray?

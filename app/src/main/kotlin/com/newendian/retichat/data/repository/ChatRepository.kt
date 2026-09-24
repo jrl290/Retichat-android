@@ -400,8 +400,11 @@ class ChatRepository(
                 // A distro address has no device behind it to prove a direct
                 // link; RFed fans the message out from the propagation node
                 // (Retichat-js: propagationDelay 0 and no _sendPacket for
-                // isDistro contacts).
-                if (UserPreferences.isDistroContact(appContext, destHash.toHex())) {
+                // isDistro contacts). The address says so in its announce
+                // (RFed SPEC §17.10); the preference is what past announces taught us.
+                if (RetichatBridge.peerIsDistro(destHash) ||
+                    UserPreferences.isDistroContact(appContext, destHash.toHex())
+                ) {
                     Log.i(TAG, "sendDirect: ${destHash.toHex().take(16)} is a distro address — propagating")
                     schedulePropagationFallback(localId, destHash, content, attachments, immediate = true)
                     return@launch
@@ -849,11 +852,13 @@ class ChatRepository(
         val groupId = fields.getString(LxmfFields.GROUP_ID)
         Log.i(TAG, "onMessageReceived: src=${srcHash.toHex().take(16)}, groupId=$groupId, content='${content.take(40)}'")
         // A distro identity transfer from another of our devices (RFed SPEC §17.9):
-        // not a message to display — offer to import it. Checked before anything
-        // else, as the web client does (app.js 921-928).
-        fields.getString(LxmfFields.FIELD_DISTRO_ID)?.let { keyHex ->
-            RfedDistroClient.offerTransfer(srcHash.toHex(), keyHex)
-            return
+        // LXMF's custom pair with our type string; not a message to display —
+        // offer to import it. Checked before anything else, as the web client does.
+        if (fields.getString(LxmfFields.FIELD_CUSTOM_TYPE) == LxmfFields.DISTRO_TRANSFER_TYPE) {
+            fields.getString(LxmfFields.FIELD_CUSTOM_DATA)?.let { keyHex ->
+                RfedDistroClient.offerTransfer(srcHash.toHex(), keyHex)
+                return
+            }
         }
         scope.launch(Dispatchers.IO) {
             val srcHex = srcHash.toHex()
@@ -1365,8 +1370,14 @@ class ChatRepository(
      * Does NOT overwrite a name that the user has manually set.
      */
     fun onAnnounceReceived(destHash: ByteArray, displayName: String?) {
-        if (displayName.isNullOrBlank()) return
         val hex = destHash.toHex()
+        // RFed SPEC §17.10: the announce is the one place an address says it is
+        // a distro. Remember it so the send path needs no lookup later.
+        if (RetichatBridge.peerIsDistro(destHash) && !UserPreferences.isDistroContact(appContext, hex)) {
+            UserPreferences.setDistroContact(appContext, hex, true)
+            Log.i(TAG, "contact ${hex.take(8)} announced as a distro address")
+        }
+        if (displayName.isNullOrBlank()) return
         scope.launch(Dispatchers.IO) {
             val existing = contactDao.findByHash(hex)
             if (existing != null) {

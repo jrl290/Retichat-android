@@ -88,8 +88,16 @@ class LxmfFields private constructor(
         const val FIELD_RESULTS          = 0x0A
         const val FIELD_GROUP            = 0x0B
         const val FIELD_TICKET           = 0x0C
-        /** A distro private key in transit between a person's own devices (RFed SPEC §17.9). */
-        const val FIELD_DISTRO_ID        = 0x0D
+        /**
+         * LXMF's custom pair (LXMF/LXMF.py FIELD_CUSTOM_TYPE / FIELD_CUSTOM_DATA):
+         * a format identifier and its payload. The distro identity transfer
+         * (RFed SPEC §17.9) is type [DISTRO_TRANSFER_TYPE] with the key in the
+         * data field. Until 2026-09-24 it used 0x0D, which LXMF 1.1.1 defines
+         * as FIELD_EVENT.
+         */
+        const val FIELD_CUSTOM_TYPE      = 0xFB
+        const val FIELD_CUSTOM_DATA      = 0xFC
+        const val DISTRO_TRANSFER_TYPE   = "rfed.distro.transfer"
         const val FIELD_SENDER_NAME      = 0x10   // sender display name (UTF-8) — per-message
 
         /** Empty fields instance. */

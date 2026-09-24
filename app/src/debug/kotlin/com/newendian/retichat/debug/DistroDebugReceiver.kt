@@ -73,6 +73,13 @@ class DistroDebugReceiver : BroadcastReceiver() {
                     )
                 }
                 UserPreferences.setDefaultTcpEnabled(app, false)
+                // Park every other interface: a second uplink lets a stale path
+                // from another network win the route to a staging peer (the
+                // 2026-09-24 reverse-leg failures). `op production` re-enables them.
+                val parked = dao.enabledInterfaces().filter { it.name != "Staging RPi" }
+                parked.forEach { dao.setEnabled(it.id, false) }
+                app.getSharedPreferences("distro_debug", Context.MODE_PRIVATE).edit()
+                    .putString("parked_interfaces", parked.joinToString(",") { it.id.toString() }).apply()
                 Log.i(TAG, "staging -> rfed=$rfed backbone=$host:$port (restart the app)")
             }
             // Back to production: drops the staging row and the RFed override.
@@ -82,6 +89,10 @@ class DistroDebugReceiver : BroadcastReceiver() {
                 val defaults = intent.getBooleanExtra("defaults", true)
                 val dao = (app as com.newendian.retichat.RetichatApp).database.interfaceConfigDao()
                 dao.enabledInterfaces().filter { it.name == "Staging RPi" }.forEach { dao.delete(it) }
+                val prefs = app.getSharedPreferences("distro_debug", Context.MODE_PRIVATE)
+                prefs.getString("parked_interfaces", "")!!.split(",").filter { it.isNotBlank() }
+                    .forEach { id -> dao.setEnabled(id.toLong(), true) }
+                prefs.edit().remove("parked_interfaces").apply()
                 UserPreferences.setRfedNodeIdentityHash(app, "")
                 UserPreferences.setDefaultTcpEnabled(app, defaults)
                 Log.i(TAG, "production -> staging row removed, default backbones=$defaults (restart the app)")

@@ -235,7 +235,8 @@ object RfedDistroClient {
                 method = method, identityHandle = device,
             )
             if (h == 0L) { Log.w(TAG, "transfer: messageCreate failed: ${RetichatBridge.lastError()}"); continue }
-            RetichatBridge.messageAddFieldString(h, LxmfFields.FIELD_DISTRO_ID, keyHex)
+            RetichatBridge.messageAddFieldString(h, LxmfFields.FIELD_CUSTOM_TYPE, LxmfFields.DISTRO_TRANSFER_TYPE)
+            RetichatBridge.messageAddFieldString(h, LxmfFields.FIELD_CUSTOM_DATA, keyHex)
             val sent = RetichatBridge.messageSendViaAppLinks(h)
             if (sent) {
                 Log.i(TAG, "distro identity sent to ${deviceHashHex.take(8)} ($method)")
