@@ -112,6 +112,13 @@ class ChatRepository(
         UserPreferences.setFilterStrangersEnabled(ctx, enabled)
     }
 
+    /**
+     * One [flushPendingMessages] at a time; see [SerialFlush]. Declared before
+     * the init block below: that block hands [networkListener] to
+     * NetworkMonitor, whose callback thread may run a flush at once.
+     */
+    private val pendingFlush = SerialFlush()
+
     /** Network-available listener, registered once. */
     private val networkListener: () -> Unit = {
         scope.launch(Dispatchers.IO) { flushPendingMessages() }
@@ -264,20 +271,29 @@ class ChatRepository(
         messageDao.messagesForChat(chatId)
 
     /**
-     * Retry all messages that were queued while offline (state == OUTBOUND,
+     * Send all messages that were queued while offline (state == OUTBOUND,
      * no native handle). Called when network becomes available or when the
-     * service (re-)initialises.
+     * service (re-)initialises. Both can fire together, so flushes are
+     * serialized and a flush that waited re-reads the queue (and readiness)
+     * after the one before it has ended.
      */
-    private suspend fun flushPendingMessages() {
-        if (routerHandle == 0L || identityHandle == 0L) return
-        if (!NetworkMonitor.isOnline.value) return
-
-        val pending = messageDao.pendingOutbound()
-        if (pending.isEmpty()) return
+    private suspend fun flushPendingMessages() = pendingFlush.run(
+        pending = {
+            if (routerHandle == 0L || identityHandle == 0L || !NetworkMonitor.isOnline.value) {
+                emptyList()
+            } else {
+                messageDao.pendingOutbound()
+            }
+        },
+    ) { pending ->
         Log.i(TAG, "flushPending: ${pending.size} message(s) queued")
 
         for (msg in pending) {
-            val chat = chatDao.findById(msg.chatId) ?: continue
+            val chat = chatDao.findById(msg.chatId)
+            if (chat == null) {
+                Log.w(TAG, "flushPending: no chat ${msg.chatId} for queued msg ${msg.id} — left queued")
+                continue
+            }
             if (chat.isGroup) {
                 // Group messages are fan-out; re-sending properly would need
                 // the original member list.  For now, mark failed so the user
@@ -309,6 +325,15 @@ class ChatRepository(
                     messageDao.updateState(msg.id, RetichatBridge.MessageState.FAILED)
                     continue
                 }
+                // Take the row before it goes out: the handle is recorded only
+                // if the row is still queued, and from then on it is out of
+                // pendingOutbound(), so no later flush sends it or its §17.11
+                // copy again, even if this send throws below.
+                if (messageDao.claimPendingOutbound(msg.id, handle) == 0) {
+                    Log.w(TAG, "flushPending: queued msg ${msg.id} already taken — not sent again")
+                    RetichatBridge.messageDestroy(handle)
+                    continue
+                }
                 val sent = RetichatBridge.messageSendViaAppLinks(handle)
                 if (!sent) {
                     messageDao.updateState(msg.id, RetichatBridge.MessageState.FAILED)
@@ -320,11 +345,22 @@ class ChatRepository(
                 // (as in sendDirectMessage; iOS: ChatRepository.swift
                 // sendDistroSentCopy).
                 sendDistroSentCopy(destHash, sendSrc, title = "", content = msg.content)
+                // The claim above already recorded the handle.
                 val state = RetichatBridge.messageGetState(handle)
-                messageDao.updateHandle(msg.id, handle)
                 messageDao.updateState(msg.id, state)
                 if (!isTerminalState(state)) {
-                    pollMessageState(msg.id, handle)
+                    // Followed outside the flush, as sendDirectMessage follows
+                    // each message on its own: the flush is serialized, and a
+                    // trigger waiting on it should wait for the dispatches,
+                    // not for every queued message's delivery outcome.
+                    scope.launch(Dispatchers.IO) {
+                        try {
+                            pollMessageState(msg.id, handle)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "flushPending: state poll failed ${msg.id}: ${e.message}")
+                            messageDao.updateState(msg.id, RetichatBridge.MessageState.FAILED)
+                        }
+                    }
                 }
                 Log.d(TAG, "flushPending: sent queued msg ${msg.id}")
             } catch (e: Exception) {
@@ -1050,9 +1086,10 @@ class ChatRepository(
      * the direct chat with the recipient, the way iOS ChatRepository.swift
      * files it: sender is the distro (it is "me"), state SENT and never
      * DELIVERED (only the sending device could learn that), and the id is
-     * derived like any distro fan-out message so a copy that arrives both
-     * live and via /rfed/pull is stored once. No contact is created and no
-     * notification is posted: the user wrote this message.
+     * derived like any distro fan-out message (DistroCodec.sentCopyMessageId)
+     * so a copy that arrives both live and via /rfed/pull is stored once. No
+     * contact is created and no notification is posted: the user wrote this
+     * message.
      */
     fun onDistroSentCopy(recipientHex: String, title: String, content: String, timestamp: Double) {
         val distroHex = DistroManager.deliveryHashHex ?: run {
@@ -1060,7 +1097,7 @@ class ChatRepository(
             return
         }
         val recipient = DistroCodec.hexToBytes(recipientHex) ?: return
-        val msgId = DistroCodec.messageId(distroHex, timestamp, content)
+        val msgId = DistroCodec.sentCopyMessageId(distroHex, timestamp, content)
         Log.i(TAG, "onDistroSentCopy: to=${recipientHex.take(16)} content='${content.take(40)}'")
         scope.launch(Dispatchers.IO) {
             if (messageDao.findById(msgId) != null) {

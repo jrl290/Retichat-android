@@ -3,6 +3,7 @@ package com.newendian.retichat.service
 import com.newendian.retichat.service.DistroCodec.SentCopy
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -91,8 +92,22 @@ class DistroSentCopyTest {
 
     @Test
     fun copyIdMatchesTheFanOutIdSoStreamAndPullDedupe() {
-        val a = DistroCodec.messageId(distro, 1_700_000_000.25, "hi")
-        assertEquals(a, DistroCodec.messageId(distro, 1_700_000_000.25, "hi"))
-        assertFalse(a == DistroCodec.messageId(distro, 1_700_000_000.5, "hi"))
+        // C's own LXMF timestamp, the same on every arrival of C.
+        val sentAt = 1_700_000_000.25
+        val id = DistroCodec.sentCopyMessageId(distro, sentAt, "hi")
+        // The regular fan-out store site ids a message by its source, and C's
+        // source is the distro: the copy's id is that id.
+        assertEquals(DistroCodec.messageId(distro, sentAt, "hi"), id)
+        // The live and the /rfed/pull arrival of C are stored once.
+        assertEquals(id, DistroCodec.sentCopyMessageId(distro, sentAt, "hi"))
+        // Keyed on the local receive clock (seconds or the stored
+        // milliseconds), each arrival would get its own id.
+        assertNotEquals(DistroCodec.messageId(distro, sentAt + 2.5, "hi"), id)
+        assertNotEquals(DistroCodec.messageId(distro, sentAt * 1000, "hi"), id)
+        // Keyed on the recipient (the chat C is filed in), it is not the
+        // fan-out rule.
+        assertNotEquals(DistroCodec.messageId(recipient, sentAt, "hi"), id)
+        // A different message from the same second is a different row.
+        assertNotEquals(DistroCodec.sentCopyMessageId(distro, sentAt, "hi!"), id)
     }
 }

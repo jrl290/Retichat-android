@@ -198,6 +198,16 @@ private const val GRACE_SHUTDOWN_MS = 30_000L  // 30s grace avoids stack teardow
         selfDestHash = RetichatBridge.destinationHash(identityHandle, "lxmf", "delivery")
             ?: ByteArray(0)
 
+        // The distro identity, if this device holds one, is the identity the app
+        // sends from — load it before anything can send. That is before
+        // repo.configure(): configure() starts flushPendingMessages at once, and
+        // the flush picks its source with DistroManager.sendingIdentity, so a
+        // distro loaded later let a queued message go out from the device
+        // address with no RFed SPEC §17.11 sent-copy. It needs only identity
+        // handles (native library, above), not the router or the network.
+        runCatching { DistroManager.init(app) }
+            .onFailure { Log.e(TAG, "DistroManager.init failed", it) }
+
         // Wire up repository
         val repo = app.repository
         repo.configure(selfDestHash, routerHandle, identityHandle)
@@ -243,10 +253,7 @@ private const val GRACE_SHUTDOWN_MS = 30_000L  // 30s grace avoids stack teardow
         }
 
         // Start the RFed delivery callback so channel/group blobs are dispatched
-        // The distro identity, if this device holds one, is the identity the app
-        // sends from — load it before anything can send.
-        runCatching { DistroManager.init(app) }
-            .onFailure { Log.e(TAG, "DistroManager.init failed", it) }
+        // (the distro identity was loaded before repo.configure() above).
         RetichatBridge.rfedDeliveryStart(identityHandle, object : RfedBlobCallback {
             override fun onBlob(blob: ByteArray) {
                 Log.i(TAG, "rfed.delivery blob received: ${blob.size} bytes")

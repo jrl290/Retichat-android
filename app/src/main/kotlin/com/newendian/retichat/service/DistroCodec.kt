@@ -95,7 +95,9 @@ object DistroCodec {
 
     /**
      * A stable id for a distro message: the fan-out never hands us the LXMF
-     * hash, so derive one from the identity the web client dedupes on.
+     * hash, so derive one from the identity the web client dedupes on. This
+     * is the rule the regular fan-out store site uses
+     * (ChatRepository.onDistroMessageReceived), keyed on the message's source.
      */
     fun messageId(sourceHashHex: String, timestamp: Double, content: String): String {
         val md = MessageDigest.getInstance("SHA-256")
@@ -107,6 +109,18 @@ object DistroCodec {
         md.update(content.toByteArray())
         return md.digest().copyOf(16).toHex()
     }
+
+    /**
+     * RFed SPEC §17.11: the id a sibling's sent-copy C is stored under
+     * (ChatRepository.onDistroSentCopy). It is C's fan-out id: C's source is
+     * the distro, and [lxmfTimestamp] is C's own LXMF timestamp, so every
+     * arrival of C (live stream and /rfed/pull) gets the same id and is stored
+     * once. Not the local receive clock, which gives each arrival its own id,
+     * and not the recipient (the chat C is filed in), which is not C's source
+     * and so not the fan-out rule.
+     */
+    fun sentCopyMessageId(distroHex: String, lxmfTimestamp: Double, content: String): String =
+        messageId(distroHex, lxmfTimestamp, content)
 
     private val HEX32 = Regex("^[0-9a-f]{32}$")
 

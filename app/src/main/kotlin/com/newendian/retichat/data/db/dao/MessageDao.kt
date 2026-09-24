@@ -44,6 +44,15 @@ interface MessageDao {
     @Query("SELECT * FROM messages WHERE isOutbound = 1 AND state = 0x01 AND nativeHandle = 0 ORDER BY timestamp ASC")
     suspend fun pendingOutbound(): List<MessageEntity>
 
+    /**
+     * Take a queued row for sending: record its native handle only while the
+     * row still matches [pendingOutbound]. Returns 1 when this caller took it
+     * and 0 when it had already left the queue. One conditional UPDATE, so
+     * two callers can not both take the same row and send it twice.
+     */
+    @Query("UPDATE messages SET nativeHandle = :handle WHERE id = :id AND isOutbound = 1 AND state = 0x01 AND nativeHandle = 0")
+    suspend fun claimPendingOutbound(id: String, handle: Long): Int
+
     // ---- Attachments ----
 
     @Insert
