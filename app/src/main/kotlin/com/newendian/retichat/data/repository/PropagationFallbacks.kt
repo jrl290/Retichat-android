@@ -18,19 +18,41 @@ import com.newendian.retichat.bridge.RetichatBridge.MessageState
  * when the link is down), so a report for a hash not tracked yet is held and
  * replayed by [track], as iOS earlyMessageStates. Everything is bounded: the
  * oldest entries go first. Thread-safe: the router's callback thread reports.
+ *
+ * The copy is a clone of the DIRECT message, so it has the same LXMF hash and
+ * reports its own SENT or FAILED under the hash followed here. Neither starts
+ * anything: the copy is once per message. Until 2026-09-24 the copy was a new
+ * message with its own hash, and a recipient given both showed it twice.
  */
 internal class PropagationFallbacks(private val capacity: Int = 256) {
     /**
-     * A DIRECT send, with what its propagated copy needs. Attachments are not
-     * held here: they are on disk with the message (saveOutboundAttachments),
-     * and a send the router never reports on again (the stack stopped under
-     * it) would otherwise keep their bytes until the capacity pushed it out.
+     * A DIRECT send: its bubble, and the handle its propagated copy is cloned
+     * from. The clone carries the fields, the attachments and the packed
+     * timestamp, so nothing else is held here, and no attachment is read back
+     * from disk for the copy.
      */
     class Send(
         val messageId: String,
-        val destHash: ByteArray,
-        val content: String,
+        val directHandle: Long,
     )
+
+    companion object {
+        /**
+         * A bubble's propagated copy failed, or could not go out at all, while
+         * the DIRECT attempt beside it was in [directState]. True when the
+         * bubble stays with, or goes back to, the DIRECT attempt: it is still
+         * in flight, or it succeeded. False when it ended without success (or
+         * its state could not be read, -1): no attempt is left, and the
+         * message has failed. Both attempts report under one hash, so the
+         * router's FAILED can not tell which ended; the DIRECT handle's own
+         * state can.
+         */
+        fun directKeepsTheBubble(directState: Int): Boolean = when (directState) {
+            MessageState.GENERATING, MessageState.OUTBOUND, MessageState.SENDING,
+            MessageState.SENT, MessageState.DELIVERED -> true
+            else -> false
+        }
+    }
 
     private val tracked = bounded<Send>()
     private val early = bounded<MutableList<Int>>()

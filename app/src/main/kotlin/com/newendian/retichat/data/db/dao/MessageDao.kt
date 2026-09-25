@@ -46,8 +46,17 @@ interface MessageDao {
     suspend fun updateStateUnlessSucceeded(id: String, state: Int): Int
 
     /**
-     * Point the row at a propagated copy's [handle] and [state], unless the
-     * row already succeeded. Returns 1 when the copy took the row over.
+     * Set [state] while the row still follows [handle] and has not succeeded:
+     * one attempt's outcome, not written over another attempt that took the
+     * row over meanwhile. One conditional UPDATE. Returns 1 when written.
+     */
+    @Query("UPDATE messages SET state = :state WHERE id = :id AND nativeHandle = :handle AND state NOT IN (0x04, 0x08)")
+    suspend fun updateStateOnHandleUnlessSucceeded(id: String, handle: Long, state: Int): Int
+
+    /**
+     * Point the row at [handle] and [state], unless the row already
+     * succeeded: a propagated copy taking the row over, or the DIRECT attempt
+     * taking it back when its copy failed. Returns 1 when [handle] took the row.
      */
     @Query("UPDATE messages SET nativeHandle = :handle, state = :state WHERE id = :id AND state NOT IN (0x04, 0x08)")
     suspend fun takeOverUnlessSucceeded(id: String, handle: Long, state: Int): Int

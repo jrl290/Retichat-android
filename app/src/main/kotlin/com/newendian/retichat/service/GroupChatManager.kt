@@ -47,6 +47,18 @@ class GroupChatManager(
     private val trackedHandles = ConcurrentHashMap<String, Long>()
     private val fallbackStarted = ConcurrentHashMap.newKeySet<Long>()
 
+    /**
+     * DIRECT handles whose propagated clone has not been made yet, and those
+     * of them whose send ended meanwhile. The router can report 0x10 and
+     * FAILED in one pass, so the FAILED can arrive before the fallback has
+     * cloned the message; releasing the handle then left nothing to clone and
+     * the member got no copy. Such a handle is released by the fallback once
+     * it has cloned it. Guarded by [cloneLock].
+     */
+    private val cloning = mutableSetOf<Long>()
+    private val releaseAfterClone = mutableSetOf<Long>()
+    private val cloneLock = Any()
+
     // ---- Invite ---------------------------------------------------------
 
     /**
@@ -291,6 +303,7 @@ class GroupChatManager(
         val handle = trackedHandles[hashHex] ?: return false
         if (state == RetichatBridge.MessageState.PROP_FALLBACK_REQUESTED) {
             if (fallbackStarted.add(handle)) {
+                synchronized(cloneLock) { cloning.add(handle) }
                 scope.launch(Dispatchers.IO) { startPropagationFallback(handle) }
             }
             return true
@@ -303,7 +316,10 @@ class GroupChatManager(
         ) {
             trackedHandles.remove(hashHex)
             fallbackStarted.remove(handle)
-            RetichatBridge.messageDestroy(handle)
+            val releaseNow = synchronized(cloneLock) {
+                if (handle in cloning) { releaseAfterClone.add(handle); false } else true
+            }
+            if (releaseNow) RetichatBridge.messageDestroy(handle)
         }
         return true
     }
@@ -317,6 +333,20 @@ class GroupChatManager(
     }
 
     private fun startPropagationFallback(directHandle: Long) {
+        try {
+            sendPropagatedClone(directHandle)
+        } finally {
+            // Cloned (or given up): a send that ended meanwhile left its
+            // handle for this to release.
+            val release = synchronized(cloneLock) {
+                cloning.remove(directHandle)
+                releaseAfterClone.remove(directHandle)
+            }
+            if (release) RetichatBridge.messageDestroy(directHandle)
+        }
+    }
+
+    private fun sendPropagatedClone(directHandle: Long) {
         val node = PropagationNodeManager(
             userConfiguredHash = PropagationSync.resolvePropagationOverride(appContext),
         ).primaryNode

@@ -504,9 +504,29 @@ class ChatRepository(
             UserPreferences.isDistroContact(appContext, destHash.toHex())
         ) {
             Log.i(TAG, "dispatch: ${destHash.toHex().take(16)} is a distro address — propagating")
-            // No DIRECT attempt here, so the propagated send is this
-            // message's only dispatch and carries the §17.11 sent-copy.
-            sendPropagatedCopy(localId, destHash, content, attachments, sendsSentCopy = true)
+            val (sendSrc, sendIdentity) = DistroManager.sendingIdentity(selfDestHash, identityHandle)
+            sendPropagatedCopy(
+                localId,
+                directHandle = 0L,
+                createCopy = {
+                    RetichatBridge.messageCreate(
+                        destHash = destHash,
+                        srcHash = sendSrc,
+                        content = content,
+                        method = RetichatBridge.DeliveryMethod.PROPAGATED,
+                        identityHandle = sendIdentity,
+                    ).also { handle ->
+                        if (handle != 0L) {
+                            attachments.forEach { (name, data) ->
+                                RetichatBridge.messageAddAttachment(handle, name, data)
+                            }
+                        }
+                    }
+                },
+                // No DIRECT attempt here, so the propagated send is this
+                // message's only dispatch and carries the §17.11 sent-copy.
+                onSent = { sendDistroSentCopy(destHash, sendSrc, title = "", content = content) },
+            )
             return
         }
 
@@ -587,7 +607,7 @@ class ChatRepository(
             // copy is (see pollMessageState).
             if (!isFailureState(state)) messageDao.updateState(localId, state)
             propagationFallbacks.track(
-                hashHex, PropagationFallbacks.Send(localId, destHash, content),
+                hashHex, PropagationFallbacks.Send(localId, directHandle = msgHandle),
             )?.let(::startPropagatedCopy)
             if (isFailureState(state)) {
                 propagationFallbacks.onPolledState(hashHex, state)?.let(::startPropagatedCopy)
@@ -652,15 +672,22 @@ class ChatRepository(
      * transfers are never prematurely killed.
      *
      * [directHashHex] is set when [msgHandle] is a DIRECT send with the
-     * propagated fallback behind it. Its failure is then not written: the
-     * propagated copy is the bubble's outcome, started here unless the
-     * router's report started it first ([PropagationFallbacks]).
+     * propagated fallback behind it. Its failure starts the propagated copy,
+     * which is then the bubble's outcome, unless the router's report started
+     * it first ([PropagationFallbacks]). A failure with no copy holding the
+     * bubble is written: a copy that swaps in later replaces it.
+     *
+     * [directHandle] is set when [msgHandle] is that propagated copy. Both
+     * attempts share one hash, so the copy's failure is not the message's
+     * while the DIRECT attempt is still in flight: the bubble goes back to it
+     * ([PropagationFallbacks.directKeepsTheBubble]).
      */
     private suspend fun pollMessageState(
         localId: String,
         msgHandle: Long,
         initialDeadlineMs: Long = 60_000L,
         directHashHex: String? = null,
+        directHandle: Long = 0L,
     ) {
         var interval = 200L          // start at 200ms for snappy LAN feedback
         val maxInterval = 5_000L     // cap at 5s
@@ -709,15 +736,23 @@ class ChatRepository(
                 return
             }
             if (directHashHex != null && isFailureState(newState)) {
-                Log.i(TAG, "pollState: DIRECT $localId ended in state=$newState — propagated copy takes over")
-                propagationFallbacks.onPolledState(directHashHex, newState)?.let(::startPropagatedCopy)
+                val copy = propagationFallbacks.onPolledState(directHashHex, newState)
+                if (copy != null) {
+                    Log.i(TAG, "pollState: DIRECT $localId ended in state=$newState — propagated copy takes over")
+                    startPropagatedCopy(copy)
+                } else if (messageDao.updateStateOnHandleUnlessSucceeded(localId, msgHandle, newState) == 1) {
+                    // The copy started earlier (or never will: untracked) and
+                    // does not hold the bubble. One that could not go out left
+                    // the bubble to this attempt (propagatedCopyNotSent); one
+                    // still on its way replaces this when it takes over.
+                    Log.i(TAG, "pollState: DIRECT $localId ended in state=$newState, no copy holds the bubble")
+                }
                 return
             }
-            // A FAILED row under a DIRECT poll is the propagated copy saying it
-            // could not go out. Only this attempt's success replaces that:
-            // writing its SENDING would leave the bubble spinning once the
-            // attempt fails too, since that failure is not written.
-            val copyFailed = directHashHex != null && dbState == RetichatBridge.MessageState.FAILED
+            if (directHandle != 0L && isFailureState(newState)) {
+                propagatedCopyFailed(localId, directHandle, newState)
+                return
+            }
             if (isSuccessState(dbState)) {
                 if (newState == RetichatBridge.MessageState.DELIVERED &&
                     dbState == RetichatBridge.MessageState.SENT) {
@@ -730,7 +765,7 @@ class ChatRepository(
                 } else {
                     messageDao.updateStateAndProgress(localId, newState, progress)
                 }
-            } else if (!copyFailed || isSuccessState(newState)) {
+            } else {
                 messageDao.updateStateAndProgress(localId, newState, progress)
             }
 
@@ -749,21 +784,21 @@ class ChatRepository(
     }
 
     /**
-     * Start [send]'s propagated copy on IO; see [PropagationFallbacks]. Its
-     * attachments are read back from where the send stored them.
+     * Start [send]'s propagated copy on IO; see [PropagationFallbacks]. Not on
+     * the router's callback thread: the clone locks the DIRECT message, which
+     * the router holds while it reports.
      */
     private fun startPropagatedCopy(send: PropagationFallbacks.Send) {
         scope.launch(Dispatchers.IO) {
-            val attachments = try {
-                queuedAttachments(send.messageId)
-            } catch (e: Exception) {
-                Log.e(TAG, "propagated: attachments of ${send.messageId} unreadable: ${e.message}")
-                failUnlessSucceeded(send.messageId)
-                return@launch
-            }
             sendPropagatedCopy(
-                send.messageId, send.destHash, send.content, attachments,
-                sendsSentCopy = false,
+                send.messageId,
+                directHandle = send.directHandle,
+                // The DIRECT message itself, sent PROPAGATED: its fields,
+                // attachments and packed timestamp, so its LXMF hash, and the
+                // recipient drops whichever of the two arrives second. Until
+                // 2026-09-24 the copy was a new message with a new timestamp,
+                // and a recipient given both showed the message twice.
+                createCopy = { RetichatBridge.messageClonePropagated(send.directHandle) },
             )
         }
     }
@@ -773,27 +808,29 @@ class ChatRepository(
      * randomly-chosen) LXMF propagation node, and point the bubble at it.
      * Mirrors iOS `ChatRepository.retrySendViaPropNode`.
      *
-     * Either a distro recipient's only send, or the fallback behind a DIRECT
-     * attempt, started when the router asked for it (0x10; AppLinks Timer P,
-     * which is 0 s when the link status is already DISCONNECTED) or when the
-     * DIRECT attempt failed first ([PropagationFallbacks]). The DIRECT attempt
-     * keeps running beside it. Until 2026-09-24 Android waited 5 s on its own
-     * clock and then skipped the copy when the message had already failed.
+     * Either a distro recipient's only send ([directHandle] 0), or the fallback
+     * behind the DIRECT attempt [directHandle], started when the router asked
+     * for it (0x10; AppLinks Timer P, which is 0 s when the link status is
+     * already DISCONNECTED) or when the DIRECT attempt failed first
+     * ([PropagationFallbacks]). The DIRECT attempt keeps running beside it.
+     * Until 2026-09-24 Android waited 5 s on its own clock and then skipped
+     * the copy when the message had already failed.
+     *
+     * [createCopy] makes the propagated message once the checks below pass: a
+     * new message for a distro recipient, a clone of the DIRECT message for
+     * the fallback. [onSent] runs once it is out; the distro send gives its
+     * §17.11 sent-copy there. The DIRECT path sends its own, so a fallback
+     * behind it must not send a second one.
      *
      * A copy that can not go out shows the message failed (iOS does the
-     * same); a DIRECT success can still replace that.
-     *
-     * [sendsSentCopy] is true only when this propagated send is the message's
-     * first and only dispatch (a distro recipient, no DIRECT attempt); the
-     * DIRECT path sends its §17.11 sent-copy itself, so a fallback behind it
-     * must not send a second one.
+     * same) once no DIRECT attempt is left ([propagatedCopyNotSent]); a DIRECT
+     * success can still replace that.
      */
     private suspend fun sendPropagatedCopy(
         localId: String,
-        destHash: ByteArray,
-        content: String,
-        attachments: List<Pair<String, ByteArray>>,
-        sendsSentCopy: Boolean,
+        directHandle: Long,
+        createCopy: () -> Long,
+        onSent: () -> Unit = {},
     ) {
         try {
             val current = messageDao.findById(localId) ?: return
@@ -803,13 +840,13 @@ class ChatRepository(
 
             if (!stackReady()) {
                 Log.w(TAG, "propagated: stack not ready — $localId not sent")
-                failUnlessSucceeded(localId)
+                propagatedCopyNotSent(localId, directHandle)
                 return
             }
 
             val nodeHash = selectPropagationNode()
             if (nodeHash == null) {
-                failUnlessSucceeded(localId)
+                propagatedCopyNotSent(localId, directHandle)
                 return
             }
 
@@ -819,35 +856,23 @@ class ChatRepository(
                     "via ${nodeHash.toHex().take(16)}"
             )
 
-            val (sendSrc, sendIdentity) = DistroManager.sendingIdentity(selfDestHash, identityHandle)
-            val propHandle = RetichatBridge.messageCreate(
-                destHash = destHash,
-                srcHash = sendSrc,
-                content = content,
-                method = RetichatBridge.DeliveryMethod.PROPAGATED,
-                identityHandle = sendIdentity,
-            )
+            val propHandle = createCopy()
             if (propHandle == 0L) {
-                Log.e(TAG, "propagated: messageCreate failed: ${RetichatBridge.lastError()}")
-                failUnlessSucceeded(localId)
+                Log.e(TAG, "propagated: no message for $localId: ${RetichatBridge.lastError()}")
+                propagatedCopyNotSent(localId, directHandle)
                 return
-            }
-            // Attachments go too, on purpose: iOS sends no copy for a message
-            // with attachments.
-            attachments.forEach { (name, data) ->
-                RetichatBridge.messageAddAttachment(propHandle, name, data)
             }
 
             val sent = RetichatBridge.messageSendViaAppLinks(propHandle)
             if (!sent) {
                 Log.e(TAG, "propagated: messageSendViaAppLinks failed: ${RetichatBridge.lastError()}")
                 RetichatBridge.messageDestroy(propHandle)
-                failUnlessSucceeded(localId)
+                propagatedCopyNotSent(localId, directHandle)
                 return
             }
             // The copy's own late proof upgrades the same bubble.
             rememberDeliveryTarget(propHandle, DeliveryTargets.Target.Row(localId))
-            if (sendsSentCopy) sendDistroSentCopy(destHash, sendSrc, title = "", content = content)
+            onSent()
 
             // Re-point the bubble at the propagated handle and continue polling,
             // BUT only if the direct send hasn't already succeeded.  If direct
@@ -856,8 +881,14 @@ class ChatRepository(
             // a DELIVERED written between a read and a write would be lost.
             // Until 2026-09-24 a copy that was already SENT here was skipped
             // and the bubble stayed on the direct attempt's SENDING arrow; the
-            // bubble now shows the copy's state whatever it is.
+            // bubble now shows the copy's state, unless the copy has already
+            // failed: then it never takes the bubble, as if it had not gone out.
             val newState = RetichatBridge.messageGetState(propHandle)
+            if (isFailureState(newState)) {
+                Log.w(TAG, "propagated: copy of $localId failed at once (state=$newState)")
+                propagatedCopyNotSent(localId, directHandle)
+                return
+            }
             if (messageDao.takeOverUnlessSucceeded(localId, propHandle, newState) == 0) {
                 Log.d(TAG, "propagated: direct already succeeded for $localId — discarding prop handle")
                 RetichatBridge.messageDestroy(propHandle)
@@ -873,7 +904,10 @@ class ChatRepository(
                         // recipient when they next announce).  Use the long deadline
                         // so the poll doesn't mark FAILED before Rust delivers it.
                         // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1
-                        pollMessageState(localId, propHandle, initialDeadlineMs = 600_000L)
+                        pollMessageState(
+                            localId, propHandle, initialDeadlineMs = 600_000L,
+                            directHandle = directHandle,
+                        )
                     } catch (e: Exception) {
                         Log.e(TAG, "propagated: state poll failed $localId: ${e.message}")
                         failUnlessSucceeded(localId)
@@ -882,8 +916,49 @@ class ChatRepository(
             }
         } catch (e: Exception) {
             Log.e(TAG, "propagated: exception for $localId: ${e.message}", e)
-            failUnlessSucceeded(localId)
+            propagatedCopyNotSent(localId, directHandle)
         }
+    }
+
+    /**
+     * [localId]'s propagated copy could not go out, so it never took the
+     * bubble. The message has failed only if the DIRECT attempt [directHandle]
+     * (0: a distro recipient's only send, there is none) has ended without
+     * success. While it is in flight the bubble stays on it and its poll,
+     * still running, writes the outcome ([PropagationFallbacks.directKeepsTheBubble]).
+     * Until 2026-09-24 the bubble showed FAILED with the DIRECT attempt still
+     * running.
+     */
+    private suspend fun propagatedCopyNotSent(localId: String, directHandle: Long) {
+        if (directHandle != 0L &&
+            PropagationFallbacks.directKeepsTheBubble(RetichatBridge.messageGetState(directHandle))
+        ) {
+            Log.i(TAG, "propagated: copy of $localId not sent — the DIRECT attempt keeps the bubble")
+            return
+        }
+        failUnlessSucceeded(localId)
+    }
+
+    /**
+     * The propagated copy of [localId], which held the bubble, ended in
+     * [copyState]. Both attempts share one hash, so this is the message's
+     * failure only if the DIRECT attempt [directHandle] has ended without
+     * success too. Otherwise the bubble goes back to it (one conditional
+     * UPDATE: never over a success) and a plain poll follows it, whose failure
+     * is written: its own poll left when the copy took the bubble over.
+     * Until 2026-09-24 the copy's failure was shown while the DIRECT attempt
+     * was still running.
+     */
+    private suspend fun propagatedCopyFailed(localId: String, directHandle: Long, copyState: Int) {
+        val directState = RetichatBridge.messageGetState(directHandle)
+        if (!PropagationFallbacks.directKeepsTheBubble(directState)) {
+            Log.i(TAG, "pollState: propagated copy of $localId ended in state=$copyState, DIRECT in state=$directState — failed")
+            messageDao.updateStateUnlessSucceeded(localId, copyState)
+            return
+        }
+        if (messageDao.takeOverUnlessSucceeded(localId, directHandle, directState) == 0) return
+        Log.i(TAG, "pollState: propagated copy of $localId ended in state=$copyState — back to the DIRECT attempt (state=$directState)")
+        pollMessageState(localId, directHandle)
     }
 
     /**

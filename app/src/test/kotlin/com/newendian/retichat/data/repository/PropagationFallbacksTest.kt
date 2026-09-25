@@ -12,7 +12,7 @@ import org.junit.Test
  * on iOS: 0x10 or a DIRECT failure, whichever comes first, once per message.
  */
 class PropagationFallbacksTest {
-    private fun send(id: String) = PropagationFallbacks.Send(id, ByteArray(16), "hi")
+    private fun send(id: String) = PropagationFallbacks.Send(id, directHandle = 1L)
 
     @Test
     fun fallbackRequestStartsTheCopyOnceAndKeepsFollowingTheDirectSend() {
@@ -159,5 +159,61 @@ class PropagationFallbacksTest {
         }
         // out_1 was forgotten, oldest first, so a later report for it starts again.
         assertSame(m1, fallbacks.onState("h1", MessageState.FAILED))
+    }
+
+    @Test
+    fun theCopysReportsUnderTheSharedHashStartNothing() {
+        // The copy is a clone of the DIRECT message: its SENT and FAILED come
+        // under the hash followed for the DIRECT send.
+        val fallbacks = PropagationFallbacks()
+        val m1 = send("out_1")
+        fallbacks.track("h1", m1)
+        assertSame(m1, fallbacks.onState("h1", MessageState.PROP_FALLBACK_REQUESTED))
+        assertNull("the copy failed", fallbacks.onState("h1", MessageState.FAILED))
+        assertNull("then the DIRECT attempt", fallbacks.onState("h1", MessageState.FAILED))
+        assertNull(fallbacks.onPolledState("h1", MessageState.FAILED))
+
+        val m2 = send("out_2")
+        fallbacks.track("h2", m2)
+        assertSame(m2, fallbacks.onState("h2", MessageState.PROP_FALLBACK_REQUESTED))
+        assertNull("the node took the copy", fallbacks.onState("h2", MessageState.SENT))
+        assertNull("the DIRECT attempt failed after", fallbacks.onState("h2", MessageState.FAILED))
+        assertNull(fallbacks.onPolledState("h2", MessageState.FAILED))
+    }
+
+    @Test
+    fun aCopyStartedByTheDirectFailureStartsNothingWhenItReports() {
+        val fallbacks = PropagationFallbacks()
+        val m1 = send("out_1")
+        fallbacks.track("h1", m1)
+        assertSame(m1, fallbacks.onState("h1", MessageState.FAILED))
+        assertNull("the copy failed", fallbacks.onState("h1", MessageState.FAILED))
+        assertNull("the node took the copy", fallbacks.onState("h1", MessageState.SENT))
+        assertNull(fallbacks.onPolledState("h1", MessageState.FAILED))
+        assertFalse(fallbacks.isTracked("h1"))
+    }
+
+    @Test
+    fun aFailedCopyHandsTheBubbleBackToADirectAttemptInFlight() {
+        // One hash for both attempts: the copy's failure is not the message's
+        // while the DIRECT attempt can still deliver it.
+        for (state in intArrayOf(MessageState.GENERATING, MessageState.OUTBOUND, MessageState.SENDING)) {
+            assertTrue("DIRECT in state $state", PropagationFallbacks.directKeepsTheBubble(state))
+        }
+    }
+
+    @Test
+    fun aFailedCopyNeverFailsADirectAttemptThatSucceeded() {
+        assertTrue(PropagationFallbacks.directKeepsTheBubble(MessageState.DELIVERED))
+        assertTrue(PropagationFallbacks.directKeepsTheBubble(MessageState.SENT))
+    }
+
+    @Test
+    fun aFailedCopyFailsTheMessageOnceTheDirectAttemptHasEnded() {
+        for (state in intArrayOf(MessageState.FAILED, MessageState.REJECTED, MessageState.CANCELLED)) {
+            assertFalse("DIRECT in state $state", PropagationFallbacks.directKeepsTheBubble(state))
+        }
+        // messageGetState's -1: the DIRECT handle can not be followed.
+        assertFalse(PropagationFallbacks.directKeepsTheBubble(-1))
     }
 }
