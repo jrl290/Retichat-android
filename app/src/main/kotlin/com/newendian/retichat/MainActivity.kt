@@ -19,7 +19,6 @@ import androidx.navigation.compose.rememberNavController
 import com.newendian.retichat.data.model.Contact
 import com.newendian.retichat.data.model.hexToBytes
 import com.newendian.retichat.service.MessageNotificationHelper
-import com.newendian.retichat.service.StackRuntime
 import com.newendian.retichat.ui.navigation.RetichatNavHost
 import com.newendian.retichat.ui.navigation.Routes
 import com.newendian.retichat.ui.theme.RetichatTheme
@@ -51,10 +50,8 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // Bring the Reticulum stack up while the app is visible.
-        // StackRuntime is reference-counted; release happens in onStop.
-        val app = applicationContext as RetichatApp
-        app.applicationScope.launch { StackRuntime.acquire(applicationContext) }
+        // The stack is held while the app is on screen by RetichatApp's
+        // ForegroundHold, not per activity (a rotation would re-take it).
 
         setContent {
             RetichatTheme {
@@ -114,18 +111,6 @@ class MainActivity : ComponentActivity() {
                 launchSingleTop = true
             }
         }
-    }
-
-    override fun onStart() {
-        super.onStart()
-        val app = applicationContext as RetichatApp
-        app.applicationScope.launch { StackRuntime.acquire(applicationContext) }
-    }
-
-    override fun onStop() {
-        super.onStop()
-        // Ref-counted: schedules a delayed shutdown if no other holders.
-        StackRuntime.release()
     }
 
     companion object {

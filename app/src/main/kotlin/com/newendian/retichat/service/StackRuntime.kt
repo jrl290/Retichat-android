@@ -10,40 +10,42 @@ import com.newendian.retichat.bridge.RetichatBridge
 import com.newendian.retichat.bridge.RfedBlobCallback
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * Reference-counted owner of the Reticulum + LXMF + RFed-delivery handles.
+ * Owner of the Reticulum + LXMF + RFed-delivery handles.
  *
  * Replaces the old [ReticulumService]/[PersistentConnectionService] pair.
- * The stack is brought up the first time a caller [acquire]s and torn down
- * a few seconds after the final [release] (grace period prevents thrash
- * when the user backgrounds + foregrounds quickly).
+ * The stack is brought up the first time a caller [acquire]s and lives for
+ * the life of the process (D7, 2026-09-25). Coming back on screen does not
+ * re-initialize it: a shutdown resets announce history (Reticulum-rust
+ * ffi.rs), so every start after one re-announced every destination on every
+ * interface. Only a Settings [restart], a user action, stops it. In the
+ * background the cached-apps freezer stops its threads where the device has
+ * the freezer on; not every device at minSdk 31 does, and there a cached
+ * process keeps its interfaces up until it dies (the 30 s grace shutdown
+ * used to stop them).
  *
- * Lifecycle entry points:
- *   - [MainActivity.onStart]              → acquire / release on stop
- *   - [WakeWorker]                        → acquire while running, release when done
- *   - [PropagationPollWorker]             → (legacy) replaced by WakeWorker
+ * Holders are counted, each acquire given back by exactly one release; the
+ * count says who is using the stack and a release nobody took is logged. It
+ * never stops the stack:
+ *   - the app while it is on screen → [ForegroundHold] on ProcessLifecycleOwner
+ *   - [WakeWorker]                  → for one wake
+ *   - a send or FCM token refresh that finds the stack down → [holding]
  *
  * No foreground service, no persistent notification.
  */
 object StackRuntime {
 
     private const val TAG = "StackRuntime"
-    /** How long to keep the stack warm after the last release(). */
-private const val GRACE_SHUTDOWN_MS = 30_000L  // 30s grace avoids stack teardown on brief background flaps
 
     private val refCount = AtomicInteger(0)
     private val initLock = Mutex()
-    private var shutdownJob: Job? = null
 
     /** Blocks waiters on the very first acquire until the stack is ready. */
     @Volatile private var readyDeferred: CompletableDeferred<Boolean>? = null
@@ -60,15 +62,38 @@ private const val GRACE_SHUTDOWN_MS = 30_000L  // 30s grace avoids stack teardow
     @Volatile var isReady: Boolean = false
         private set
 
-    /** Increment the ref count. If first acquirer, start the stack. Suspends until ready. */
+    /**
+     * Take a hold and start the stack if it is not running. Suspends until
+     * it is ready. The hold is counted first, before anything can suspend or
+     * throw, so a caller owes the release from the moment it calls this; use
+     * [holding], which pays it on every path.
+     */
     suspend fun acquire(context: Context): Boolean {
-        // Cancel any pending shutdown
-        shutdownJob?.cancel()
-        shutdownJob = null
+        countAcquire()
+        return start(context)
+    }
 
+    /**
+     * [acquire] for a lifecycle callback, which cannot suspend: the hold is
+     * counted on the caller's thread before this returns, so the matching
+     * [release] can never run first (§5). The start runs on the app scope.
+     */
+    fun acquireFromCallback(context: Context) {
+        countAcquire()
+        val app = context.applicationContext as RetichatApp
+        app.applicationScope.launch { start(app) }
+    }
+
+    /** Hold the stack for [block], told whether it is ready; released once on every path. */
+    suspend fun <T> holding(context: Context, block: suspend (ready: Boolean) -> T): T =
+        holdingStack({ acquire(context) }, ::release, block)
+
+    private fun countAcquire() {
         val newCount = refCount.incrementAndGet()
         Log.d(TAG, "acquire: refCount=$newCount")
+    }
 
+    private suspend fun start(context: Context): Boolean {
         val ready = startIfNeeded(context.applicationContext)
         if (ready) {
             (context.applicationContext as? RetichatApp)?.onStackReadyWhileForeground()
@@ -76,29 +101,18 @@ private const val GRACE_SHUTDOWN_MS = 30_000L  // 30s grace avoids stack teardow
         return ready
     }
 
-    /** Synchronous variant for callers without a coroutine scope. */
-    fun acquireBlocking(context: Context): Boolean = runBlocking { acquire(context) }
-
-    /** Decrement the ref count. If it hits zero, schedule a graceful shutdown. */
+    /**
+     * Give a hold back. The stack stays up at zero (D7): no holder's release,
+     * a WakeWorker's included, can stop it under a visible Activity.
+     */
     fun release() {
-        val newCount = refCount.decrementAndGet()
-        Log.d(TAG, "release: refCount=$newCount")
-        if (newCount > 0) return
-        if (newCount < 0) {
-            refCount.set(0)
+        val before = refCount.getAndUpdate { if (it > 0) it - 1 else 0 }
+        if (before == 0) {
+            // A holder released twice, or released a hold it never took.
+            Log.e(TAG, "release: refCount=0 — a release with no hold to give back")
             return
         }
-
-        // Schedule a delayed shutdown so a quick foreground/background flap
-        // doesn't tear down + re-init the stack.
-        val app = (RetichatApp.appInstance ?: return)
-        shutdownJob = app.applicationScope.launch(Dispatchers.IO) {
-            delay(GRACE_SHUTDOWN_MS)
-            if (!isActive) return@launch
-            if (refCount.get() == 0) {
-                shutdownNow(app)
-            }
-        }
+        Log.d(TAG, "release: refCount=${before - 1}")
     }
 
     /** A bootstrap is running: its ready signal (onStackReady) will come. */
@@ -153,7 +167,10 @@ private const val GRACE_SHUTDOWN_MS = 30_000L  // 30s grace avoids stack teardow
         val configDir = File(app.filesDir, "reticulum").also { it.mkdirs() }
 
         // Read enabled interfaces; if none are configured, inject the same
-        // three invisible fallback backbones that iOS uses.
+        // three invisible fallback backbones that iOS uses. They are probed
+        // once per start, so with D7 once per process: a set padded while
+        // offline, or a backbone that dies later, stays until a Settings
+        // restart or process death.
         var interfaces = app.database.interfaceConfigDao().enabledInterfaces()
         val useDefault = interfaces.isEmpty() && UserPreferences.isDefaultTcpEnabled(app)
         if (useDefault) {
@@ -366,27 +383,17 @@ private const val GRACE_SHUTDOWN_MS = 30_000L  // 30s grace avoids stack teardow
     /**
      * Settings "Restart": tear the stack down and bring it straight back up so
      * new interface / RFed settings take effect. Holders keep their references
-     * (the activity that is open still owns one), so the count is untouched.
+     * (the app on screen still owns one), so the count is untouched. The only
+     * stop in the process's life (D7).
      *
-     * Until 2026-09-24 the button called [forceShutdown], which zeroed the
-     * count and waited for some later acquire() to re-bootstrap; with the app
-     * already in the foreground nothing acquired again and the status stayed
-     * "Not started".
+     * Until 2026-09-24 the button called forceShutdown (removed 2026-09-25),
+     * which zeroed the count and waited for some later acquire() to
+     * re-bootstrap; with the app already in the foreground nothing acquired
+     * again and the status stayed "Not started".
      */
     suspend fun restart(context: Context): Boolean {
         val app = context.applicationContext as RetichatApp
-        shutdownJob?.cancel()
-        shutdownJob = null
         initLock.withLock { shutdownNow(app) }
         return startIfNeeded(app)
-    }
-
-    /** Force teardown ignoring ref count; only used by tests. */
-    fun forceShutdown(context: Context) {
-        val app = context.applicationContext as RetichatApp
-        refCount.set(0)
-        shutdownJob?.cancel()
-        shutdownJob = null
-        shutdownNow(app)
     }
 }

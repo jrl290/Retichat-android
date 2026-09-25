@@ -19,7 +19,9 @@ android {
 
     defaultConfig {
         applicationId = "com.newendian.retichat"
-        minSdk = 26
+        // Android 12 and up (2026-09-25). WakeWorker relies on it: below 31
+        // WorkManager asks an expedited worker for getForegroundInfo.
+        minSdk = 31
         targetSdk = 35
         versionCode = 6
         versionName = "0.1.4"
@@ -69,6 +71,7 @@ dependencies {
     // Lifecycle
     implementation(libs.androidx.lifecycle.runtime)
     implementation(libs.androidx.lifecycle.viewmodel)
+    implementation(libs.androidx.lifecycle.process)
 
     // Compose
     implementation(platform(libs.compose.bom))

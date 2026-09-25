@@ -5,7 +5,6 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
-import android.os.Build
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.Person
@@ -41,21 +40,19 @@ object MessageNotificationHelper {
      * Create the notification channel (idempotent, safe to call multiple times).
      */
     fun createChannel(context: Context) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val name = context.getString(R.string.notification_channel_messages)
-            val desc = context.getString(R.string.notification_channel_messages_desc)
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                name,
-                NotificationManager.IMPORTANCE_HIGH,
-            ).apply {
-                description = desc
-                enableVibration(true)
-                setShowBadge(true)
-            }
-            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            nm.createNotificationChannel(channel)
+        val name = context.getString(R.string.notification_channel_messages)
+        val desc = context.getString(R.string.notification_channel_messages_desc)
+        val channel = NotificationChannel(
+            CHANNEL_ID,
+            name,
+            NotificationManager.IMPORTANCE_HIGH,
+        ).apply {
+            description = desc
+            enableVibration(true)
+            setShowBadge(true)
         }
+        val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        nm.createNotificationChannel(channel)
     }
 
     /**

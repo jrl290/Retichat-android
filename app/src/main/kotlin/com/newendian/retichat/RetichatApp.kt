@@ -4,11 +4,13 @@ import android.app.Activity
 import android.app.Application
 import android.os.Bundle
 import android.util.Log
+import androidx.lifecycle.ProcessLifecycleOwner
 import com.newendian.retichat.bridge.RetichatBridge
 import com.newendian.retichat.data.db.RetichatDatabase
 import com.newendian.retichat.data.repository.ChatRepository
 import com.newendian.retichat.service.MessageNotificationHelper
 import com.newendian.retichat.service.ConnectionStateManager
+import com.newendian.retichat.service.ForegroundHold
 import com.newendian.retichat.service.NetworkMonitor
 import com.newendian.retichat.service.PropagationSync
 import com.newendian.retichat.service.RfedChannelClient
@@ -47,9 +49,8 @@ class RetichatApp : Application() {
         @Volatile var activeChatId: String? = null
 
         /**
-         * Process-wide application instance, available without a Context.
-         * Used by [com.newendian.retichat.service.StackRuntime] to schedule its
-         * delayed shutdown without keeping a leaking Activity reference.
+         * Process-wide application instance, available without a Context,
+         * so services need not keep a leaking Activity reference.
          */
         @Volatile var appInstance: RetichatApp? = null
             private set
@@ -84,6 +85,16 @@ class RetichatApp : Application() {
 
         MessageNotificationHelper.createChannel(this)
         NetworkMonitor.register(this)
+
+        // The app holds the stack while it is on screen; this also starts it
+        // on first launch. Not per activity: a rotation stops one and starts
+        // another, and ProcessLifecycleOwner reports neither.
+        ProcessLifecycleOwner.get().lifecycle.addObserver(
+            ForegroundHold(
+                acquire = { StackRuntime.acquireFromCallback(this) },
+                release = StackRuntime::release,
+            )
+        )
 
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
             private var startedActivities = 0

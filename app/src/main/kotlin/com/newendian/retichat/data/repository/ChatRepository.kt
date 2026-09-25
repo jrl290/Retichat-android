@@ -453,18 +453,23 @@ class ChatRepository(
                         return@launch
                     }
                     // A bootstrap already running flushes the queue when it
-                    // finishes; a reference taken here would never be released.
+                    // finishes.
                     if (StackRuntime.isStarting) {
                         Log.i(TAG, "sendDirect: stack starting — queued until it is ready")
                         return@launch
                     }
                     Log.i(TAG, "sendDirect: stack not ready — queued, acquiring")
-                    if (!StackRuntime.acquire(appContext)) {
-                        Log.e(TAG, "sendDirect: acquire failed — message stays queued")
-                        return@launch
+                    // Held only while it starts and the queue goes out: the
+                    // stack then stays up (D7). Until 2026-09-25 this hold was
+                    // never given back.
+                    StackRuntime.holding(appContext) { ready ->
+                        if (!ready) {
+                            Log.e(TAG, "sendDirect: acquire failed — message stays queued")
+                            return@holding
+                        }
+                        // A stack that was already up sends no ready signal.
+                        if (StackRuntime.isReady) flushPendingMessages()
                     }
-                    // A stack that was already up sends no ready signal.
-                    if (StackRuntime.isReady) flushPendingMessages()
                     return@launch
                 }
                 dispatch(localId, destHash, content, attachments, fromQueue = false)

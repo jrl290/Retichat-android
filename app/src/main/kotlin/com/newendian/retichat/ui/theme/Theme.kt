@@ -1,6 +1,5 @@
 package com.newendian.retichat.ui.theme
 
-import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
@@ -50,7 +49,7 @@ fun RetichatTheme(
     content: @Composable () -> Unit,
 ) {
     val colorScheme = when {
-        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
+        dynamicColor -> {
             val ctx = LocalContext.current
             if (darkTheme) dynamicDarkColorScheme(ctx)
             else dynamicLightColorScheme(ctx)

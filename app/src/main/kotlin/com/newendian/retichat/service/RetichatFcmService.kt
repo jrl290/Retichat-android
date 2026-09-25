@@ -31,13 +31,10 @@ class RetichatFcmService : FirebaseMessagingService() {
         // Re-register with fcm.register so the new token replaces the old.
         val app = applicationContext as? RetichatApp ?: return
         app.applicationScope.launch(Dispatchers.IO) {
-            val acquired = StackRuntime.acquire(applicationContext)
-            try {
+            StackRuntime.holding(applicationContext) { acquired ->
                 if (acquired && StackRuntime.selfDestHash.size == 16) {
                     FcmTokenRegistrar.registerIfNeeded(applicationContext, StackRuntime.selfDestHash)
                 }
-            } finally {
-                StackRuntime.release()
             }
         }
     }

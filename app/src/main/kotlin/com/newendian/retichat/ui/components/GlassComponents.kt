@@ -2,7 +2,6 @@ package com.newendian.retichat.ui.components
 
 import android.graphics.RenderEffect
 import android.graphics.Shader
-import android.os.Build
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -24,9 +23,8 @@ import androidx.compose.ui.unit.dp
 import com.newendian.retichat.ui.theme.*
 
 /**
- * A frosted-glass surface inspired by Apple's Liquid Glass design language.
- * On API 31+ uses RenderEffect blur; on older devices falls back to a
- * semi-transparent gradient.
+ * A frosted-glass surface inspired by Apple's Liquid Glass design language:
+ * a RenderEffect blur under a semi-transparent gradient.
  */
 @Composable
 fun GlassSurface(
@@ -39,18 +37,14 @@ fun GlassSurface(
     Box(
         modifier = modifier
             .shadow(8.dp, shape, ambientColor = Color.Black.copy(alpha = 0.08f))
-            .then(
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    Modifier.graphicsLayer {
-                        renderEffect = RenderEffect
-                            .createBlurEffect(
-                                blurRadius.toPx(), blurRadius.toPx(),
-                                Shader.TileMode.CLAMP
-                            )
-                            .asComposeRenderEffect()
-                    }
-                } else Modifier
-            )
+            .graphicsLayer {
+                renderEffect = RenderEffect
+                    .createBlurEffect(
+                        blurRadius.toPx(), blurRadius.toPx(),
+                        Shader.TileMode.CLAMP
+                    )
+                    .asComposeRenderEffect()
+            }
             .clip(shape)
             .background(
                 Brush.verticalGradient(
