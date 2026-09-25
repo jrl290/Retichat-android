@@ -186,6 +186,11 @@ object ConnectionStateManager {
     }
 
     private val networkAvailableListener: () -> Unit = {
+        // The TCP interfaces first: their reconnect loops sleep out a backoff
+        // of up to 5 min unless woken (iOS NetworkMonitor.onConnect does the
+        // same). The links follow when an interface comes back online
+        // (AppLinks subscribes to Transport's up-edge).
+        RetichatBridge.nudgeReconnect()
         val rh = routerHandle
         if (rh != 0L) {
             scope.launch(Dispatchers.IO) {

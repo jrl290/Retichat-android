@@ -1865,6 +1865,20 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeA
     ))
 }
 
+/// `RetichatBridge.nativeNudgeReconnect()`
+///
+/// Wake every TCP interface's reconnect loop now (or cut its next wait
+/// short if it is mid-attempt) instead of letting it sleep out its backoff,
+/// up to 5 min. Call when the network is usable again: a new network, or
+/// the OS lifting its block on this app's network. iOS: `rns_nudge_reconnect`.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeNudgeReconnect(
+    _env: JNIEnv,
+    _class: JClass,
+) {
+    reticulum_rust::interfaces::tcp_interface::nudge_reconnect();
+}
+
 /// `RetichatBridge.nativeAppLinkNetworkChanged(router): Int`
 ///
 /// Triggers ONE fresh attempt for every registered app-link not

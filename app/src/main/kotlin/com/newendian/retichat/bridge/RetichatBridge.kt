@@ -637,6 +637,13 @@ object RetichatBridge {
         nativeAppLinkNetworkChanged(routerHandle) == 0
 
     /**
+     * Wake the TCP interfaces' reconnect loops now instead of after their
+     * backoff (up to 5 min). Call when the network is usable again. iOS:
+     * `RetichatBridge.nudgeReconnect` (`rns_nudge_reconnect`).
+     */
+    fun nudgeReconnect() = nativeNudgeReconnect()
+
+    /**
      * Register a process-wide [AppLinkStatusCallback]. Last register wins.
      * Should be called once during stack initialization (StackRuntime
      * → ConnectionStateManager.register).
@@ -699,6 +706,7 @@ object RetichatBridge {
     private external fun nativeAppLinkReopen(router: Long, destHash: ByteArray): Int
     private external fun nativeAppLinkRegisterReconnect(router: Long, aspect: String): Int
     private external fun nativeAppLinkNetworkChanged(router: Long): Int
+    private external fun nativeNudgeReconnect()
     private external fun nativeAppLinkRegisterStatusCallback(
         router: Long, callback: AppLinkStatusCallback
     ): Int

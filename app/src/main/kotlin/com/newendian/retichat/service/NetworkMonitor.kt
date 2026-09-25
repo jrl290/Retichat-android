@@ -4,15 +4,14 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
-import android.net.NetworkRequest
 import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /**
- * Singleton that monitors system network availability via
- * [ConnectivityManager.NetworkCallback].
+ * Singleton that monitors the default network — the one the stack's sockets
+ * use — via [ConnectivityManager.NetworkCallback].
  *
  * Exposes [isOnline] as a [StateFlow] that UI and service layers
  * can observe. Also provides a listener list so [ReticulumService]
@@ -26,6 +25,9 @@ object NetworkMonitor {
     val isOnline: StateFlow<Boolean> = _isOnline.asStateFlow()
 
     private var registered = false
+
+    /** Networks the OS reports as blocked for this app; see onBlockedStatusChanged. */
+    private val blocks = NetworkBlocks()
 
     /** Listeners invoked on the connectivity-manager callback thread. */
     private val onAvailableListeners = mutableListOf<() -> Unit>()
@@ -52,11 +54,12 @@ object NetworkMonitor {
         _isOnline.value = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
         Log.d(TAG, "Initial network state: online=${_isOnline.value}")
 
-        val request = NetworkRequest.Builder()
-            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            .build()
-
-        cm.registerNetworkCallback(request, object : ConnectivityManager.NetworkCallback() {
+        // The default network, not every network with INTERNET. On
+        // 2026-09-25 Wi-Fi came back while cellular was still the default:
+        // onAvailable(Wi-Fi) woke the TCP interface 2 s before Wi-Fi became
+        // the default, Android aborted that connect when it did
+        // (ECONNABORTED), and the doubled backoff kept RFed down 160 s more.
+        cm.registerDefaultNetworkCallback(object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
                 Log.d(TAG, "Network available")
                 _isOnline.value = true
@@ -65,7 +68,22 @@ object NetworkMonitor {
                 }
             }
 
+            // Android blocks a backgrounded app's network (no foreground
+            // service) without losing the network, so onAvailable does not
+            // fire again when the block lifts. Until 2026-09-25 nothing told
+            // the app: the TCP interface slept out its reconnect backoff and
+            // the RFed links stayed down after the user opened it.
+            override fun onBlockedStatusChanged(network: Network, blocked: Boolean) {
+                if (blocks.update(network, blocked)) {
+                    Log.d(TAG, "Network access unblocked")
+                    synchronized(onAvailableListeners) {
+                        onAvailableListeners.forEach { it() }
+                    }
+                }
+            }
+
             override fun onLost(network: Network) {
+                blocks.forget(network)
                 // Check if there's still another active network
                 val stillActive = cm.activeNetwork
                 val stillCaps = if (stillActive != null) cm.getNetworkCapabilities(stillActive) else null
