@@ -11,7 +11,6 @@ import com.newendian.retichat.service.DistroCodec
 import com.newendian.retichat.service.DistroManager
 import com.newendian.retichat.service.RfedDistroClient
 import com.newendian.retichat.bridge.RetichatBridge
-import com.newendian.retichat.service.ConnectionStateManager
 import com.newendian.retichat.service.GroupChatManager
 import com.newendian.retichat.service.MessageNotificationHelper
 import com.newendian.retichat.service.NetworkMonitor
@@ -69,16 +68,28 @@ class ChatRepository(
             GroupChatManager(appContext, scope, selfHash, router, identity)
         } else null
 
-        // When the service comes up (or network returns), flush queued messages
-        if (router != 0L) {
-            scope.launch(Dispatchers.IO) { flushPendingMessages() }
-        }
+        // Queued messages wait for onStackReady(), not for this: bootstrap
+        // calls configure() before the message-state callback and
+        // ConnectionStateManager are registered.
+        // A stopped router reports nothing more on the sends it had.
+        if (router == 0L) propagationFallbacks.clear()
 
         // Mark any stale GENERATING/OUTBOUND/SENDING messages as FAILED.
         // These are leftovers from a previous session that never completed.
         scope.launch(Dispatchers.IO) {
             messageDao.failStaleOutbound()
         }
+    }
+
+    /**
+     * StackRuntime's bootstrap has finished, so the messages queued while it
+     * ran go out now (§5: the queue waits for this signal). Not from
+     * [configure], which bootstrap calls before the message-state callback
+     * and ConnectionStateManager are registered: a message flushed from there
+     * lost its router reports, its propagated fallback among them.
+     */
+    fun onStackReady() {
+        scope.launch(Dispatchers.IO) { flushPendingMessages() }
     }
 
     fun onMessageState(hash: ByteArray, state: Int) {
@@ -89,6 +100,10 @@ class ChatRepository(
                 scope.launch(Dispatchers.IO) { recordDelivered(target) }
             }
         }
+        // The router reports 0x10 and FAILED holding its lock and this
+        // message's, so the copy is sent from IO: a message call made on this
+        // thread would wait on those locks forever.
+        propagationFallbacks.onState(hashHex, state)?.let(::startPropagatedCopy)
         groupChatManager?.onMessageState(hash, state)
     }
 
@@ -155,6 +170,9 @@ class ChatRepository(
      * Before the init block too: a flush started from there records targets.
      */
     private val deliveryTargets = DeliveryTargets()
+
+    /** When a DIRECT send's propagated copy starts; see [PropagationFallbacks]. */
+    private val propagationFallbacks = PropagationFallbacks()
 
     /** Network-available listener, registered once. */
     private val networkListener: () -> Unit = {
@@ -308,15 +326,16 @@ class ChatRepository(
         messageDao.messagesForChat(chatId)
 
     /**
-     * Send all messages that were queued while offline (state == OUTBOUND,
-     * no native handle). Called when network becomes available or when the
-     * service (re-)initialises. Both can fire together, so flushes are
-     * serialized and a flush that waited re-reads the queue (and readiness)
-     * after the one before it has ended.
+     * Send all messages that were queued while offline or while the stack was
+     * starting (state == OUTBOUND, no native handle). Called when the stack is
+     * ready ([onStackReady]), when network becomes available, and by a send
+     * that queued while the stack was starting. These can fire together, so
+     * flushes are serialized and a flush that waited re-reads the queue (and
+     * readiness) after the one before it has ended.
      */
     private suspend fun flushPendingMessages() = pendingFlush.run(
         pending = {
-            if (routerHandle == 0L || identityHandle == 0L || !NetworkMonitor.isOnline.value) {
+            if (!stackReady() || !NetworkMonitor.isOnline.value) {
                 emptyList()
             } else {
                 messageDao.pendingOutbound()
@@ -339,67 +358,18 @@ class ChatRepository(
                 continue
             }
 
-            val destHash = chat.memberHashes.hexToBytes()
             try {
-                // Register the AppLinks spec synchronously before send so
-                // the POB loop takes the AppLinks-owned DIRECT path (which
-                // sends LINKREQUEST in tier-3) instead of the legacy path
-                // (which may never create a link when no path is cached).
-                RetichatBridge.appLinkOpen(routerHandle, destHash, "lxmf", "delivery")
-
-                // Same identity as sendDirectMessage: a queued message is
-                // still the user's message, so with a distro held it goes
-                // out as the distro and replies reach every device.
-                val (sendSrc, sendIdentity) = DistroManager.sendingIdentity(selfDestHash, identityHandle)
-                val handle = RetichatBridge.messageCreate(
-                    destHash = destHash,
-                    srcHash = sendSrc,
+                // The same dispatch as a message sent with the stack up: a
+                // queued message still goes PROPAGATED to a distro recipient,
+                // keeps its attachments, and has the propagated fallback
+                // behind its DIRECT attempt.
+                dispatch(
+                    localId = msg.id,
+                    destHash = chat.memberHashes.hexToBytes(),
                     content = msg.content,
-                    method = RetichatBridge.DeliveryMethod.DIRECT,
-                    identityHandle = sendIdentity,
+                    attachments = queuedAttachments(msg.id),
+                    fromQueue = true,
                 )
-                if (handle == 0L) {
-                    messageDao.updateState(msg.id, RetichatBridge.MessageState.FAILED)
-                    continue
-                }
-                // Take the row before it goes out: the handle is recorded only
-                // if the row is still queued, and from then on it is out of
-                // pendingOutbound(), so no later flush sends it or its §17.11
-                // copy again, even if this send throws below.
-                if (messageDao.claimPendingOutbound(msg.id, handle) == 0) {
-                    Log.w(TAG, "flushPending: queued msg ${msg.id} already taken — not sent again")
-                    RetichatBridge.messageDestroy(handle)
-                    continue
-                }
-                val sent = RetichatBridge.messageSendViaAppLinks(handle)
-                if (!sent) {
-                    messageDao.updateState(msg.id, RetichatBridge.MessageState.FAILED)
-                    continue
-                }
-                rememberDeliveryTarget(handle, DeliveryTargets.Target.Row(msg.id))
-                // RFed SPEC §17.11: this is the queued message's dispatch
-                // (sendDirectMessage returned before sending it), and the
-                // flush has no propagated fallback, so this is its one copy
-                // (as in sendDirectMessage; iOS: ChatRepository.swift
-                // sendDistroSentCopy).
-                sendDistroSentCopy(destHash, sendSrc, title = "", content = msg.content)
-                // The claim above already recorded the handle.
-                val state = RetichatBridge.messageGetState(handle)
-                messageDao.updateState(msg.id, state)
-                if (!isTerminalState(state)) {
-                    // Followed outside the flush, as sendDirectMessage follows
-                    // each message on its own: the flush is serialized, and a
-                    // trigger waiting on it should wait for the dispatches,
-                    // not for every queued message's delivery outcome.
-                    scope.launch(Dispatchers.IO) {
-                        try {
-                            pollMessageState(msg.id, handle)
-                        } catch (e: Exception) {
-                            Log.e(TAG, "flushPending: state poll failed ${msg.id}: ${e.message}")
-                            messageDao.updateState(msg.id, RetichatBridge.MessageState.FAILED)
-                        }
-                    }
-                }
                 Log.d(TAG, "flushPending: sent queued msg ${msg.id}")
             } catch (e: Exception) {
                 Log.e(TAG, "flushPending: failed ${msg.id}: ${e.message}")
@@ -407,6 +377,15 @@ class ChatRepository(
             }
         }
     }
+
+    /**
+     * A queued message's attachments, read back from where
+     * [saveOutboundAttachments] stored them. A file that can not be read
+     * throws, and the flush shows the message failed rather than send it
+     * without the file.
+     */
+    private suspend fun queuedAttachments(msgId: String): List<Pair<String, ByteArray>> =
+        messageDao.attachmentsFor(msgId).map { it.filename to File(it.localPath).readBytes() }
 
     /**
      * Send a text message in a 1:1 or group chat.
@@ -458,125 +437,175 @@ class ChatRepository(
         // 2) Attempt native send in the background
         scope.launch(Dispatchers.IO) {
             try {
-                // Guard: stack may have been torn down (e.g. app briefly backgrounded).
-                // Re-acquire synchronously so the message goes out immediately rather
-                // than sitting in OUTBOUND until the user re-opens the app.
-                if (routerHandle == 0L || identityHandle == 0L) {
+                // Not initialized: the stack is down (e.g. app briefly
+                // backgrounded) or still starting. The message is queued
+                // until StackRuntime says it is ready (onStackReady), which
+                // is after the message-state callback and ConnectionStateManager
+                // are registered; configure() comes before both.
+                if (!stackReady()) {
+                    messageDao.updateState(localId, RetichatBridge.MessageState.OUTBOUND)
+                    // The ready signal may have flushed the queue between the
+                    // check above and the write: look again now that the row
+                    // is queued, or it waits for the next trigger.
+                    if (StackRuntime.isReady) flushPendingMessages()
                     if (!NetworkMonitor.isOnline.value) {
                         Log.i(TAG, "sendDirect: offline — queued for later")
-                        messageDao.updateState(localId, RetichatBridge.MessageState.OUTBOUND)
                         return@launch
                     }
-                    Log.i(TAG, "sendDirect: stack not ready — re-acquiring")
-                    messageDao.updateState(localId, RetichatBridge.MessageState.OUTBOUND)
-                    val ok = StackRuntime.acquire(appContext)
-                    if (!ok || routerHandle == 0L || identityHandle == 0L) {
-                        Log.e(TAG, "sendDirect: re-acquire failed — message stays queued")
+                    // A bootstrap already running flushes the queue when it
+                    // finishes; a reference taken here would never be released.
+                    if (StackRuntime.isStarting) {
+                        Log.i(TAG, "sendDirect: stack starting — queued until it is ready")
                         return@launch
                     }
-                    // configure() was called by bootstrap; pending messages are flushed
-                    // by flushPendingMessages() inside configure(). Our OUTBOUND message
-                    // will be picked up there — no need to continue here.
+                    Log.i(TAG, "sendDirect: stack not ready — queued, acquiring")
+                    if (!StackRuntime.acquire(appContext)) {
+                        Log.e(TAG, "sendDirect: acquire failed — message stays queued")
+                        return@launch
+                    }
+                    // A stack that was already up sends no ready signal.
+                    if (StackRuntime.isReady) flushPendingMessages()
                     return@launch
                 }
-
-                val readinessFailed = ConnectionStateManager.appLinkStatus(destHash) ==
-                    RetichatBridge.AppLinkStatus.DISCONNECTED
-                // A distro address has no device behind it to prove a direct
-                // link; RFed fans the message out from the propagation node
-                // (Retichat-js: propagationDelay 0 and no _sendPacket for
-                // isDistro contacts). The address says so in its announce
-                // (RFed SPEC §17.10); the preference is what past announces taught us.
-                if (RetichatBridge.peerIsDistro(destHash) ||
-                    UserPreferences.isDistroContact(appContext, destHash.toHex())
-                ) {
-                    Log.i(TAG, "sendDirect: ${destHash.toHex().take(16)} is a distro address — propagating")
-                    // No DIRECT attempt here, so the propagated send is this
-                    // message's only dispatch and carries the §17.11 sent-copy.
-                    schedulePropagationFallback(
-                        localId, destHash, content, attachments,
-                        immediate = true, sendsSentCopy = true,
-                    )
-                    return@launch
-                }
-
-                // Register the AppLinks spec synchronously on this IO thread
-                // BEFORE messageSendViaAppLinks triggers process_outbound.
-                // openConversation() is fire-and-forget via a separate coroutine
-                // scope and does NOT guarantee the spec is registered before the
-                // POB loop checks AppLinks::contains().  If contains() is false
-                // and Transport::has_path() is also false (fresh install, expired
-                // cache), the legacy DIRECT path only requests a path without
-                // creating a link — no LINKREQUEST is ever sent.  The synchronous
-                // call below closes that race.
-                // // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1
-                RetichatBridge.appLinkOpen(routerHandle, destHash, "lxmf", "delivery")
-                Log.d(TAG, "sendDirect: appLinkOpen OK, submitting DIRECT")
-
-                // Send as the distro identity when this device holds one
-                // (Retichat-js sendingIdentity()): replies then reach every device.
-                val (sendSrc, sendIdentity) = DistroManager.sendingIdentity(selfDestHash, identityHandle)
-                val msgHandle = RetichatBridge.messageCreate(
-                    destHash = destHash,
-                    srcHash = sendSrc,
-                    content = content,
-                    method = RetichatBridge.DeliveryMethod.DIRECT,
-                    identityHandle = sendIdentity,
-                )
-                if (msgHandle == 0L) {
-                    val err = RetichatBridge.lastError()
-                    Log.e(TAG, "sendDirect: messageCreate FAILED: $err")
-                    messageDao.updateState(localId, RetichatBridge.MessageState.FAILED)
-                    return@launch
-                }
-                Log.d(TAG, "sendDirect: messageCreate OK handle=$msgHandle")
-
-                attachments.forEach { (name, data) ->
-                    RetichatBridge.messageAddAttachment(msgHandle, name, data)
-                }
-
-                val sent = RetichatBridge.messageSendViaAppLinks(msgHandle)
-                Log.d(TAG, "sendDirect: messageSendViaAppLinks result=$sent")
-                if (!sent) {
-                    Log.e(TAG, "sendDirect: messageSendViaAppLinks FAILED: ${RetichatBridge.lastError()}")
-                    messageDao.updateState(localId, RetichatBridge.MessageState.FAILED)
-                    return@launch
-                }
-                rememberDeliveryTarget(msgHandle, DeliveryTargets.Target.Row(localId))
-
-                // RFed SPEC §17.11: the message is out, so tell our other
-                // devices. Sent here, where the DIRECT send is accepted, and
-                // never from the propagated fallback scheduled below: DIRECT
-                // plus fallback is still one message and gets one copy.
-                sendDistroSentCopy(destHash, sendSrc, title = "", content = content)
-
-                val state = RetichatBridge.messageGetState(msgHandle)
-                Log.d(TAG, "sendDirect: post-send state=$state")
-
-                // Update the bubble with the native handle and current state
-                messageDao.updateHandle(localId, msgHandle)
-                messageDao.updateState(localId, state)
-
-                // Mirror iOS: normally wait 5 s before the propagated copy,
-                // but if the current readiness was already red, start the
-                // propagation copy immediately while the direct cascade keeps running.
-                schedulePropagationFallback(
-                    localId,
-                    destHash,
-                    content,
-                    attachments,
-                    immediate = readinessFailed,
-                )
-
-                // 3) Poll until the native message reaches a terminal state
-                //    (SENT, DELIVERED, FAILED, REJECTED, CANCELLED).
-                //    The proof arrives async via the link; we need to notice it.
-                if (!isTerminalState(state)) {
-                    pollMessageState(localId, msgHandle)
-                }
+                dispatch(localId, destHash, content, attachments, fromQueue = false)
             } catch (e: Exception) {
                 Log.e(TAG, "sendDirect: exception: ${e.message}", e)
                 messageDao.updateState(localId, RetichatBridge.MessageState.FAILED)
+            }
+        }
+    }
+
+    /** The stack has finished starting and its handles are live. */
+    private fun stackReady(): Boolean =
+        StackRuntime.isReady && routerHandle != 0L && identityHandle != 0L
+
+    /**
+     * Send the 1:1 message [localId], just written by [sendDirectMessage] or
+     * taken from the queue by [flushPendingMessages] ([fromQueue]). One path
+     * for both: a distro recipient gets the PROPAGATED send; anyone else the
+     * DIRECT attempt, with the propagated copy behind it started by the
+     * router's reports ([PropagationFallbacks]). Returns once the message is
+     * out; its state is followed on a coroutine of its own, so a flush waits
+     * for the dispatches and not for every queued message's delivery.
+     */
+    private suspend fun dispatch(
+        localId: String,
+        destHash: ByteArray,
+        content: String,
+        attachments: List<Pair<String, ByteArray>>,
+        fromQueue: Boolean,
+    ) {
+        // A distro address has no device behind it to prove a direct
+        // link; RFed fans the message out from the propagation node
+        // (Retichat-js: propagationDelay 0 and no _sendPacket for
+        // isDistro contacts). The address says so in its announce
+        // (RFed SPEC §17.10); the preference is what past announces taught us.
+        if (RetichatBridge.peerIsDistro(destHash) ||
+            UserPreferences.isDistroContact(appContext, destHash.toHex())
+        ) {
+            Log.i(TAG, "dispatch: ${destHash.toHex().take(16)} is a distro address — propagating")
+            // No DIRECT attempt here, so the propagated send is this
+            // message's only dispatch and carries the §17.11 sent-copy.
+            sendPropagatedCopy(localId, destHash, content, attachments, sendsSentCopy = true)
+            return
+        }
+
+        // Register the AppLinks spec synchronously on this IO thread
+        // BEFORE messageSendViaAppLinks triggers process_outbound.
+        // openConversation() is fire-and-forget via a separate coroutine
+        // scope and does NOT guarantee the spec is registered before the
+        // POB loop checks AppLinks::contains().  If contains() is false
+        // and Transport::has_path() is also false (fresh install, expired
+        // cache), the legacy DIRECT path only requests a path without
+        // creating a link — no LINKREQUEST is ever sent.  The synchronous
+        // call below closes that race.
+        // // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1
+        RetichatBridge.appLinkOpen(routerHandle, destHash, "lxmf", "delivery")
+        Log.d(TAG, "dispatch: appLinkOpen OK, submitting DIRECT")
+
+        // Send as the distro identity when this device holds one
+        // (Retichat-js sendingIdentity()): replies then reach every device.
+        val (sendSrc, sendIdentity) = DistroManager.sendingIdentity(selfDestHash, identityHandle)
+        val msgHandle = RetichatBridge.messageCreate(
+            destHash = destHash,
+            srcHash = sendSrc,
+            content = content,
+            method = RetichatBridge.DeliveryMethod.DIRECT,
+            identityHandle = sendIdentity,
+        )
+        if (msgHandle == 0L) {
+            Log.e(TAG, "dispatch: messageCreate FAILED for $localId: ${RetichatBridge.lastError()}")
+            messageDao.updateState(localId, RetichatBridge.MessageState.FAILED)
+            return
+        }
+        Log.d(TAG, "dispatch: messageCreate OK handle=$msgHandle")
+
+        attachments.forEach { (name, data) ->
+            RetichatBridge.messageAddAttachment(msgHandle, name, data)
+        }
+
+        // Take a queued row before it goes out: the handle is recorded only
+        // if the row is still queued, and from then on it is out of
+        // pendingOutbound(), so no later flush sends it or its §17.11
+        // copy again, even if this send throws below.
+        if (fromQueue && messageDao.claimPendingOutbound(localId, msgHandle) == 0) {
+            Log.w(TAG, "dispatch: queued msg $localId already taken — not sent again")
+            RetichatBridge.messageDestroy(msgHandle)
+            return
+        }
+
+        val sent = RetichatBridge.messageSendViaAppLinks(msgHandle)
+        Log.d(TAG, "dispatch: messageSendViaAppLinks result=$sent")
+        if (!sent) {
+            Log.e(TAG, "dispatch: messageSendViaAppLinks FAILED for $localId: ${RetichatBridge.lastError()}")
+            messageDao.updateState(localId, RetichatBridge.MessageState.FAILED)
+            return
+        }
+        val hashHex = RetichatBridge.messageGetHash(msgHandle)?.toHex()
+        hashHex?.let { deliveryTargets.remember(it, DeliveryTargets.Target.Row(localId)) }
+
+        // RFed SPEC §17.11: the message is out, so tell our other
+        // devices. Sent here, where the DIRECT send is accepted, and
+        // never from the propagated copy behind it: DIRECT plus
+        // fallback is still one message and gets one copy.
+        sendDistroSentCopy(destHash, sendSrc, title = "", content = content)
+
+        val state = RetichatBridge.messageGetState(msgHandle)
+        Log.d(TAG, "dispatch: post-send state=$state")
+
+        // Point the bubble at the DIRECT handle before the fallback is
+        // tracked: from then on a propagated copy can take the bubble over,
+        // and this write must not undo that.
+        messageDao.updateHandle(localId, msgHandle)
+        if (hashHex == null) {
+            // Nothing matches the router's reports to this send, so no
+            // propagated copy is behind it and the bubble shows its outcome.
+            Log.w(TAG, "dispatch: no hash for $localId — no propagated fallback")
+            messageDao.updateState(localId, state)
+        } else {
+            // A DIRECT failure is not the bubble's outcome: the propagated
+            // copy is (see pollMessageState).
+            if (!isFailureState(state)) messageDao.updateState(localId, state)
+            propagationFallbacks.track(
+                hashHex, PropagationFallbacks.Send(localId, destHash, content),
+            )?.let(::startPropagatedCopy)
+            if (isFailureState(state)) {
+                propagationFallbacks.onPolledState(hashHex, state)?.let(::startPropagatedCopy)
+                return
+            }
+        }
+
+        // 3) Poll until the native message reaches a terminal state
+        //    (SENT, DELIVERED, FAILED, REJECTED, CANCELLED).
+        //    The proof arrives async via the link; we need to notice it.
+        if (!isTerminalState(state)) {
+            scope.launch(Dispatchers.IO) {
+                try {
+                    pollMessageState(localId, msgHandle, directHashHex = hashHex)
+                } catch (e: Exception) {
+                    Log.e(TAG, "dispatch: state poll failed $localId: ${e.message}")
+                    failUnlessSucceeded(localId)
+                }
             }
         }
     }
@@ -600,6 +629,17 @@ class ChatRepository(
         state == RetichatBridge.MessageState.SENT ||
         state == RetichatBridge.MessageState.DELIVERED
 
+    /** Terminal failure states: FAILED, REJECTED, CANCELLED. */
+    private fun isFailureState(state: Int) =
+        state == RetichatBridge.MessageState.FAILED ||
+        state == RetichatBridge.MessageState.REJECTED ||
+        state == RetichatBridge.MessageState.CANCELLED
+
+    /** Show [localId] failed, unless it already succeeded (success is sticky). */
+    private suspend fun failUnlessSucceeded(localId: String) {
+        messageDao.updateStateUnlessSucceeded(localId, RetichatBridge.MessageState.FAILED)
+    }
+
     /**
      * Poll the native message handle until it reaches a terminal state.
      * Uses exponential back-off: 200ms, 300ms, 450ms, … capped at 5s.
@@ -610,11 +650,17 @@ class ChatRepository(
      * For large transfers (resource-based) the deadline extends to 10 min
      * and is reset whenever transfer progress advances, so that active
      * transfers are never prematurely killed.
+     *
+     * [directHashHex] is set when [msgHandle] is a DIRECT send with the
+     * propagated fallback behind it. Its failure is then not written: the
+     * propagated copy is the bubble's outcome, started here unless the
+     * router's report started it first ([PropagationFallbacks]).
      */
     private suspend fun pollMessageState(
         localId: String,
         msgHandle: Long,
         initialDeadlineMs: Long = 60_000L,
+        directHashHex: String? = null,
     ) {
         var interval = 200L          // start at 200ms for snappy LAN feedback
         val maxInterval = 5_000L     // cap at 5s
@@ -625,7 +671,7 @@ class ChatRepository(
         while (System.currentTimeMillis() < deadline) {
             delay(interval)
 
-            // If schedulePropagationFallback has taken over this message
+            // If sendPropagatedCopy has taken over this message
             // (replaced the DB handle), this poll is stale. Exit without
             // touching state so the new poll is the sole owner.
             // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1
@@ -662,6 +708,16 @@ class ChatRepository(
                 Log.d(TAG, "pollState: $localId already DELIVERED — stopping poll of handle=$msgHandle")
                 return
             }
+            if (directHashHex != null && isFailureState(newState)) {
+                Log.i(TAG, "pollState: DIRECT $localId ended in state=$newState — propagated copy takes over")
+                propagationFallbacks.onPolledState(directHashHex, newState)?.let(::startPropagatedCopy)
+                return
+            }
+            // A FAILED row under a DIRECT poll is the propagated copy saying it
+            // could not go out. Only this attempt's success replaces that:
+            // writing its SENDING would leave the bubble spinning once the
+            // attempt fails too, since that failure is not written.
+            val copyFailed = directHashHex != null && dbState == RetichatBridge.MessageState.FAILED
             if (isSuccessState(dbState)) {
                 if (newState == RetichatBridge.MessageState.DELIVERED &&
                     dbState == RetichatBridge.MessageState.SENT) {
@@ -674,7 +730,7 @@ class ChatRepository(
                 } else {
                     messageDao.updateStateAndProgress(localId, newState, progress)
                 }
-            } else {
+            } else if (!copyFailed || isSuccessState(newState)) {
                 messageDao.updateStateAndProgress(localId, newState, progress)
             }
 
@@ -693,55 +749,74 @@ class ChatRepository(
     }
 
     /**
-    * Direct→propagated fallback. Mirrors iOS
-     * `ChatRepository.schedulePropFallback(directHashHex:)`.
+     * Start [send]'s propagated copy on IO; see [PropagationFallbacks]. Its
+     * attachments are read back from where the send stored them.
+     */
+    private fun startPropagatedCopy(send: PropagationFallbacks.Send) {
+        scope.launch(Dispatchers.IO) {
+            val attachments = try {
+                queuedAttachments(send.messageId)
+            } catch (e: Exception) {
+                Log.e(TAG, "propagated: attachments of ${send.messageId} unreadable: ${e.message}")
+                failUnlessSucceeded(send.messageId)
+                return@launch
+            }
+            sendPropagatedCopy(
+                send.messageId, send.destHash, send.content, attachments,
+                sendsSentCopy = false,
+            )
+        }
+    }
+
+    /**
+     * Send [localId] PROPAGATED through the user-configured (or
+     * randomly-chosen) LXMF propagation node, and point the bubble at it.
+     * Mirrors iOS `ChatRepository.retrySendViaPropNode`.
      *
-    * Normally five seconds after a DIRECT send, if the bubble is still in a
-    * non-terminal pre-delivery state (GENERATING/OUTBOUND/SENDING) we create
-    * a PROPAGATED copy and dispatch it to the user-configured (or
-    * randomly-chosen) LXMF propagation node. If current readiness was already
-    * DISCONNECTED (red) when send started, the delay collapses to zero while
-    * the direct cascade continues in parallel. Polling continues on the new
-    * handle so the bubble updates as the propagated copy progresses.
+     * Either a distro recipient's only send, or the fallback behind a DIRECT
+     * attempt, started when the router asked for it (0x10; AppLinks Timer P,
+     * which is 0 s when the link status is already DISCONNECTED) or when the
+     * DIRECT attempt failed first ([PropagationFallbacks]). The DIRECT attempt
+     * keeps running beside it. Until 2026-09-24 Android waited 5 s on its own
+     * clock and then skipped the copy when the message had already failed.
+     *
+     * A copy that can not go out shows the message failed (iOS does the
+     * same); a DIRECT success can still replace that.
      *
      * [sendsSentCopy] is true only when this propagated send is the message's
      * first and only dispatch (a distro recipient, no DIRECT attempt); the
      * DIRECT path sends its §17.11 sent-copy itself, so a fallback behind it
      * must not send a second one.
      */
-    private fun schedulePropagationFallback(
+    private suspend fun sendPropagatedCopy(
         localId: String,
         destHash: ByteArray,
         content: String,
         attachments: List<Pair<String, ByteArray>>,
-        immediate: Boolean = false,
-        sendsSentCopy: Boolean = false,
+        sendsSentCopy: Boolean,
     ) {
-        scope.launch(Dispatchers.IO) {
-            val fallbackDelayMs = if (immediate) 0L else 5_000L
-            if (fallbackDelayMs > 0L) delay(fallbackDelayMs)
+        try {
+            val current = messageDao.findById(localId) ?: return
+            // Delivered already (a late proof of the DIRECT attempt): a copy
+            // would only be a duplicate for the recipient to drop.
+            if (isSuccessState(current.state)) return
 
-            val current = messageDao.findById(localId) ?: return@launch
-            // Skip fallback if direct already reached SENT/DELIVERED or a
-            // terminal failure state.
-            if (current.state == RetichatBridge.MessageState.SENT ||
-                current.state == RetichatBridge.MessageState.DELIVERED ||
-                isTerminalState(current.state)
-            ) {
-                return@launch
+            if (!stackReady()) {
+                Log.w(TAG, "propagated: stack not ready — $localId not sent")
+                failUnlessSucceeded(localId)
+                return
             }
 
-            if (routerHandle == 0L || identityHandle == 0L) {
-                Log.w(TAG, "fallback: stack not ready, skipping")
-                return@launch
+            val nodeHash = selectPropagationNode()
+            if (nodeHash == null) {
+                failUnlessSucceeded(localId)
+                return
             }
-
-            val nodeHash = selectPropagationNode() ?: return@launch
 
             Log.i(
                 TAG,
-                "fallback: ${if (immediate) "immediate" else "5s"} trigger for $localId (state=${current.state}); " +
-                    "sending PROPAGATED via ${nodeHash.toHex().take(16)}"
+                "propagated: sending $localId (state=${current.state}) " +
+                    "via ${nodeHash.toHex().take(16)}"
             )
 
             val (sendSrc, sendIdentity) = DistroManager.sendingIdentity(selfDestHash, identityHandle)
@@ -753,47 +828,61 @@ class ChatRepository(
                 identityHandle = sendIdentity,
             )
             if (propHandle == 0L) {
-                Log.e(TAG, "fallback: messageCreate failed: ${RetichatBridge.lastError()}")
-                return@launch
+                Log.e(TAG, "propagated: messageCreate failed: ${RetichatBridge.lastError()}")
+                failUnlessSucceeded(localId)
+                return
             }
+            // Attachments go too, on purpose: iOS sends no copy for a message
+            // with attachments.
             attachments.forEach { (name, data) ->
                 RetichatBridge.messageAddAttachment(propHandle, name, data)
             }
 
             val sent = RetichatBridge.messageSendViaAppLinks(propHandle)
             if (!sent) {
-                Log.e(TAG, "fallback: messageSendViaAppLinks failed: ${RetichatBridge.lastError()}")
+                Log.e(TAG, "propagated: messageSendViaAppLinks failed: ${RetichatBridge.lastError()}")
                 RetichatBridge.messageDestroy(propHandle)
-                return@launch
+                failUnlessSucceeded(localId)
+                return
             }
+            // The copy's own late proof upgrades the same bubble.
+            rememberDeliveryTarget(propHandle, DeliveryTargets.Target.Row(localId))
             if (sendsSentCopy) sendDistroSentCopy(destHash, sendSrc, title = "", content = content)
 
             // Re-point the bubble at the propagated handle and continue polling,
             // BUT only if the direct send hasn't already succeeded.  If direct
             // won while we were creating the prop copy, discard the prop handle
-            // and leave the success state untouched.
-            val afterSend = messageDao.findById(localId)
-            if (afterSend != null && isSuccessState(afterSend.state)) {
-                Log.d(TAG, "fallback: direct already succeeded (state=${afterSend.state}) for $localId — discarding prop handle")
-                RetichatBridge.messageDestroy(propHandle)
-                return@launch
-            }
-
-            messageDao.updateHandle(localId, propHandle)
+            // and leave the success state untouched. One conditional UPDATE:
+            // a DELIVERED written between a read and a write would be lost.
+            // Until 2026-09-24 a copy that was already SENT here was skipped
+            // and the bubble stayed on the direct attempt's SENDING arrow; the
+            // bubble now shows the copy's state whatever it is.
             val newState = RetichatBridge.messageGetState(propHandle)
-            // Direct did not win (checked just above), so the bubble now
-            // shows the propagated copy's state whatever it is. Until
-            // 2026-09-24 a copy that was already SENT here was skipped and
-            // the bubble stayed on the direct attempt's SENDING arrow.
-            messageDao.updateState(localId, newState)
-            if (!isTerminalState(newState)) {
-                // PROPAGATED delivery can legitimately take several minutes
-                // (the propagation node buffers and re-delivers to the
-                // recipient when they next announce).  Use the long deadline
-                // so the poll doesn't mark FAILED before Rust delivers it.
-                // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1
-                pollMessageState(localId, propHandle, initialDeadlineMs = 600_000L)
+            if (messageDao.takeOverUnlessSucceeded(localId, propHandle, newState) == 0) {
+                Log.d(TAG, "propagated: direct already succeeded for $localId — discarding prop handle")
+                RetichatBridge.messageDestroy(propHandle)
+                return
             }
+            if (!isTerminalState(newState)) {
+                // Followed on its own coroutine: a flush that sent this (a
+                // queued message to a distro recipient) must not wait for it.
+                scope.launch(Dispatchers.IO) {
+                    try {
+                        // PROPAGATED delivery can legitimately take several minutes
+                        // (the propagation node buffers and re-delivers to the
+                        // recipient when they next announce).  Use the long deadline
+                        // so the poll doesn't mark FAILED before Rust delivers it.
+                        // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1
+                        pollMessageState(localId, propHandle, initialDeadlineMs = 600_000L)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "propagated: state poll failed $localId: ${e.message}")
+                        failUnlessSucceeded(localId)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "propagated: exception for $localId: ${e.message}", e)
+            failUnlessSucceeded(localId)
         }
     }
 

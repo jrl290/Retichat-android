@@ -101,6 +101,10 @@ private const val GRACE_SHUTDOWN_MS = 30_000L  // 30s grace avoids stack teardow
         }
     }
 
+    /** A bootstrap is running: its ready signal (onStackReady) will come. */
+    val isStarting: Boolean
+        get() = readyDeferred?.isCompleted == false
+
     /** Wait up to [timeoutMs] for the stack to be fully ready. */
     suspend fun awaitReady(timeoutMs: Long = 30_000L): Boolean {
         if (isReady) return true
@@ -131,6 +135,10 @@ private const val GRACE_SHUTDOWN_MS = 30_000L  // 30s grace avoids stack teardow
             }
             isReady = ok
             deferred.complete(ok)
+            // Initialization has finished: messages queued while it ran go
+            // out now, after the message-state callback and
+            // ConnectionStateManager are registered (§5).
+            if (ok) app.repository.onStackReady()
             return ok
         }
     }
@@ -199,11 +207,12 @@ private const val GRACE_SHUTDOWN_MS = 30_000L  // 30s grace avoids stack teardow
             ?: ByteArray(0)
 
         // The distro identity, if this device holds one, is the identity the app
-        // sends from — load it before anything can send. That is before
-        // repo.configure(): configure() starts flushPendingMessages at once, and
-        // the flush picks its source with DistroManager.sendingIdentity, so a
-        // distro loaded later let a queued message go out from the device
-        // address with no RFed SPEC §17.11 sent-copy. It needs only identity
+        // sends from — load it before anything can send. Queued messages go out
+        // once bootstrap has finished (ChatRepository.onStackReady), and the
+        // flush picks its source with DistroManager.sendingIdentity: a distro
+        // loaded later let a queued message go out from the device address
+        // with no RFed SPEC §17.11 sent-copy. Loaded before repo.configure(),
+        // the first thing to hand out the router. It needs only identity
         // handles (native library, above), not the router or the network.
         runCatching { DistroManager.init(app) }
             .onFailure { Log.e(TAG, "DistroManager.init failed", it) }

@@ -36,6 +36,22 @@ interface MessageDao {
     @Query("UPDATE messages SET nativeHandle = :handle WHERE id = :id")
     suspend fun updateHandle(id: String, handle: Long)
 
+    /**
+     * Set [state] unless the row already succeeded (SENT 0x04, DELIVERED
+     * 0x08): success is sticky. One conditional UPDATE, so a DELIVERED
+     * written between a read and this write is not overwritten. Returns the
+     * number of rows changed.
+     */
+    @Query("UPDATE messages SET state = :state WHERE id = :id AND state NOT IN (0x04, 0x08)")
+    suspend fun updateStateUnlessSucceeded(id: String, state: Int): Int
+
+    /**
+     * Point the row at a propagated copy's [handle] and [state], unless the
+     * row already succeeded. Returns 1 when the copy took the row over.
+     */
+    @Query("UPDATE messages SET nativeHandle = :handle, state = :state WHERE id = :id AND state NOT IN (0x04, 0x08)")
+    suspend fun takeOverUnlessSucceeded(id: String, handle: Long, state: Int): Int
+
     /** Mark any outbound messages left in transient states as FAILED (app was killed mid-send). */
     @Query("UPDATE messages SET state = 0xFF WHERE isOutbound = 1 AND state IN (0x00, 0x02)")
     suspend fun failStaleOutbound()

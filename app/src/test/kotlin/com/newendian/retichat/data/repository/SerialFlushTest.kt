@@ -14,9 +14,9 @@ import org.junit.Test
 private typealias Flush = suspend (pending: suspend () -> List<String>, send: suspend (List<String>) -> Unit) -> Unit
 
 /**
- * ChatRepository's offline-queue flush: two triggers (configure() and the
- * network-available listener) overlapping must not send a queued message, or
- * its RFed SPEC §17.11 sent-copy, twice.
+ * ChatRepository's offline-queue flush: two triggers (the stack's ready signal
+ * and the network-available listener) overlapping must not send a queued
+ * message, or its RFed SPEC §17.11 sent-copy, twice.
  */
 class SerialFlushTest {
     /**
