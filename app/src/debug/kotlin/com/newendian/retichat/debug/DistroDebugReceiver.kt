@@ -9,6 +9,7 @@ import com.newendian.retichat.service.DistroManager
 import com.newendian.retichat.service.RfedDistroClient
 import com.newendian.retichat.service.StackRuntime
 import com.newendian.retichat.service.UserPreferences
+import com.newendian.retichat.service.WakeWorker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -19,7 +20,7 @@ import kotlinx.coroutines.launch
  *
  *   adb shell am broadcast -a com.newendian.retichat.DEBUG_DISTRO \
  *     -n com.newendian.retichat/.debug.DistroDebugReceiver --es op import --es key <128 hex>
- *   ... --es op generate | forget | register | pull | status | restart
+ *   ... --es op generate | forget | register | pull | status | restart | wake
  *
  * Results are logged under the "DistroDebug" tag.
  */
@@ -64,6 +65,12 @@ class DistroDebugReceiver : BroadcastReceiver() {
             }
             "pull" -> CoroutineScope(Dispatchers.IO).launch {
                 Log.i(TAG, "pull -> ${RfedDistroClient.pull(app)} blob(s)")
+            }
+            // What an FCM push does (RetichatFcmService): enqueue the wake
+            // worker, so staging can drive it without a push relay.
+            "wake" -> {
+                WakeWorker.enqueue(app)
+                Log.i(TAG, "wake -> enqueued")
             }
             // Put this phone on the private staging chain (test-harnesses/staging):
             //   --es op staging --es rfed <staging rfed identity hex> --es host 192.168.2.107 --ei port 4242
