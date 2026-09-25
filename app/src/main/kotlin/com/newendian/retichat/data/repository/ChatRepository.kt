@@ -82,8 +82,39 @@ class ChatRepository(
     }
 
     fun onMessageState(hash: ByteArray, state: Int) {
-        if (finishSentCopy(hash.toHex(), state)) return
+        val hashHex = hash.toHex()
+        if (finishSentCopy(hashHex, state)) return
+        if (state == RetichatBridge.MessageState.DELIVERED) {
+            deliveryTargets.take(hashHex)?.let { target ->
+                scope.launch(Dispatchers.IO) { recordDelivered(target) }
+            }
+        }
         groupChatManager?.onMessageState(hash, state)
+    }
+
+    /**
+     * The recipient proved [target]'s message. Reached from the router's
+     * DELIVERED report, which can come after the poll let go: the receipt
+     * timed out first (the bubble said FAILED) or the propagated fallback
+     * took the bubble over. Delivery outranks every other state.
+     */
+    private suspend fun recordDelivered(target: DeliveryTargets.Target) {
+        when (target) {
+            is DeliveryTargets.Target.Row -> {
+                val row = messageDao.findById(target.messageId) ?: return
+                if (row.state == RetichatBridge.MessageState.DELIVERED) return
+                Log.i(TAG, "delivery: ${target.messageId} proved delivered (was state=${row.state})")
+                messageDao.updateStateAndProgress(target.messageId, RetichatBridge.MessageState.DELIVERED, 1f)
+            }
+            is DeliveryTargets.Target.GroupMember ->
+                recordGroupMemberDelivered(target.groupMsgId, target.chatId, target.memberHex)
+        }
+    }
+
+    /** Remember where [handle]'s delivery report lands (see [DeliveryTargets]). */
+    private fun rememberDeliveryTarget(handle: Long, target: DeliveryTargets.Target) {
+        val hash = RetichatBridge.messageGetHash(handle) ?: return
+        deliveryTargets.remember(hash.toHex(), target)
     }
 
     /**
@@ -118,6 +149,12 @@ class ChatRepository(
      * NetworkMonitor, whose callback thread may run a flush at once.
      */
     private val pendingFlush = SerialFlush()
+
+    /**
+     * Where each sent message's DELIVERED report lands; see [DeliveryTargets].
+     * Before the init block too: a flush started from there records targets.
+     */
+    private val deliveryTargets = DeliveryTargets()
 
     /** Network-available listener, registered once. */
     private val networkListener: () -> Unit = {
@@ -339,6 +376,7 @@ class ChatRepository(
                     messageDao.updateState(msg.id, RetichatBridge.MessageState.FAILED)
                     continue
                 }
+                rememberDeliveryTarget(handle, DeliveryTargets.Target.Row(msg.id))
                 // RFed SPEC §17.11: this is the queued message's dispatch
                 // (sendDirectMessage returned before sending it), and the
                 // flush has no propagated fallback, so this is its one copy
@@ -504,6 +542,7 @@ class ChatRepository(
                     messageDao.updateState(localId, RetichatBridge.MessageState.FAILED)
                     return@launch
                 }
+                rememberDeliveryTarget(msgHandle, DeliveryTargets.Target.Row(localId))
 
                 // RFed SPEC §17.11: the message is out, so tell our other
                 // devices. Sent here, where the DIRECT send is accepted, and
@@ -616,6 +655,13 @@ class ChatRepository(
             // overwrite a direct SENT/DELIVERED that already landed in the DB.
             // DELIVERED may upgrade SENT; nothing else may downgrade success.
             val dbState = messageDao.findById(localId)?.state ?: 0
+            if (dbState == RetichatBridge.MessageState.DELIVERED) {
+                // Nothing outranks delivery. The router's DELIVERED report
+                // (onMessageState) can upgrade the row while this poll
+                // follows the propagated copy, whose SENT must not undo it.
+                Log.d(TAG, "pollState: $localId already DELIVERED — stopping poll of handle=$msgHandle")
+                return
+            }
             if (isSuccessState(dbState)) {
                 if (newState == RetichatBridge.MessageState.DELIVERED &&
                     dbState == RetichatBridge.MessageState.SENT) {
@@ -639,7 +685,9 @@ class ChatRepository(
             // Gentle backoff: ×1.5 keeps checks frequent for the first few seconds
             interval = (interval * 3 / 2).coerceAtMost(maxInterval)
         }
-        // Timed out — mark failed so the user isn't left in limbo
+        // Timed out — mark failed so the user isn't left in limbo, unless
+        // the row succeeded meanwhile by another report.
+        if (isSuccessState(messageDao.findById(localId)?.state ?: 0)) return
         Log.w(TAG, "pollState: timed out for $localId, marking FAILED")
         messageDao.updateState(localId, RetichatBridge.MessageState.FAILED)
     }
@@ -955,6 +1003,7 @@ class ChatRepository(
 
                     val sent = RetichatBridge.messageSendViaAppLinks(handle)
                     if (sent) {
+                        rememberDeliveryTarget(handle, DeliveryTargets.Target.GroupMember(groupMsgId, chat.id, memberHex))
                         // Poll for delivery proof per-member
                         pollGroupMemberDelivery(groupMsgId, chat.id, memberHex, handle)
                     } else {
@@ -984,25 +1033,29 @@ class ChatRepository(
             val state = RetichatBridge.messageGetState(handle)
             if (isTerminalState(state)) {
                 if (state == RetichatBridge.MessageState.DELIVERED) {
-                    messageDao.upsertTracking(
-                        DeliveryTrackingEntity(
-                            messageId = groupMsgId,
-                            chatId = chatId,
-                            memberHashHex = memberHex,
-                            delivered = true,
-                            deliveredAt = System.currentTimeMillis(),
-                        )
-                    )
-                    // Check if ALL members delivered
-                    val undelivered = messageDao.undeliveredFor(groupMsgId)
-                    if (undelivered.isEmpty()) {
-                        messageDao.updateState(groupMsgId, RetichatBridge.MessageState.DELIVERED)
-                        Log.i(TAG, "Group msg $groupMsgId: all members delivered")
-                    }
+                    recordGroupMemberDelivered(groupMsgId, chatId, memberHex)
                 }
                 return
             }
             interval = (interval * 3 / 2).coerceAtMost(maxInterval)
+        }
+    }
+
+    private suspend fun recordGroupMemberDelivered(groupMsgId: String, chatId: String, memberHex: String) {
+        messageDao.upsertTracking(
+            DeliveryTrackingEntity(
+                messageId = groupMsgId,
+                chatId = chatId,
+                memberHashHex = memberHex,
+                delivered = true,
+                deliveredAt = System.currentTimeMillis(),
+            )
+        )
+        // Check if ALL members delivered
+        val undelivered = messageDao.undeliveredFor(groupMsgId)
+        if (undelivered.isEmpty()) {
+            messageDao.updateState(groupMsgId, RetichatBridge.MessageState.DELIVERED)
+            Log.i(TAG, "Group msg $groupMsgId: all members delivered")
         }
     }
 
