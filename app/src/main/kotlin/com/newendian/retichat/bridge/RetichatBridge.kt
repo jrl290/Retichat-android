@@ -347,6 +347,13 @@ object RetichatBridge {
     /** Clone a message as a fresh PROPAGATED copy, preserving fields/attachments. */
     fun messageClonePropagated(handle: Long): Long = nativeMessageClonePropagated(handle)
 
+    /**
+     * Hand the router an LXMF message RFed pushed on `rfed.propagation.stream`
+     * (the bare propagation blob). True when the router took it.
+     */
+    fun routerIngestPropagated(router: Long, lxmfData: ByteArray): Boolean =
+        nativeRouterIngestPropagated(router, lxmfData)
+
     fun routerSetMessageStateCallback(router: Long, callback: MessageStateCallback): Boolean =
         nativeRouterSetMessageStateCallback(router, callback) == 0
 
@@ -393,6 +400,7 @@ object RetichatBridge {
     private external fun nativeMessageAddFieldString(handle: Long, key: Int, value: String): Int
     private external fun nativeMessageAddFieldBool(handle: Long, key: Int, value: Boolean): Int
     private external fun nativeMessageClonePropagated(handle: Long): Long
+    private external fun nativeRouterIngestPropagated(router: Long, lxmfData: ByteArray): Boolean
     private external fun nativeRouterSetMessageStateCallback(router: Long, callback: MessageStateCallback): Int
     private external fun nativeMessageSend(router: Long, msg: Long): Int
     private external fun nativeMessageSendViaAppLinks(msg: Long): Int

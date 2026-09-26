@@ -239,6 +239,59 @@ object ConnectionStateManager {
         }
     }
 
+    /**
+     * Open a held APP_LINK to [destHash]: AppLinks builds the link and holds
+     * it, and reports ACTIVE only once the link is established (not merely
+     * once a path is known, as for a one-shot link). Link establishment is
+     * bounded by the RNS protocol's own timeout, not by the 5 s send budget.
+     */
+    fun openHeldAppLink(destHash: ByteArray, app: String, aspectsCsv: String) {
+        val rh = routerHandle
+        if (rh == 0L) return
+        RetichatBridge.appLinkOpenPersistent(rh, destHash, app, aspectsCsv)
+    }
+
+    /** Close the APP_LINK to [destHash] and tear down any link it holds. */
+    fun closeAppLink(destHash: ByteArray) {
+        val rh = routerHandle
+        if (rh == 0L) return
+        RetichatBridge.appLinkClose(rh, destHash)
+    }
+
+    /**
+     * Send a DATA packet on the APP_LINK to [destHash], which must already be
+     * ACTIVE, and await its delivery proof. Unlike [appLinkSendData] it never
+     * opens anything: it is for a held link whose ACTIVE edge the caller
+     * observed. False when the link is not ACTIVE or no proof came.
+     */
+    suspend fun sendDataOnActiveLink(
+        destHash: ByteArray,
+        app: String,
+        aspectsCsv: String,
+        payload: ByteArray,
+    ): Boolean = withContext(Dispatchers.IO) {
+        val rh = routerHandle
+        if (rh == 0L) return@withContext false
+        if (RetichatBridge.appLinkStatus(rh, destHash) != RetichatBridge.AppLinkStatus.ACTIVE) {
+            return@withContext false
+        }
+        suspendCoroutine { cont ->
+            val ok = RetichatBridge.appLinkSendAsync(
+                rh,
+                destHash,
+                app,
+                aspectsCsv,
+                payload,
+                object : AppLinkSendCallback {
+                    override fun onResult(status: Int) {
+                        cont.resume(status == RetichatBridge.AppLinkSendStatus.DELIVERED)
+                    }
+                },
+            )
+            if (!ok) cont.resume(false)
+        }
+    }
+
     fun registerAppLinkPacketCallback(
         destHash: ByteArray,
         callback: AppLinkPacketCallback,

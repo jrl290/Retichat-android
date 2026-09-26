@@ -32,103 +32,49 @@ object FcmTokenRegistrar {
 
     private const val TAG = "FcmRegistrar"
 
-    private var lastRegistrationKey: String? = null
-    private var pendingRegistrationKey: String? = null
-
-    private val stateLock = Any()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    /** One per `fcm.register` destination (it changes with the bridge config). */
+    private val registrations = HashMap<String, HeldLinkRegistrations>()
+
     /**
-     * Register the token with `fcm.register` via the ephemeral AppLink.
-     * Fires one immediate attempt and leaves an ACTIVE-status handler
-     * installed so later readiness can drive the same send without retries.
-     * // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1
+     * Owe the bridge this device's token: it is sent on a held link to
+     * `fcm.register` once that link is established, with its delivery proof,
+     * and owed until then (see [HeldLinkRegistrations]). A token already
+     * registered in this process is not sent again.
      */
-    suspend fun registerIfNeeded(context: Context, subscriberHash: ByteArray): Boolean {
+    suspend fun registerIfNeeded(context: Context, subscriberHash: ByteArray) {
         if (subscriberHash.size != 16) {
             Log.w(TAG, "registerIfNeeded: bad subscriberHash length ${subscriberHash.size}")
-            return false
+            return
         }
         val rfedNodeHex = UserPreferences.getEffectiveRfedNodeIdentityHash(context)
         if (rfedNodeHex.length != 32) {
             Log.d(TAG, "No RFed node configured — skipping FCM registration")
-            return false
+            return
         }
         val token = UserPreferences.getFcmDeviceToken(context)
         if (token.isEmpty()) {
             Log.d(TAG, "No FCM token yet — skipping registration")
-            return false
+            return
         }
         val fcmRegisterDestHex = FcmBridgeHashes.registrationHex(context) ?: run {
             Log.i(TAG, "PushBridgeConfig.json missing or invalid — skipping FCM registration")
-            return false
+            return
         }
-        val destHash = hexToBytes(fcmRegisterDestHex) ?: return false
+        val destHash = hexToBytes(fcmRegisterDestHex) ?: return
 
         val payload = encodeMsgpackRegistration(subscriberHash, token)
-        val subscriberHashHex = subscriberHash.toHex()
-        val registrationKey = subscriberHashHex + ":" + token
-
-        if (!shouldAttempt(registrationKey)) {
-            return isRegistered(registrationKey)
-        }
-
-        ConnectionStateManager.setAppLinkStatusHandler(destHash) { status ->
-            if (status != RetichatBridge.AppLinkStatus.ACTIVE) return@setAppLinkStatusHandler
-            scope.launch {
-                attemptRegistrationIfNeeded(registrationKey, destHash, payload, subscriberHashHex)
+        // The token itself stays out of the key, which is logged.
+        val tokenTag = MessageDigest.getInstance("SHA-256").digest(token.toByteArray())
+            .copyOfRange(0, 4).joinToString("") { "%02x".format(it) }
+        val key = "token ${subscriberHash.toHex().take(8)}/$tokenTag"
+        val registration = synchronized(registrations) {
+            registrations.getOrPut(fcmRegisterDestHex) {
+                HeldLinkRegistrations(destHash, "fcm", "register", scope)
             }
         }
-        ConnectionStateManager.primeAppLink(destHash, "fcm", "register")
-        return attemptRegistrationIfNeeded(registrationKey, destHash, payload, subscriberHashHex)
-    }
-
-    private suspend fun attemptRegistrationIfNeeded(
-        key: String,
-        destHash: ByteArray,
-        payload: ByteArray,
-        subscriberHashHex: String,
-    ): Boolean {
-        if (!shouldAttempt(key)) {
-            return isRegistered(key)
-        }
-        markPending(key)
-        val delivered = ConnectionStateManager.appLinkSendData(
-            destHash, "fcm", "register", payload,
-        )
-        if (delivered) {
-            Log.i(TAG, "FCM token registered for ${subscriberHashHex.take(8)}…")
-            markRegistrationSucceeded(key)
-            return true
-        }
-        Log.w(TAG, "Registration: no delivery proof within budget")
-        clearPendingRegistration(key)
-        return false
-    }
-
-    private fun shouldAttempt(key: String): Boolean = synchronized(stateLock) {
-        lastRegistrationKey != key && pendingRegistrationKey != key
-    }
-
-    private fun isRegistered(key: String): Boolean = synchronized(stateLock) {
-        lastRegistrationKey == key
-    }
-
-    private fun markPending(key: String) = synchronized(stateLock) {
-        pendingRegistrationKey = key
-    }
-
-    private fun clearPendingRegistration(key: String) = synchronized(stateLock) {
-        if (pendingRegistrationKey == key) {
-            pendingRegistrationKey = null
-        }
-    }
-
-    private fun markRegistrationSucceeded(key: String) = synchronized(stateLock) {
-        lastRegistrationKey = key
-        if (pendingRegistrationKey == key) {
-            pendingRegistrationKey = null
-        }
+        registration.owe(key, payload)
     }
 
     // ── msgpack hand-rolled encoder ────────────────────────────────────

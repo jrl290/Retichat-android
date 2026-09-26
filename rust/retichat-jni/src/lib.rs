@@ -821,6 +821,30 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeM
     ok_or_neg(lxmf::message_add_field_bool(handle as u64, key as u8, value != 0))
 }
 
+/// `RetichatBridge.nativeRouterIngestPropagated(routerHandle: Long, lxmfData: ByteArray): Boolean`
+///
+/// Hand the router an LXMF message RFed pushed on `rfed.propagation.stream`:
+/// the bare propagation blob, `dest(16) | encrypted`, as a propagation sync
+/// would have fetched it. True when the router took it for one of its
+/// delivery destinations.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeRouterIngestPropagated(
+    env: JNIEnv,
+    _class: JClass,
+    router_handle: jlong,
+    lxmf_data: JByteArray,
+) -> jni::sys::jboolean {
+    let data = jbytes_to_vec(&env, &lxmf_data);
+    match lxmf::router_ingest_propagated_lxmf(router_handle as u64, &data) {
+        Ok(true) => jni::sys::JNI_TRUE,
+        Ok(false) => jni::sys::JNI_FALSE,
+        Err(e) => {
+            rns::set_error(e);
+            jni::sys::JNI_FALSE
+        }
+    }
+}
+
 /// `RetichatBridge.nativeMessageClonePropagated(handle: Long): Long`
 #[no_mangle]
 pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeMessageClonePropagated(
@@ -1260,6 +1284,14 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeR
             return -1;
         }
     };
+    // Prove every packet RFed delivers here, so RFed can count a delivery
+    // only when it is proved and queue and push the rest (RFed SPEC §7).
+    // Until 2026-09-26 nothing was proved: every rfed.delivery packet was
+    // one RFed could not confirm.
+    if let Err(e) = dest.set_proof_strategy(reticulum_rust::destination::PROVE_ALL) {
+        rns::set_error(e);
+        return -1;
+    }
 
     let packet_cb: Arc<dyn Fn(&[u8], &Packet) + Send + Sync> =
         Arc::new(move |data: &[u8], _pkt: &Packet| {

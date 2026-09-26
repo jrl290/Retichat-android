@@ -302,6 +302,11 @@ object StackRuntime {
         // first wave of sends fail with "APP_LINK not ACTIVE".
         ConnectionStateManager.register(app, routerHandle)
 
+        // The live route RFed pushes this device's messages on, proved per
+        // push; without it RFed can reach a running app only by FCM push.
+        runCatching { PropagationStream.start(app, routerHandle, identityHandle, selfDestHash) }
+            .onFailure { Log.e(TAG, "PropagationStream.start failed", it) }
+
         // Re-register per-channel rfed.notify subscriptions so push wakeups resume
         // after process restart (mirrors iOS resubscribePersistedChannels).
         app.applicationScope.launch(Dispatchers.IO) {
@@ -361,6 +366,7 @@ object StackRuntime {
         app.repository.configure(ByteArray(0), 0L, 0L)
 
         runCatching { RetichatBridge.rfedDeliveryStop() }
+        PropagationStream.stop()
 
         if (selfDestHash.isNotEmpty()) {
             runCatching { RetichatBridge.transportUnpublishDestination(selfDestHash) }

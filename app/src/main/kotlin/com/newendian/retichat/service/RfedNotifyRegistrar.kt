@@ -30,19 +30,23 @@ object RfedNotifyRegistrar {
 
     private const val TAG = "RfedNotify"
 
-    /** Last rfed.notify registration tuple successfully accepted this run. */
-    private var lastRegistrationKey: String? = null
-
-    /** Registration tuple currently in flight. */
-    private var pendingRegistrationKey: String? = null
-
-    private val stateLock = Any()
-
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    /** One per `rfed.notify.register` destination (it changes with the node). */
+    private val registrations = HashMap<String, HeldLinkRegistrations>()
+
+    private fun registrationsFor(rfedHash: ByteArray): HeldLinkRegistrations =
+        synchronized(registrations) {
+            registrations.getOrPut(rfedHash.toHex()) {
+                HeldLinkRegistrations(rfedHash, "rfed", "notify.register", scope)
+            }
+        }
+
     /**
-     * Register the LXMF wakeup once the rfed.notify APP_LINK reaches ACTIVE.
-     * Idempotent — additional calls within one process lifetime are no-ops.
+     * Owe the node this device's LXMF wake registration: sent on a held link
+     * to `rfed.notify.register` once it is established, with its delivery
+     * proof, and owed until then (see [HeldLinkRegistrations]). Already
+     * registered in this process: nothing is sent.
      */
     fun registerIfNeeded(context: Context, identityHandle: Long) {
         val rfedHash = rfedNotifyDestHash(context, "register") ?: return
@@ -54,40 +58,30 @@ object RfedNotifyRegistrar {
             Log.w(TAG, "Failed to sign payload")
             return
         }
-        val registrationKey = rfedHash.toHex() + ":" + relayHex + ":" + identityHandle
-        if (!shouldAttempt(registrationKey)) return
-
-        scope.launch {
-            ConnectionStateManager.setAppLinkStatusHandler(rfedHash) { status ->
-                if (status != RetichatBridge.AppLinkStatus.ACTIVE) return@setAppLinkStatusHandler
-                scope.launch {
-                    attemptRegistrationIfNeeded(registrationKey, rfedHash, payload, "register")
-                }
-            }
-            ConnectionStateManager.primeAppLink(rfedHash, "rfed", "notify.register")
-            attemptRegistrationIfNeeded(registrationKey, rfedHash, payload, "register")
-        }
+        val key = "lxmf relay=${relayHex.take(8)} identity=$identityHandle"
+        scope.launch { registrationsFor(rfedHash).owe(key, payload) }
     }
 
-    /** Per-channel registration — best-effort single attempt. */
+    /** Per-channel registration: owed like [registerIfNeeded]. */
     fun registerForChannel(context: Context, identityHandle: Long, channelHash: ByteArray) {
         val rfedHash = rfedNotifyDestHash(context, "register") ?: return
         val relayHex = relayHexOrNull(context) ?: return
         val payload = buildSignedPayload(identityHandle, "register", relayHex, channelHash) ?: return
-        scope.launch {
-            val delivered = ConnectionStateManager.appLinkSendData(
-                rfedHash, "rfed", "notify.register", payload,
-            )
-            logSendResult("channel-register", delivered)
-        }
+        scope.launch { registrationsFor(rfedHash).owe(channelKey(channelHash, relayHex, identityHandle), payload) }
     }
+
+    private fun channelKey(channelHash: ByteArray, relayHex: String, identityHandle: Long): String =
+        "channel ${channelHash.toHex().take(8)} relay=${relayHex.take(8)} identity=$identityHandle"
 
     /** Per-channel deregistration — best-effort single attempt. */
     fun deregisterForChannel(context: Context, identityHandle: Long, channelHash: ByteArray) {
         val rfedHash = rfedNotifyDestHash(context, "unregister") ?: return
         val relayHex = relayHexOrNull(context) ?: return
         val payload = buildSignedPayload(identityHandle, "unregister", relayHex, channelHash) ?: return
+        val registerHash = rfedNotifyDestHash(context, "register")
         scope.launch {
+            // A registration still owed must not go out after this.
+            registerHash?.let { registrationsFor(it).forget(channelKey(channelHash, relayHex, identityHandle)) }
             val delivered = ConnectionStateManager.appLinkSendData(
                 rfedHash, "rfed", "notify.unregister", payload,
             )
@@ -121,49 +115,9 @@ object RfedNotifyRegistrar {
         logSendResult(kind, delivered)
     }
 
-    private suspend fun attemptRegistrationIfNeeded(
-        key: String,
-        rfedHash: ByteArray,
-        payload: ByteArray,
-        kind: String,
-    ) {
-        if (!shouldAttempt(key)) return
-        markPending(key)
-        val delivered = ConnectionStateManager.appLinkSendData(
-            rfedHash, "rfed", "notify.register", payload,
-        )
-        logSendResult(kind, delivered)
-        if (delivered) {
-            markRegistrationSucceeded(key)
-        } else {
-            clearPendingRegistration(key)
-        }
-    }
-
     private fun logSendResult(kind: String, delivered: Boolean) {
         if (delivered) Log.i(TAG, "$kind: delivered to rfed.notify")
         else Log.w(TAG, "$kind: no delivery proof within budget")
-    }
-
-    private fun shouldAttempt(key: String): Boolean = synchronized(stateLock) {
-        lastRegistrationKey != key && pendingRegistrationKey != key
-    }
-
-    private fun markPending(key: String) = synchronized(stateLock) {
-        pendingRegistrationKey = key
-    }
-
-    private fun clearPendingRegistration(key: String) = synchronized(stateLock) {
-        if (pendingRegistrationKey == key) {
-            pendingRegistrationKey = null
-        }
-    }
-
-    private fun markRegistrationSucceeded(key: String) = synchronized(stateLock) {
-        lastRegistrationKey = key
-        if (pendingRegistrationKey == key) {
-            pendingRegistrationKey = null
-        }
     }
 
     private fun rfedNotifyDestHash(context: Context, op: String): ByteArray? {
