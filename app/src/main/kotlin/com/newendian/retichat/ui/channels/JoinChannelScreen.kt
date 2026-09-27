@@ -26,16 +26,16 @@ import com.newendian.retichat.RetichatApp
 import com.newendian.retichat.service.RfedChannelClient
 import com.newendian.retichat.service.UserPreferences
 import kotlinx.coroutines.launch
-import java.security.SecureRandom
 
 /**
  * Join (or create) an RFed channel. Mirrors iOS `NewChannelForm`
  * (in `NewConversationView.swift`):
  *   - Visibility segmented picker: Public / Private
- *   - One channel-name field with a read-only monospace prefix label
- *     (`public.` or `<8 hex>.`) and an editable suffix
- *     (filtered to a-z 0-9 . -)
- *   - Private mode shows the prefix and a "Regenerate prefix" button
+ *   - One channel-name field with a monospace root label (`public.` or
+ *     `<root>.`) and an editable name (filtered to a-z 0-9 . -)
+ *   - Private mode adds an editable Root field (default: 16 random hex,
+ *     "Regenerate prefix" makes a new one). Pasting "root.name" into the
+ *     name field fills both. Rules live in [ChannelNameForm].
  *   - rfed node hash is taken from Settings — there is no field for it
  *   - Toolbar: Cancel (leading), Start (trailing)
  */
@@ -54,14 +54,15 @@ fun JoinChannelScreen(
 
     var privacy by remember { mutableStateOf(Privacy.Public) }
     var subdomain by remember { mutableStateOf("") }
-    var privatePrefix by remember { mutableStateOf(randomHex8()) }
+    var privatePrefix by remember { mutableStateOf(ChannelNameForm.randomPrivateRoot()) }
     var isJoining by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
 
     val prefixLabel = if (privacy == Privacy.Public) "public." else "$privatePrefix."
-    val fullChannelName: String = subdomain.trim().let { sub ->
-        if (sub.isEmpty()) "" else "${if (privacy == Privacy.Public) "public" else privatePrefix}.$sub"
-    }
+    val isPrivate = privacy == Privacy.Private
+    val rootProblem = if (isPrivate) ChannelNameForm.privateRootProblem(privatePrefix) else null
+    val fullChannelName: String =
+        ChannelNameForm.fullChannelName(isPrivate, privatePrefix, subdomain) ?: ""
     val canStart = fullChannelName.isNotEmpty() && rfedAddressConfigured && !isJoining
 
     fun start() {
@@ -142,10 +143,77 @@ fun JoinChannelScreen(
                     if (privacy == Privacy.Public)
                         "Anyone who knows the name can join."
                     else
-                        "Only people you share the name with can join.",
+                        "Only people you share the full name with can join.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            }
+
+            // --- Private root field ---
+            if (privacy == Privacy.Private) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "Root",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(MaterialTheme.colorScheme.surfaceContainer)
+                            .padding(horizontal = 12.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Box(modifier = Modifier.weight(1f)) {
+                            if (privatePrefix.isEmpty()) {
+                                Text(
+                                    "root",
+                                    style = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                                )
+                            }
+                            BasicTextField(
+                                value = privatePrefix,
+                                onValueChange = { v -> privatePrefix = ChannelNameForm.filterRoot(v) },
+                                singleLine = true,
+                                textStyle = MaterialTheme.typography.bodyLarge.copy(
+                                    fontFamily = FontFamily.Monospace,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                ),
+                                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                                keyboardOptions = KeyboardOptions(
+                                    capitalization = KeyboardCapitalization.None,
+                                    keyboardType = KeyboardType.Ascii,
+                                ),
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                    }
+                    when (rootProblem) {
+                        ChannelNameForm.RootProblem.Empty -> Text(
+                            "Enter a root, or regenerate one.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                        ChannelNameForm.RootProblem.PublicReserved -> Text(
+                            "\"public\" is the root of public channels. Choose Public above, or use another root.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                        null -> {}
+                    }
+                    TextButton(
+                        onClick = { privatePrefix = ChannelNameForm.randomPrivateRoot() },
+                        contentPadding = PaddingValues(horizontal = 0.dp, vertical = 0.dp),
+                    ) {
+                        Text(
+                            "Regenerate prefix",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                }
             }
 
             // --- Channel name field ---
@@ -179,9 +247,14 @@ fun JoinChannelScreen(
                         BasicTextField(
                             value = subdomain,
                             onValueChange = { v ->
-                                subdomain = v.lowercase().filter { c ->
-                                    c.isLetterOrDigit() || c == '.' || c == '-'
-                                }
+                                val fields = ChannelNameForm.onNameInput(
+                                    previousName = subdomain,
+                                    input = v,
+                                    isPrivate = privacy == Privacy.Private,
+                                    root = privatePrefix,
+                                )
+                                privatePrefix = fields.root
+                                subdomain = fields.name
                             },
                             singleLine = true,
                             textStyle = MaterialTheme.typography.bodyLarge.copy(
@@ -214,7 +287,7 @@ fun JoinChannelScreen(
                 }
             }
 
-            // --- Private prefix info ---
+            // --- Private sharing hint ---
             if (privacy == Privacy.Private) {
                 Row(
                     modifier = Modifier
@@ -230,27 +303,17 @@ fun JoinChannelScreen(
                         tint = Color(0xFFFFA726),
                     )
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text(
-                            "Private channel prefix: $privatePrefix",
-                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                            color = MaterialTheme.colorScheme.onSurface,
-                        )
-                        val example = if (fullChannelName.isEmpty()) "$privatePrefix.yourname" else fullChannelName
+                        val example = if (fullChannelName.isEmpty()) "${privatePrefix.ifEmpty { "root" }}.yourname" else fullChannelName
                         Text(
                             "Share the full name \"$example\" with others so they can join.",
                             style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                        Text(
+                            "The random root keeps the name from being guessed. To join a private channel someone shared, paste its full name into Channel name, or type its root above.",
+                            style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-                        TextButton(
-                            onClick = { privatePrefix = randomHex8() },
-                            contentPadding = PaddingValues(horizontal = 0.dp, vertical = 0.dp),
-                        ) {
-                            Text(
-                                "Regenerate prefix",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.primary,
-                            )
-                        }
                     }
                 }
             }
@@ -289,10 +352,4 @@ fun JoinChannelScreen(
 private enum class Privacy(val label: String) {
     Public("Public"),
     Private("Private"),
-}
-
-private fun randomHex8(): String {
-    val bytes = ByteArray(4)
-    SecureRandom().nextBytes(bytes)
-    return bytes.joinToString("") { "%02x".format(it) }
 }
