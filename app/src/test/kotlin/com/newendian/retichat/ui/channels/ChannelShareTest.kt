@@ -2,6 +2,7 @@ package com.newendian.retichat.ui.channels
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -49,6 +50,14 @@ class ChannelShareTest {
         assertEquals("Anyone who knows the name can join.", ChannelShare.hint("public.news"))
     }
 
+    @Test
+    fun noHintWhileTheNameIsUnknown() {
+        // The sheet gets "" until the channel record loads; a private channel
+        // must not be shown the public hint in that window.
+        assertNull(ChannelShare.hint(""))
+        assertNull(ChannelShare.hint("  # "))
+    }
+
     // --- the sheet's wiring (source-level: Compose UI is not run on the JVM) ---
 
     @Test
@@ -68,7 +77,7 @@ class ChannelShareTest {
 
     @Test
     fun sheetShowsTheHintUnderTheName() {
-        assertTrue(sheet.contains("ChannelShare.hint(shareName)"))
+        assertTrue(sheet.contains("ChannelShare.hint(shareName)?.let"))
         assertTrue(sheet.indexOf("ChannelShare.hint(shareName)") > sheet.indexOf("SelectionContainer {"))
     }
 

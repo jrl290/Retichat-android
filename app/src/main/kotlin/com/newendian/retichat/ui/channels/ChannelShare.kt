@@ -30,7 +30,14 @@ object ChannelShare {
         return name.substring(0, dot) != ChannelNameForm.PUBLIC_ROOT
     }
 
-    /** The one-line hint under the name. */
-    fun hint(channelName: String): String =
-        if (isPrivate(channelName)) PRIVATE_HINT else PUBLIC_HINT
+    /**
+     * The one-line hint under the name, or null while the name is not known
+     * (the channel record has not loaded): an empty name has no root, and
+     * calling it public would describe a private channel as open to anyone.
+     */
+    fun hint(channelName: String): String? = when {
+        shareText(channelName).isEmpty() -> null
+        isPrivate(channelName) -> PRIVATE_HINT
+        else -> PUBLIC_HINT
+    }
 }

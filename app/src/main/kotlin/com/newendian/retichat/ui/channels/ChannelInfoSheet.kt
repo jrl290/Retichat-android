@@ -100,12 +100,16 @@ fun ChannelInfoSheet(
                         textAlign = TextAlign.Center,
                     )
                 }
-                Text(
-                    ChannelShare.hint(shareName),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = TextAlign.Center,
-                )
+                // No hint until the name is known: a private channel must
+                // never be described as public while its record loads.
+                ChannelShare.hint(shareName)?.let { hint ->
+                    Text(
+                        hint,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                    )
+                }
                 Text(
                     channelId,
                     style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
