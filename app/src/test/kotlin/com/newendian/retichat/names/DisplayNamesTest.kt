@@ -108,7 +108,36 @@ class DisplayNamesTest {
         assertEquals(NameUpdate.Set("Owl"), DisplayNames.acceptChannelName(null, 0, NameField.Name("Owl"), 10))
         assertEquals(NameUpdate.Set(null), DisplayNames.acceptChannelName("Owl", 10, NameField.Clear, 20))
         assertEquals(NameUpdate.Unchanged, DisplayNames.acceptChannelName("Owl", 10, NameField.Absent, 20))
-        assertEquals(NameUpdate.Unchanged, DisplayNames.acceptChannelName("Owl", 10, NameField.Name("Owl"), 20))
+        // A newer post repeating the name is recorded (its timestamp matters).
+        assertEquals(NameUpdate.Set("Owl"), DisplayNames.acceptChannelName("Owl", 10, NameField.Name("Owl"), 20))
+        assertEquals(NameUpdate.Unchanged, DisplayNames.acceptChannelName("Owl", 20, NameField.Name("Owl"), 20))
+        assertEquals(NameUpdate.Set(null), DisplayNames.acceptChannelName(null, 10, NameField.Clear, 20))
+    }
+
+    /** What RfedChannelClient.recordChannelSender keeps: the name and the timestamp that set it. */
+    private data class Held(val name: String?, val at: Long)
+
+    private fun Held.apply(field: NameField, postAt: Long): Held =
+        when (val u = DisplayNames.acceptChannelName(name, at, field, postAt)) {
+            NameUpdate.Unchanged -> this
+            is NameUpdate.Set -> Held(u.name, postAt)
+        }
+
+    @Test
+    fun aNewerPostRepeatingTheNameProtectsItFromAnOlderClearPulledLate() {
+        // "A" at 10, a clear at 12, "A" again at 20. Live: 10 and 20; the
+        // history pull then brings 12.
+        val held = Held(null, 0)
+            .apply(NameField.Name("A"), 10)
+            .apply(NameField.Name("A"), 20)
+            .apply(NameField.Clear, 12)
+        assertEquals(Held("A", 20), held)
+        // The same with a clear repeated: an older name pulled late loses.
+        val cleared = Held(null, 0)
+            .apply(NameField.Clear, 10)
+            .apply(NameField.Clear, 20)
+            .apply(NameField.Name("B"), 15)
+        assertEquals(Held(null, 20), cleared)
     }
 
     @Test

@@ -986,8 +986,8 @@ class RfedChannelClient(
 
     /**
      * Record [senderHex] as seen in [channelId] and apply the name field of
-     * its post from [postTimestampMs]; a post older than the one that last
-     * set the name (history pulled late) leaves it. Returns the poster's
+     * its post from [postTimestampMs]; a post older than the newest one that
+     * named or cleared it (history pulled late) leaves it. Returns the poster's
      * channel name there afterwards.
      */
     private suspend fun recordChannelSender(

@@ -146,16 +146,20 @@ object DisplayNames {
      * §5.2 channel posts: the unpack reports a name only after the key
      * binding and the signature checked out, so the post's 0xD1 sets or
      * clears the poster's `channelName` in that channel. [postAt] is the
-     * post's timestamp and [currentAt] that of the post that set [current]:
-     * an older post (history pulled late) does not undo a newer name.
+     * post's timestamp and [currentAt] that of the newest post that named or
+     * cleared it: an older post (history pulled late) does not undo a newer
+     * name. A newer post that repeats the name (or the clear) is still a
+     * [NameUpdate.Set], so the caller records its timestamp; otherwise an
+     * older clear or name pulled later would win over it.
      */
     fun acceptChannelName(current: String?, currentAt: Long, field: NameField, postAt: Long): NameUpdate {
         if (postAt < currentAt) return NameUpdate.Unchanged
-        return when (field) {
-            NameField.Absent -> NameUpdate.Unchanged
-            NameField.Clear -> if (current == null) NameUpdate.Unchanged else NameUpdate.Set(null)
-            is NameField.Name -> if (current == field.name) NameUpdate.Unchanged else NameUpdate.Set(field.name)
+        val next = when (field) {
+            NameField.Absent -> return NameUpdate.Unchanged
+            NameField.Clear -> null
+            is NameField.Name -> field.name
         }
+        return if (next == current && postAt == currentAt) NameUpdate.Unchanged else NameUpdate.Set(next)
     }
 
     /**
