@@ -29,7 +29,7 @@ class NamesMigrationTest {
     private val version11 = mapOf(
         "contacts" to "CREATE TABLE `contacts` (`destHashHex` TEXT NOT NULL, `localName` TEXT, `messageName` TEXT, `announceName` TEXT, `publicKeyHex` TEXT, `addedAt` INTEGER NOT NULL, `isAllowlisted` INTEGER NOT NULL, PRIMARY KEY(`destHashHex`))",
         "messages" to "CREATE TABLE `messages` (`id` TEXT NOT NULL, `chatId` TEXT NOT NULL, `senderHashHex` TEXT NOT NULL, `content` TEXT NOT NULL, `timestamp` INTEGER NOT NULL, `isOutbound` INTEGER NOT NULL, `state` INTEGER NOT NULL, `nativeHandle` INTEGER NOT NULL, `progress` REAL NOT NULL, `systemKind` TEXT, PRIMARY KEY(`id`))",
-        "channel_senders" to "CREATE TABLE `channel_senders` (`channelId` TEXT NOT NULL, `senderHex` TEXT NOT NULL, `channelName` TEXT, `firstSeenAt` INTEGER NOT NULL, PRIMARY KEY(`channelId`, `senderHex`))",
+        "channel_senders" to "CREATE TABLE `channel_senders` (`channelId` TEXT NOT NULL, `senderHex` TEXT NOT NULL, `channelName` TEXT, `firstSeenAt` INTEGER NOT NULL, `nameAt` INTEGER NOT NULL, PRIMARY KEY(`channelId`, `senderHex`))",
         "channel_name_state" to "CREATE TABLE `channel_name_state` (`channelId` TEXT NOT NULL, `lastDigestHex` TEXT NOT NULL, `lastIncludedAt` INTEGER NOT NULL, PRIMARY KEY(`channelId`))",
     )
 

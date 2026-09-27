@@ -105,10 +105,17 @@ class DisplayNamesTest {
 
     @Test
     fun channelNamesSetAndClearPerPost() {
-        assertEquals(NameUpdate.Set("Owl"), DisplayNames.acceptChannelName(null, NameField.Name("Owl")))
-        assertEquals(NameUpdate.Set(null), DisplayNames.acceptChannelName("Owl", NameField.Clear))
-        assertEquals(NameUpdate.Unchanged, DisplayNames.acceptChannelName("Owl", NameField.Absent))
-        assertEquals(NameUpdate.Unchanged, DisplayNames.acceptChannelName("Owl", NameField.Name("Owl")))
+        assertEquals(NameUpdate.Set("Owl"), DisplayNames.acceptChannelName(null, 0, NameField.Name("Owl"), 10))
+        assertEquals(NameUpdate.Set(null), DisplayNames.acceptChannelName("Owl", 10, NameField.Clear, 20))
+        assertEquals(NameUpdate.Unchanged, DisplayNames.acceptChannelName("Owl", 10, NameField.Absent, 20))
+        assertEquals(NameUpdate.Unchanged, DisplayNames.acceptChannelName("Owl", 10, NameField.Name("Owl"), 20))
+    }
+
+    @Test
+    fun anOlderChannelPostPulledLateDoesNotUndoANewerName() {
+        assertEquals(NameUpdate.Unchanged, DisplayNames.acceptChannelName("Lark", 20, NameField.Name("Owl"), 10))
+        assertEquals(NameUpdate.Unchanged, DisplayNames.acceptChannelName("Lark", 20, NameField.Clear, 10))
+        assertEquals(NameUpdate.Set("Owl"), DisplayNames.acceptChannelName("Lark", 20, NameField.Name("Owl"), 20))
     }
 
     @Test

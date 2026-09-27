@@ -190,6 +190,11 @@ data class ChannelSenderEntity(
     val senderHex: String,
     val channelName: String? = null,
     val firstSeenAt: Long,
+    /**
+     * The post timestamp (ms) of the post whose 0xD1 last set or cleared
+     * [channelName]. An older post pulled later does not undo a newer name.
+     */
+    val nameAt: Long = 0,
 )
 
 /**

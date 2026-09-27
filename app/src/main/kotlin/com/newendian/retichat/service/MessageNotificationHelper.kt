@@ -60,8 +60,7 @@ object MessageNotificationHelper {
      * Post / update a notification for an incoming message.
      * Messages from the same chat stack inside a single expandable notification
      * using MessagingStyle, and a summary groups all chats together.
-     */
-    /**
+     *
      * [senderName] is the resolved name of this message's sender (NameBook).
      * [conversationTitle] names a group or channel; a DM has none.
      */

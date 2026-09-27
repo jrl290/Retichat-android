@@ -145,12 +145,17 @@ object DisplayNames {
     /**
      * §5.2 channel posts: the unpack reports a name only after the key
      * binding and the signature checked out, so the post's 0xD1 sets or
-     * clears the poster's `channelName` in that channel.
+     * clears the poster's `channelName` in that channel. [postAt] is the
+     * post's timestamp and [currentAt] that of the post that set [current]:
+     * an older post (history pulled late) does not undo a newer name.
      */
-    fun acceptChannelName(current: String?, field: NameField): NameUpdate = when (field) {
-        NameField.Absent -> NameUpdate.Unchanged
-        NameField.Clear -> if (current == null) NameUpdate.Unchanged else NameUpdate.Set(null)
-        is NameField.Name -> if (current == field.name) NameUpdate.Unchanged else NameUpdate.Set(field.name)
+    fun acceptChannelName(current: String?, currentAt: Long, field: NameField, postAt: Long): NameUpdate {
+        if (postAt < currentAt) return NameUpdate.Unchanged
+        return when (field) {
+            NameField.Absent -> NameUpdate.Unchanged
+            NameField.Clear -> if (current == null) NameUpdate.Unchanged else NameUpdate.Set(null)
+            is NameField.Name -> if (current == field.name) NameUpdate.Unchanged else NameUpdate.Set(field.name)
+        }
     }
 
     /**

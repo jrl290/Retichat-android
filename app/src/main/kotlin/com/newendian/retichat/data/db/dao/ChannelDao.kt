@@ -82,8 +82,8 @@ interface ChannelDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertSenderIfAbsent(sender: ChannelSenderEntity): Long
 
-    @Query("UPDATE channel_senders SET channelName = :name WHERE channelId = :channelId AND senderHex = :senderHex")
-    suspend fun setSenderChannelName(channelId: String, senderHex: String, name: String?)
+    @Query("UPDATE channel_senders SET channelName = :name, nameAt = :postTimestampMs WHERE channelId = :channelId AND senderHex = :senderHex")
+    suspend fun setSenderChannelName(channelId: String, senderHex: String, name: String?, postTimestampMs: Long)
 
     /** Posters first seen here after [sinceMs] (the send rule's "new sender"). */
     @Query("SELECT COUNT(*) FROM channel_senders WHERE channelId = :channelId AND firstSeenAt > :sinceMs")

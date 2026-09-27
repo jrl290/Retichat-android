@@ -46,9 +46,10 @@ object NamesMigration {
         "ALTER TABLE `contacts_new` RENAME TO `contacts`",
         "ALTER TABLE `messages` ADD COLUMN `systemKind` TEXT",
         "CREATE TABLE IF NOT EXISTS `channel_senders` (`channelId` TEXT NOT NULL, `senderHex` TEXT NOT NULL, " +
-            "`channelName` TEXT, `firstSeenAt` INTEGER NOT NULL, PRIMARY KEY(`channelId`, `senderHex`))",
-        "INSERT OR IGNORE INTO `channel_senders` (channelId, senderHex, channelName, firstSeenAt) " +
-            "SELECT channelId, lower(sourceHashHex), NULL, MIN(timestamp) FROM `channel_messages` " +
+            "`channelName` TEXT, `firstSeenAt` INTEGER NOT NULL, `nameAt` INTEGER NOT NULL, " +
+            "PRIMARY KEY(`channelId`, `senderHex`))",
+        "INSERT OR IGNORE INTO `channel_senders` (channelId, senderHex, channelName, firstSeenAt, nameAt) " +
+            "SELECT channelId, lower(sourceHashHex), NULL, MIN(timestamp), 0 FROM `channel_messages` " +
             "WHERE isOutbound = 0 GROUP BY channelId, lower(sourceHashHex)",
         "CREATE TABLE IF NOT EXISTS `channel_name_state` (`channelId` TEXT NOT NULL, " +
             "`lastDigestHex` TEXT NOT NULL, `lastIncludedAt` INTEGER NOT NULL, PRIMARY KEY(`channelId`))",

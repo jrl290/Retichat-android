@@ -948,7 +948,9 @@ class RfedChannelClient(
             // and its 0xD1 (reported only after the key binding and signature
             // checks) sets or clears its channel name here. Never the
             // contact's messageName.
-            val channelName = if (isOutbound) null else recordChannelSender(channelHashHex, sourceHashHex, result.displayName)
+            val channelName = if (isOutbound) null else {
+                recordChannelSender(channelHashHex, sourceHashHex, result.displayName, result.timestampMs)
+            }
             channelDao.upsertMessage(
                 ChannelMessageEntity(
                     id = msgId,
@@ -983,19 +985,27 @@ class RfedChannelClient(
         }
 
     /**
-     * Record [senderHex] as seen in [channelId] and apply its post's name
-     * field. Returns the poster's channel name there afterwards.
+     * Record [senderHex] as seen in [channelId] and apply the name field of
+     * its post from [postTimestampMs]; a post older than the one that last
+     * set the name (history pulled late) leaves it. Returns the poster's
+     * channel name there afterwards.
      */
-    private suspend fun recordChannelSender(channelId: String, senderHex: String, field: NameField): String? {
+    private suspend fun recordChannelSender(
+        channelId: String,
+        senderHex: String,
+        field: NameField,
+        postTimestampMs: Long,
+    ): String? {
         val hex = senderHex.lowercase()
         channelDao.insertSenderIfAbsent(
             ChannelSenderEntity(channelId = channelId, senderHex = hex, firstSeenAt = System.currentTimeMillis())
         )
-        val current = channelDao.findSender(channelId, hex)?.channelName
-        return when (val update = DisplayNames.acceptChannelName(current, field)) {
+        val sender = channelDao.findSender(channelId, hex)
+        val current = sender?.channelName
+        return when (val update = DisplayNames.acceptChannelName(current, sender?.nameAt ?: 0L, field, postTimestampMs)) {
             NameUpdate.Unchanged -> current
             is NameUpdate.Set -> {
-                channelDao.setSenderChannelName(channelId, hex, update.name)
+                channelDao.setSenderChannelName(channelId, hex, update.name, postTimestampMs)
                 update.name
             }
         }
