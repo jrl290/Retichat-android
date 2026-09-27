@@ -15,16 +15,16 @@ if (file("google-services.json").exists()) {
 
 android {
     namespace = "com.newendian.retichat"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.newendian.retichat"
         // Android 12 and up (2026-09-25). WakeWorker relies on it: below 31
         // WorkManager asks an expedited worker for getForegroundInfo.
         minSdk = 31
-        targetSdk = 35
-        versionCode = 6
-        versionName = "0.1.4"
+        targetSdk = 36
+        versionCode = 9
+        versionName = "0.1.7"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
