@@ -248,6 +248,8 @@ object StackRuntime {
         // The router's stranger filter off: the app applies the privacy filter
         // (DeliveryPolicy), before the delivery callback can fire.
         repo.primeCoreDeliveryPrivacy()
+        // Contacts' announces carry their announce names (DISPLAY_NAMES.md §5.1).
+        repo.watchContactAnnounces()
 
         RetichatBridge.routerSetDeliveryCallback(routerHandle, object : MessageCallback {
             override fun onMessage(

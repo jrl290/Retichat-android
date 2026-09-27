@@ -60,6 +60,19 @@ class DisplayNameWiringTest {
     }
 
     @Test
+    fun contactsAnnouncesAreWatchedSoTheirAnnounceNamesArrive() {
+        // Transport drops unwatched announces by default; its watch list is
+        // in memory, so it is rebuilt at every start.
+        assertTrue(stack.contains("repo.watchContactAnnounces()"))
+        assertTrue(repo.contains("RetichatBridge.watchAnnounce(hex.hexToBytes())"))
+        for (fn in listOf("addContact", "ensureContact", "ensureAllowlistedContact")) {
+            val start = repo.indexOf("fun $fn(")
+            val body = repo.substring(start, repo.indexOf("\n    }", start))
+            assertTrue(fn, body.contains("watchAnnounces(hex)"))
+        }
+    }
+
+    @Test
     fun namesAreDecodedByRustAndAcceptedByTheSignatureRule() {
         assertFalse(src("bridge/LxmfFields.kt").contains("FIELD_SENDER_NAME"))
         assertTrue(repo.contains("NameField.fromTrailer(RetichatBridge.displayNameDecode(fieldsRaw))"))

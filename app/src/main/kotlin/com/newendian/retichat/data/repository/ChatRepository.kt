@@ -221,6 +221,26 @@ class ChatRepository(
         contactDao.insertIfAbsent(ContactEntity(destHashHex = hex, isAllowlisted = true))
         contactDao.setAllowlisted(hex)
         publicKey?.let { contactDao.setPublicKey(hex, it.toHex()) }
+        watchAnnounces(hex)
+    }
+
+    /**
+     * Let [hex]'s announces through Transport's drop filter (on by default),
+     * so its announce name reaches [onAnnounceReceived] (DISPLAY_NAMES.md
+     * §5.1 `announceName`). iOS watches the same contacts.
+     */
+    private fun watchAnnounces(hex: String) {
+        if (!RetichatBridge.isLoaded || hex.length != 32) return
+        runCatching { RetichatBridge.watchAnnounce(hex.hexToBytes()) }
+    }
+
+    /**
+     * At stack start: watch every contact's announces. Transport's watch list
+     * lives in memory, so it is rebuilt here rather than only as contacts are
+     * added.
+     */
+    suspend fun watchContactAnnounces() {
+        contactDao.allContactsSnapshot().forEach { watchAnnounces(it.destHashHex) }
     }
 
     suspend fun findContact(destHash: ByteArray): Contact? =
@@ -241,7 +261,7 @@ class ChatRepository(
      * place to go. An existing row is left as it is.
      */
     private suspend fun ensureContact(hex: String) {
-        contactDao.insertIfAbsent(ContactEntity(destHashHex = hex))
+        if (contactDao.insertIfAbsent(ContactEntity(destHashHex = hex)) != -1L) watchAnnounces(hex)
     }
 
     /**
@@ -251,6 +271,7 @@ class ChatRepository(
     private suspend fun ensureAllowlistedContact(hex: String) {
         contactDao.insertIfAbsent(ContactEntity(destHashHex = hex, isAllowlisted = true))
         contactDao.setAllowlisted(hex)
+        watchAnnounces(hex)
     }
 
     /**
