@@ -73,6 +73,19 @@ class DisplayNameWiringTest {
     }
 
     @Test
+    fun aDistroSentCopyGivesItsRecipientAContactSoTheChatCanBeNamed() {
+        // iOS handleDistroSentCopy: ensureContact + watchAnnounce. Without a
+        // contact row the chat title stays the short hash and the recipient's
+        // announces are ignored as from an unknown destination.
+        val start = repo.indexOf("fun onDistroSentCopy(")
+        val body = repo.substring(start, repo.indexOf("\n    }", start))
+        val ensure = body.indexOf("ensureContact(recipientHex)")
+        assertTrue(ensure >= 0)
+        assertTrue(ensure < body.indexOf("chatDao.upsert("))
+        assertFalse(body.contains("ensureAllowlistedContact"))
+    }
+
+    @Test
     fun namesAreDecodedByRustAndAcceptedByTheSignatureRule() {
         assertFalse(src("bridge/LxmfFields.kt").contains("FIELD_SENDER_NAME"))
         assertTrue(repo.contains("NameField.fromTrailer(RetichatBridge.displayNameDecode(fieldsRaw))"))

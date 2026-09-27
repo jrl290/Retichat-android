@@ -1426,8 +1426,10 @@ class ChatRepository(
      * DELIVERED (only the sending device could learn that), and the id is
      * derived like any distro fan-out message (DistroCodec.sentCopyMessageId)
      * so a copy that arrives both live and via /rfed/pull is stored once. No
-     * contact is created and no notification is posted: the user wrote this
-     * message.
+     * notification is posted: the user wrote this message. The recipient
+     * gets a plain contact row (not allowlisted) with its announces watched,
+     * as iOS `handleDistroSentCopy` does, so the chat's title can pick up the
+     * recipient's names (DISPLAY_NAMES.md §5.1).
      */
     fun onDistroSentCopy(recipientHex: String, title: String, content: String, timestamp: Double) {
         val distroHex = DistroManager.deliveryHashHex ?: run {
@@ -1442,6 +1444,7 @@ class ChatRepository(
                 Log.d(TAG, "onDistroSentCopy: dup msgId=${msgId.take(16)}, skipping")
                 return@launch
             }
+            ensureContact(recipientHex)
             val chatId = directChatId(recipient)
             val existingChat = chatDao.findById(chatId)
             if (existingChat == null) {
