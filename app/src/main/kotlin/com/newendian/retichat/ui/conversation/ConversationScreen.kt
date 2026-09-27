@@ -54,6 +54,9 @@ import com.newendian.retichat.bridge.RetichatBridge
 import com.newendian.retichat.data.db.entity.AttachmentEntity
 import com.newendian.retichat.data.db.entity.ChannelMessageEntity
 import com.newendian.retichat.data.db.entity.MessageEntity
+import com.newendian.retichat.names.ChannelLabel
+import com.newendian.retichat.names.NameBook
+import com.newendian.retichat.names.SystemText
 import com.newendian.retichat.service.ConnectionStateManager
 import com.newendian.retichat.ui.theme.BubbleIncoming
 import com.newendian.retichat.ui.theme.BubbleIncomingDark
@@ -138,7 +141,7 @@ private fun DmConversationContent(
     val app = context.applicationContext as RetichatApp
     val scope = rememberCoroutineScope()
     val lazyItems = viewModel?.pagedMessages?.collectAsLazyPagingItems()
-    val contactNames = viewModel?.contactNames?.collectAsState()?.value ?: emptyMap()
+    val names = viewModel?.names?.collectAsState()?.value ?: NameBook.EMPTY
     val chatEntity = viewModel?.chat?.collectAsState()?.value
     var draft by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
@@ -200,9 +203,16 @@ private fun DmConversationContent(
         }
     }
 
-    // Resolve the display name for the top bar
-    val displayTitle = chatEntity?.name
-        ?: chatId.removePrefix("dm_").take(12)
+    // The top bar: a group's name, or the DM peer resolved live from its
+    // contact (DISPLAY_NAMES.md §5.3), the same name the chat list shows.
+    val peerHex = chatEntity?.memberHashes?.takeIf { !isGroup } ?: chatId.removePrefix("dm_")
+    val displayTitle = when {
+        chatEntity == null && !chatId.startsWith("dm_") -> ""
+        isGroup -> chatEntity?.name.orEmpty()
+        else -> names.contact(peerHex)
+    }
+    val contacts = viewModel?.contacts?.collectAsState()?.value ?: emptyList()
+    val peerLocalName = if (isGroup) null else contacts.firstOrNull { it.destHashHex == peerHex }?.localName
 
     // Member count for group chats
     val memberCount = if (isGroup) groupMembers.size else 0
@@ -277,7 +287,8 @@ private fun DmConversationContent(
                             MessageRow(
                                 msg = msg,
                                 showSender = isGroup || !msg.isOutbound,
-                                contactNames = contactNames,
+                                senderLabel = ChannelLabel(names.contact(msg.senderHashHex), null),
+                                text = SystemText.render(msg.systemKind, msg.content, msg.senderHashHex, names),
                                 viewModel = viewModel,
                             )
                         }
@@ -480,8 +491,9 @@ private fun DmConversationContent(
             title = displayTitle,
             isGroup = isGroup,
             peerHashHex = chatEntity?.memberHashes?.takeIf { !isGroup },
+            localName = peerLocalName,
             members = groupMembers,
-            contactNames = contactNames,
+            names = names,
             onDismiss = { showChatInfo = false },
             onRename = { newName ->
                 scope.launch {
@@ -538,6 +550,11 @@ private fun ChannelConversationContent(
         .collectAsState(initial = null)
     val channelMessages by app.rfedChannelClient.messagesFlow(channelId)
         .collectAsState(initial = emptyList())
+    // §5.3 channel labels: the poster's channel name here, else its contact name.
+    val names by app.repository.nameBook().collectAsState(initial = NameBook.EMPTY)
+    val channelNames by app.rfedChannelClient.sendersFlow(channelId)
+        .map { senders -> senders.associate { it.senderHex to it.channelName } }
+        .collectAsState(initial = emptyMap())
     val canPullMoreMap by app.rfedChannelClient.canPullMore.collectAsState()
     val pullInFlight by app.rfedChannelClient.pullInFlight.collectAsState()
     val rfedLinkGeneration by app.rfedChannelClient.rfedLinkGeneration.collectAsState()
@@ -691,7 +708,8 @@ private fun ChannelConversationContent(
                     MessageRow(
                         msg = msg,
                         showSender = !msg.isOutbound,
-                        contactNames = emptyMap(),
+                        senderLabel = names.channelPost(msg.senderHashHex, channelNames[msg.senderHashHex.lowercase()]),
+                        text = msg.content,
                         viewModel = null,
                     )
                 }
@@ -806,11 +824,17 @@ private fun ChannelConversationContent(
     }
 }
 
+/**
+ * One bubble. [senderLabel] is the sender's resolved name (NameBook), with the
+ * short hash beside it when the name is a channel name; [text] is the body,
+ * with a system line's member name already resolved.
+ */
 @Composable
 private fun MessageRow(
     msg: MessageEntity,
     showSender: Boolean,
-    contactNames: Map<String, String>,
+    senderLabel: ChannelLabel,
+    text: String,
     viewModel: ConversationViewModel?,
 ) {
     val isOut = msg.isOutbound
@@ -854,18 +878,33 @@ private fun MessageRow(
                 ),
         ) {
             Column {
-                // Sender name for incoming messages
-                if (!isOut && showSender) {
-                    val senderName = contactNames[msg.senderHashHex]
-                        ?: msg.senderHashHex.take(8)
+                // Sender name for incoming messages (a system line names its
+                // member in the text instead)
+                if (!isOut && showSender && msg.systemKind == null) {
                     val nameColor = senderColor(msg.senderHashHex)
-                    Text(
-                        text = senderName,
-                        style = MaterialTheme.typography.labelMedium.copy(
-                            fontWeight = FontWeight.Bold,
-                        ),
-                        color = nameColor,
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = senderLabel.name,
+                            style = MaterialTheme.typography.labelMedium.copy(
+                                fontWeight = FontWeight.Bold,
+                            ),
+                            color = nameColor,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false),
+                        )
+                        // A channel name is public and anyone can pick any
+                        // name: its short hash sits beside it (§5.3).
+                        senderLabel.secondaryHash?.let { hash ->
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                text = hash,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = contentColor.copy(alpha = 0.55f),
+                                maxLines = 1,
+                            )
+                        }
+                    }
                     Spacer(Modifier.height(2.dp))
                 }
 
@@ -939,9 +978,9 @@ private fun MessageRow(
                 }
 
                 // Text content (with clickable hyperlinks)
-                if (msg.content.isNotBlank()) {
+                if (text.isNotBlank()) {
                     Text(
-                        text = linkifyText(msg.content, contentColor),
+                        text = linkifyText(text, contentColor),
                         color = contentColor,
                         style = MaterialTheme.typography.bodyLarge,
                     )

@@ -217,8 +217,15 @@ object StackRuntime {
             return false
         }
 
-        val displayName = UserPreferences.getDisplayName(app)
-        destHandle = RetichatBridge.routerRegisterDelivery(routerHandle, identityHandle, displayName)
+        // DISPLAY_NAMES.md: the Message Display Name goes in 0xD1 of messages
+        // (the router's name ledger); the Announce Display Name is public and
+        // must be set before the first announce (the publish below).
+        destHandle = RetichatBridge.routerRegisterDelivery(
+            routerHandle, identityHandle, UserPreferences.getMessageDisplayName(app),
+        )
+        if (!RetichatBridge.routerSetAnnounceDisplayName(routerHandle, UserPreferences.getAnnounceDisplayName(app))) {
+            Log.e(TAG, "announce display name not set: ${RetichatBridge.lastError()}")
+        }
 
         selfDestHash = RetichatBridge.destinationHash(identityHandle, "lxmf", "delivery")
             ?: ByteArray(0)
@@ -238,17 +245,19 @@ object StackRuntime {
         val repo = app.repository
         repo.configure(selfDestHash, routerHandle, identityHandle)
 
-        // Seed core delivery privacy settings from persisted preferences
+        // The router's stranger filter off: the app applies the privacy filter
+        // (DeliveryPolicy), before the delivery callback can fire.
         repo.primeCoreDeliveryPrivacy()
 
         RetichatBridge.routerSetDeliveryCallback(routerHandle, object : MessageCallback {
             override fun onMessage(
                 hash: ByteArray, srcHash: ByteArray, destHash: ByteArray,
                 title: String, content: String, timestamp: Double, signatureValid: Boolean,
-                fieldsRaw: ByteArray,
+                unverifiedReason: Int, fieldsRaw: ByteArray,
             ) {
                 repo.onMessageReceived(
-                    hash, srcHash, destHash, title, content, timestamp, signatureValid, fieldsRaw,
+                    hash, srcHash, destHash, title, content, timestamp, signatureValid,
+                    unverifiedReason, fieldsRaw,
                 )
             }
         })
@@ -275,7 +284,9 @@ object StackRuntime {
             // false→true online transition, and every 30 minutes thereafter,
             // each held per interface to one announce per 30 minutes.
             // Replaces the old "announce once at startup + hope" pattern.
-            RetichatBridge.transportPublishDestination(selfDestHash, 30.0 * 60.0)
+            if (!RetichatBridge.transportPublishDestination(selfDestHash, 30.0 * 60.0)) {
+                Log.e(TAG, "delivery destination not published: ${RetichatBridge.lastError()}")
+            }
         }
 
         // Start the RFed delivery callback so channel/group blobs are dispatched

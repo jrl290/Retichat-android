@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.newendian.retichat.data.repository.ChatRepository
+import com.newendian.retichat.names.SystemText
 import com.newendian.retichat.service.RfedChannelClient
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -22,17 +23,22 @@ class ChatListViewModel(
      */
     val items: StateFlow<List<ChatListItem>> = combine(
         repository.chatPreviews(),
+        repository.nameBook(),
         channelClient.channelsFlow(),
-    ) { chats, channels ->
+    ) { chats, names, channels ->
         val mapped: List<ChatListItem> = chats.map {
             ChatListItem(
                 id = it.id,
                 isGroup = it.isGroup,
                 isChannel = false,
-                name = it.name,
+                // A DM is titled by its peer, resolved live (DISPLAY_NAMES.md
+                // §5.3); a group by its group name.
+                name = if (it.isGroup) it.name else names.contact(it.memberHashes),
                 memberHashes = it.memberHashes,
                 groupIdHex = it.groupIdHex,
-                lastContent = it.lastContent,
+                lastContent = it.lastContent?.let { content ->
+                    SystemText.render(it.lastSystemKind, content, it.lastSender.orEmpty(), names)
+                },
                 lastTimestamp = it.lastTimestamp,
                 unreadCount = it.unreadCount,
             )

@@ -24,8 +24,10 @@ import com.newendian.retichat.data.db.entity.*
         InterfaceConfigEntity::class,
         ChannelEntity::class,
         ChannelMessageEntity::class,
+        ChannelSenderEntity::class,
+        ChannelNameStateEntity::class,
     ],
-    version = 10,
+    version = NamesMigration.TO,
     exportSchema = false,
 )
 abstract class RetichatDatabase : RoomDatabase() {
@@ -47,6 +49,13 @@ abstract class RetichatDatabase : RoomDatabase() {
             }
         }
 
+        /** Migration 10 → 11: display names and the app-side privacy filter ([NamesMigration]). */
+        private val MIGRATION_10_11 = object : Migration(NamesMigration.FROM, NamesMigration.TO) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                NamesMigration.STATEMENTS.forEach(db::execSQL)
+            }
+        }
+
         fun getInstance(context: Context): RetichatDatabase =
             INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -54,7 +63,7 @@ abstract class RetichatDatabase : RoomDatabase() {
                     RetichatDatabase::class.java,
                     "retichat.db"
                 )
-                    .addMigrations(MIGRATION_9_10)
+                    .addMigrations(MIGRATION_9_10, MIGRATION_10_11)
                     .fallbackToDestructiveMigration()
                     .build().also { INSTANCE = it }
             }

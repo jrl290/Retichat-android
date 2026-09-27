@@ -5,11 +5,14 @@ package com.newendian.retichat.data.model
  */
 data class Contact(
     val destHash: ByteArray,
+    /** The resolved name (NameBook): never stored, recomputed from the contact's slots. */
     val displayName: String,
     val publicKey: ByteArray? = null,
     val addedAt: Long = System.currentTimeMillis(),
-    /** True when the user has manually renamed this contact. */
-    val isNameManual: Boolean = false,
+    /** The user's own name for the contact, or null (DISPLAY_NAMES.md §5.1). */
+    val localName: String? = null,
+    /** Kept by the privacy filter (DeliveryPolicy). */
+    val isAllowlisted: Boolean = false,
 ) {
     val destHashHex: String get() = destHash.toHex()
 

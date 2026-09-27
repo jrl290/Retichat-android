@@ -124,8 +124,7 @@ class DistroDebugReceiver : BroadcastReceiver() {
                 val dest = com.newendian.retichat.service.DistroCodec.hexToBytes(to.lowercase())
                 if (dest == null || dest.size != 16) { Log.w(TAG, "send: bad address"); return@launch }
                 val repo = (app as com.newendian.retichat.RetichatApp).repository
-                repo.addContact(dest, to.take(8))
-                val chatId = repo.getOrCreateDirectChat(com.newendian.retichat.data.model.Contact(dest, to.take(8)))
+                val chatId = repo.getOrCreateDirectChat(dest)
                 repo.sendMessage(chatId, text)
                 Log.i(TAG, "send -> queued '$text' to ${to.take(8)} in $chatId")
             }

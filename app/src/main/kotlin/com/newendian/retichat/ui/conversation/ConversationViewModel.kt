@@ -11,13 +11,14 @@ import com.newendian.retichat.data.db.entity.AttachmentEntity
 import com.newendian.retichat.data.db.entity.ChatEntity
 import com.newendian.retichat.data.db.entity.GroupMemberEntity
 import com.newendian.retichat.data.db.entity.MessageEntity
+import com.newendian.retichat.data.model.Contact
 import com.newendian.retichat.data.repository.ChatRepository
+import com.newendian.retichat.names.NameBook
 import com.newendian.retichat.service.ConnectionStateManager
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.firstOrNull
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -36,17 +37,17 @@ class ConversationViewModel(
         pagingSourceFactory = { repository.messagesForChatPaged(chatId) },
     ).flow.cachedIn(viewModelScope)
 
-    /** Map of destination-hash-hex → display name, updated live from Room. */
-    val contactNames: StateFlow<Map<String, String>> =
-        repository.contacts()
-            .map { contacts ->
-                contacts.associate { c ->
-                    c.destHash.joinToString("") { "%02x".format(it) } to c.displayName
-                }
-            }
-            .stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
+    /** The resolver for every name on this screen (DISPLAY_NAMES.md §5.3), live from Room. */
+    val names: StateFlow<NameBook> =
+        repository.nameBook()
+            .stateIn(viewModelScope, SharingStarted.Eagerly, NameBook.EMPTY)
 
-    /** Chat entity for this conversation (provides the chat display name). */
+    /** Every contact (resolved names), for the DM peer's own name slot. */
+    val contacts: StateFlow<List<Contact>> =
+        repository.contacts()
+            .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    /** Chat entity for this conversation (a group's name; a DM's title is resolved from the contact). */
     val chat: StateFlow<ChatEntity?> =
         repository.chatById(chatId)
             .stateIn(viewModelScope, SharingStarted.Eagerly, null)
@@ -69,7 +70,7 @@ class ConversationViewModel(
         viewModelScope.launch { repository.declineGroupInvite(chatId) }
     }
 
-    /** Rename a contact (and the DM chat). */
+    /** Set or clear (empty) the user's own name for a contact. */
     fun renameContact(destHashHex: String, newName: String) {
         viewModelScope.launch {
             repository.renameContact(destHashHex, newName)

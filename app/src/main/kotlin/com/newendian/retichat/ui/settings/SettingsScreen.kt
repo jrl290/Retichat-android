@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
@@ -19,7 +20,12 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.input.ImeAction
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -30,6 +36,7 @@ import com.newendian.retichat.bridge.RetichatBridge
 import com.newendian.retichat.data.db.entity.InterfaceConfigEntity
 import com.newendian.retichat.service.ConnectionStateManager
 import com.newendian.retichat.service.DefaultEndpointManager
+import com.newendian.retichat.service.DisplayNameSettings
 import com.newendian.retichat.service.UserPreferences
 import org.json.JSONObject
 
@@ -392,18 +399,10 @@ private fun InterfaceEditorDialog(
     )
 }
 
-// ---- Display name card ----
+// ---- Display names card (LXMF-rust/DISPLAY_NAMES.md §6) ----
 
 @Composable
 private fun ProfileCard() {
-    val context = LocalContext.current
-    var displayName by remember {
-        mutableStateOf(UserPreferences.getDisplayName(context))
-    }
-    var channelDisplayName by remember {
-        mutableStateOf(UserPreferences.getChannelDisplayName(context))
-    }
-
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -418,54 +417,90 @@ private fun ProfileCard() {
                 style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
             )
             Spacer(Modifier.height(12.dp))
-
-            Text(
-                "Display Name",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            DisplayNameField(
+                kind = DisplayNameSettings.Kind.ANNOUNCE,
+                label = "Announce Display Name",
+                hint = "Public. Sent in your announces to the whole network, including other " +
+                    "Reticulum apps. Leave empty to stay anonymous.",
             )
-            OutlinedTextField(
-                value = displayName,
-                onValueChange = {
-                    displayName = it
-                    UserPreferences.setDisplayName(context, it)
-                },
-                placeholder = { Text("Your name in DMs") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-                shape = MaterialTheme.shapes.medium,
-                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words),
-            )
-
             Spacer(Modifier.height(12.dp))
-
-            Text(
-                "Channel Display Name",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            DisplayNameField(
+                kind = DisplayNameSettings.Kind.MESSAGE,
+                label = "Message Display Name",
+                hint = "Sent inside your messages, only to the people you message.",
             )
-            OutlinedTextField(
-                value = channelDisplayName,
-                onValueChange = {
-                    channelDisplayName = it
-                    UserPreferences.setChannelDisplayName(context, it)
-                },
-                placeholder = {
-                    Text(if (displayName.isEmpty()) "Same as Display Name" else displayName)
-                },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-                shape = MaterialTheme.shapes.medium,
-                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words),
-            )
-            Spacer(Modifier.height(4.dp))
-            Text(
-                "Shown to others in channels. If blank, uses your Display Name.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+            Spacer(Modifier.height(12.dp))
+            DisplayNameField(
+                kind = DisplayNameSettings.Kind.CHANNEL,
+                label = "Channel Display Name",
+                hint = "Shown on your channel posts. Anyone who can read a channel can see it. " +
+                    "Leave empty to post without a name.",
             )
         }
     }
+}
+
+/**
+ * One of the three names. Typing edits only the field; the name is saved
+ * (cleaned by the Rust cleaner, then applied to the running router at once)
+ * when the user commits it: the keyboard's Done, leaving the field, or leaving
+ * the screen. The field then shows the cleaned name, exactly what goes out.
+ */
+@Composable
+private fun DisplayNameField(kind: DisplayNameSettings.Kind, label: String, hint: String) {
+    val context = LocalContext.current
+    val app = context.applicationContext as com.newendian.retichat.RetichatApp
+    var text by remember { mutableStateOf(DisplayNameSettings.stored(context, kind)) }
+    val latestText by rememberUpdatedState(text)
+    val focusManager = LocalFocusManager.current
+
+    fun commit(value: String) {
+        app.applicationScope.launch {
+            val saved = DisplayNameSettings.save(context, kind, value)
+            withContext(kotlinx.coroutines.Dispatchers.Main) {
+                // Show what goes out, unless the user typed on meanwhile.
+                if (text == value) text = saved
+            }
+        }
+    }
+
+    // Leaving the screen with the keyboard still up commits too.
+    DisposableEffect(kind) {
+        onDispose {
+            if (latestText != DisplayNameSettings.stored(context, kind)) commit(latestText)
+        }
+    }
+
+    Text(
+        label,
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    var hadFocus by remember { mutableStateOf(false) }
+    OutlinedTextField(
+        value = text,
+        onValueChange = { text = it },
+        placeholder = { Text("Not set") },
+        singleLine = true,
+        modifier = Modifier
+            .fillMaxWidth()
+            .onFocusChanged { state ->
+                if (hadFocus && !state.isFocused) commit(text)
+                hadFocus = state.isFocused
+            },
+        shape = MaterialTheme.shapes.medium,
+        keyboardOptions = KeyboardOptions(
+            capitalization = KeyboardCapitalization.Words,
+            imeAction = ImeAction.Done,
+        ),
+        keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus() }),
+    )
+    Spacer(Modifier.height(4.dp))
+    Text(
+        hint,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+    )
 }
 
 @Composable

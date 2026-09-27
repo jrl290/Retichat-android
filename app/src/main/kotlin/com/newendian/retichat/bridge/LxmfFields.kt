@@ -106,7 +106,13 @@ class LxmfFields private constructor(
         const val FIELD_CUSTOM_META      = 0xFD
         const val DISTRO_TRANSFER_TYPE   = "rfed.distro.transfer"
         const val DISTRO_SENT_TYPE       = "rfed.distro.sent"
-        const val FIELD_SENDER_NAME      = 0x10   // sender display name (UTF-8) — per-message
+        /**
+         * FIELD_DISPLAY_NAME (LXMF-rust/DISPLAY_NAMES.md §2.1): the sender's
+         * Message Display Name, added by the router, never by the app, and
+         * decoded by the one Rust decoder ([RetichatBridge.displayNameDecode]),
+         * not here. It replaced 0x10, which no Retichat client sends or reads.
+         */
+        const val FIELD_DISPLAY_NAME     = 0xD1
 
         /** Empty fields instance. */
         val EMPTY = LxmfFields(emptyMap())

@@ -6,6 +6,10 @@ import androidx.room.Query
 import androidx.room.Upsert
 import com.newendian.retichat.data.db.entity.ChannelEntity
 import com.newendian.retichat.data.db.entity.ChannelMessageEntity
+import com.newendian.retichat.data.db.entity.ChannelNameStateEntity
+import com.newendian.retichat.data.db.entity.ChannelSenderEntity
+import androidx.room.Insert
+import androidx.room.OnConflictStrategy
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -65,4 +69,35 @@ interface ChannelDao {
 
     @Query("DELETE FROM channel_messages WHERE channelId = :channelId")
     suspend fun deleteMessagesForChannel(channelId: String)
+
+    // ---- Channel names (DISPLAY_NAMES.md §4.2, §5.1) ----
+
+    @Query("SELECT * FROM channel_senders WHERE channelId = :channelId")
+    fun sendersFlow(channelId: String): Flow<List<ChannelSenderEntity>>
+
+    @Query("SELECT * FROM channel_senders WHERE channelId = :channelId AND senderHex = :senderHex LIMIT 1")
+    suspend fun findSender(channelId: String, senderHex: String): ChannelSenderEntity?
+
+    /** Record a poster the first time it is seen here; an existing row is kept. */
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertSenderIfAbsent(sender: ChannelSenderEntity): Long
+
+    @Query("UPDATE channel_senders SET channelName = :name WHERE channelId = :channelId AND senderHex = :senderHex")
+    suspend fun setSenderChannelName(channelId: String, senderHex: String, name: String?)
+
+    /** Posters first seen here after [sinceMs] (the send rule's "new sender"). */
+    @Query("SELECT COUNT(*) FROM channel_senders WHERE channelId = :channelId AND firstSeenAt > :sinceMs")
+    suspend fun countSendersSeenAfter(channelId: String, sinceMs: Long): Int
+
+    @Query("DELETE FROM channel_senders WHERE channelId = :channelId")
+    suspend fun deleteSendersForChannel(channelId: String)
+
+    @Query("SELECT * FROM channel_name_state WHERE channelId = :channelId LIMIT 1")
+    suspend fun nameState(channelId: String): ChannelNameStateEntity?
+
+    @Upsert
+    suspend fun upsertNameState(state: ChannelNameStateEntity)
+
+    @Query("DELETE FROM channel_name_state WHERE channelId = :channelId")
+    suspend fun deleteNameState(channelId: String)
 }

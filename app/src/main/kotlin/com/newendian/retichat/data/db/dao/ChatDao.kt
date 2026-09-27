@@ -6,6 +6,11 @@ import kotlinx.coroutines.flow.Flow
 
 @Suppress("unused") // Room uses createdAt for ORDER BY
 
+/**
+ * A chat-list row. [name] is the group name for a group; a DM's title is
+ * resolved from the peer's contact (NameBook), not from [name]. A system
+ * last message ([lastSystemKind]) names [lastSender] when shown.
+ */
 data class ChatPreview(
     val id: String,
     val isGroup: Boolean,
@@ -14,6 +19,8 @@ data class ChatPreview(
     val groupIdHex: String?,
     val lastContent: String?,
     val lastTimestamp: Long?,
+    val lastSender: String?,
+    val lastSystemKind: String?,
     val unreadCount: Int,
 )
 
@@ -28,10 +35,12 @@ interface ChatDao {
         SELECT c.*,
                m.content  AS lastContent,
                m.timestamp AS lastTimestamp,
+               m.senderHashHex AS lastSender,
+               m.systemKind AS lastSystemKind,
                COALESCE(u.cnt, 0) AS unreadCount
         FROM chats c
         LEFT JOIN (
-            SELECT chatId, content, timestamp
+            SELECT chatId, content, timestamp, senderHashHex, systemKind
             FROM messages
             WHERE rowid IN (SELECT MAX(rowid) FROM messages GROUP BY chatId)
         ) m ON m.chatId = c.id

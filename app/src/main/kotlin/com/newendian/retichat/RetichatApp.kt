@@ -75,6 +75,7 @@ class RetichatApp : Application() {
         RfedChannelClient(
             appContext = this,
             channelDao = database.channelDao(),
+            contactDao = database.contactDao(),
             scope = applicationScope,
         )
     }

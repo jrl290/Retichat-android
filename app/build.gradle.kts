@@ -123,6 +123,8 @@ dependencies {
     implementation(libs.bouncycastle.prov)
 
     testImplementation("junit:junit:4.13.2")
+    // Runs the Room migration's SQL on a real SQLite in JVM tests (NamesMigrationTest).
+    testImplementation("org.xerial:sqlite-jdbc:3.41.2.2")
 }
 
 // ---- Rust NDK build task ----

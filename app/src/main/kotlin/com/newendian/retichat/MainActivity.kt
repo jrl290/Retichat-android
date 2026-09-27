@@ -16,7 +16,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.rememberNavController
-import com.newendian.retichat.data.model.Contact
 import com.newendian.retichat.data.model.hexToBytes
 import com.newendian.retichat.service.MessageNotificationHelper
 import com.newendian.retichat.ui.navigation.RetichatNavHost
@@ -95,10 +94,10 @@ class MainActivity : ComponentActivity() {
             val app = applicationContext as RetichatApp
             CoroutineScope(Dispatchers.Main).launch {
                 val destBytes = hexHash.hexToBytes()
-                app.repository.addContact(destBytes, hexHash.take(8))
                 DistroContacts.adopt(applicationContext, hexHash)
-                val contact = Contact(destBytes, hexHash.take(8))
-                val destChatId = app.repository.getOrCreateDirectChat(contact)
+                // Adds the peer as a contact without touching a known one's
+                // names or key.
+                val destChatId = app.repository.getOrCreateDirectChat(destBytes)
                 navigateToChat(destChatId)
             }
         }

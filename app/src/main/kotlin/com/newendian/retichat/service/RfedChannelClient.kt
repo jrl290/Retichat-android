@@ -7,6 +7,13 @@ import com.newendian.retichat.bridge.AppLinkPacketCallback
 import com.newendian.retichat.bridge.ChannelLxmUnpackResult
 import com.newendian.retichat.bridge.RetichatBridge
 import com.newendian.retichat.data.db.dao.ChannelDao
+import com.newendian.retichat.data.db.dao.ContactDao
+import com.newendian.retichat.data.db.entity.ChannelNameStateEntity
+import com.newendian.retichat.data.db.entity.ChannelSenderEntity
+import com.newendian.retichat.names.ContactNames
+import com.newendian.retichat.names.DisplayNames
+import com.newendian.retichat.names.NameField
+import com.newendian.retichat.names.NameUpdate
 import com.newendian.retichat.data.db.entity.ChannelEntity
 import com.newendian.retichat.data.db.entity.ChannelMessageEntity
 import kotlinx.coroutines.CancellationException
@@ -42,6 +49,7 @@ import java.security.MessageDigest
 class RfedChannelClient(
     private val appContext: Context,
     private val channelDao: ChannelDao,
+    private val contactDao: ContactDao,
     private val scope: CoroutineScope,
 ) {
 
@@ -125,6 +133,10 @@ class RfedChannelClient(
     fun channelsFlow(): Flow<List<ChannelEntity>> = channelDao.activeChannelsFlow()
     fun messagesFlow(channelId: String): Flow<List<ChannelMessageEntity>> =
         channelDao.messagesFlow(channelId)
+
+    /** The posters seen in [channelId], with their channel names (DISPLAY_NAMES.md §5.1). */
+    fun sendersFlow(channelId: String): Flow<List<ChannelSenderEntity>> =
+        channelDao.sendersFlow(channelId)
 
     /** Bumps every time a SEND or RECEIVE happens — for UI refresh. */
     private val _activity = MutableStateFlow(0L)
@@ -308,6 +320,8 @@ class RfedChannelClient(
         }
 
         channelDao.deleteMessagesForChannel(channelId)
+        channelDao.deleteSendersForChannel(channelId)
+        channelDao.deleteNameState(channelId)
         channelDao.deleteById(channelId)
         UserPreferences.setChannelNotificationsEnabled(appContext, channelId, false)
         UserPreferences.setChannelPushEnabled(appContext, channelId, false)
@@ -591,7 +605,12 @@ class RfedChannelClient(
                         }
                 }
 
-                if (trySend(liveChannel, content, optimisticId, ownHashHex, identityHandle)) {
+                // DISPLAY_NAMES.md §4.2: whether this post carries the
+                // Channel Display Name, decided once for the post (the retry
+                // below sends the same decision).
+                val postName = channelPostName(channel.id)
+
+                if (trySend(liveChannel, content, optimisticId, ownHashHex, identityHandle, postName)) {
                     return@withLock true
                 }
 
@@ -605,7 +624,7 @@ class RfedChannelClient(
                     .onFailure {
                         Log.w(TAG, "stampCost refresh on retry failed: ${it.message}")
                     }
-                if (!trySend(liveChannel, content, optimisticId, ownHashHex, identityHandle)) {
+                if (!trySend(liveChannel, content, optimisticId, ownHashHex, identityHandle, postName)) {
                     Log.w(TAG, "SEND failed twice — marking optimistic row FAILED for user retry")
                     channelDao.updateMessageSendState(
                         optimisticId,
@@ -635,15 +654,49 @@ class RfedChannelClient(
             }
         }
 
+    /**
+     * DISPLAY_NAMES.md §4.2 for a post to [channelId] now: the Channel Display
+     * Name (only that name; it never falls back to another) when it changed,
+     * a poster not seen before has posted since it was last included, or 24
+     * hours have passed; an empty 0xD1 once after it was unset; otherwise
+     * nothing.
+     */
+    private suspend fun channelPostName(channelId: String): NameField {
+        val stored = UserPreferences.getChannelDisplayName(appContext)
+        // Stored cleaned since 2026-09-27; clean again for a value saved before.
+        val name = stored.takeIf { it.isNotEmpty() }?.let { DisplayNameSettings.clean(it, DisplayNameSettings.Kind.CHANNEL) }
+            ?.takeIf { it.isNotEmpty() }
+        val state = channelDao.nameState(channelId)
+        val newSender = state != null && channelDao.countSendersSeenAfter(channelId, state.lastIncludedAt) > 0
+        return DisplayNames.channelPostName(
+            name = name,
+            lastDigestHex = state?.lastDigestHex,
+            lastIncludedAt = state?.lastIncludedAt,
+            newSenderSinceInclude = newSender,
+            nowMs = System.currentTimeMillis(),
+        )
+    }
+
+    /** The post carrying [postName] was handed to RFed: remember what the readers got (§4.2). */
+    private suspend fun recordPostName(channelId: String, postName: NameField) {
+        val digest = when (postName) {
+            NameField.Absent -> return
+            NameField.Clear -> DisplayNames.EMPTY_DIGEST_HEX
+            is NameField.Name -> DisplayNames.digestHex(postName.name)
+        }
+        channelDao.upsertNameState(ChannelNameStateEntity(channelId, digest, System.currentTimeMillis()))
+    }
+
     private suspend fun trySend(
         channel: ChannelEntity,
         content: String,
         optimisticId: String,
         ownHashHex: String,
         identityHandle: Long,
+        postName: NameField,
     ): Boolean = withContext(Dispatchers.IO) {
         val packed = RetichatBridge.channelLxmPack(
-            channel.channelName, identityHandle, content.toByteArray(), ByteArray(0),
+            channel.channelName, identityHandle, content.toByteArray(), ByteArray(0), postName,
         ) ?: run {
             Log.w(TAG, "LXMF pack failed: ${RetichatBridge.lastError()}")
             return@withContext false
@@ -688,7 +741,8 @@ class RfedChannelClient(
             Log.w(TAG, "Send failed: AppLinks DATA delivery failed")
             return@withContext false
         }
-        Log.i(TAG, "SEND ok: channel='${channel.channelName}' id=${channel.id} rfedDest=${rfedChannelDest.toHex()} payload=${finalPayload.size}B stamp=${(channel.stampCost ?: 0)}")
+        Log.i(TAG, "SEND ok: channel='${channel.channelName}' id=${channel.id} rfedDest=${rfedChannelDest.toHex()} payload=${finalPayload.size}B stamp=${(channel.stampCost ?: 0)} name=${postName.state}")
+        recordPostName(channel.id, postName)
 
         // Upgrade optimistic row → canonical id (same as echo will use)
         val canonicalId = canonicalMessageId(ownHashHex, tsMs)
@@ -890,6 +944,11 @@ class RfedChannelClient(
             if (channelDao.messageExists(channelHashHex, msgId) > 0) return@withContext
 
             val isOutbound = sourceHashHex.equals(StackRuntime.selfDestHash.toHex(), ignoreCase = true)
+            // DISPLAY_NAMES.md §4.2 / §5.1: the poster is seen in this channel,
+            // and its 0xD1 (reported only after the key binding and signature
+            // checks) sets or clears its channel name here. Never the
+            // contact's messageName.
+            val channelName = if (isOutbound) null else recordChannelSender(channelHashHex, sourceHashHex, result.displayName)
             channelDao.upsertMessage(
                 ChannelMessageEntity(
                     id = msgId,
@@ -908,15 +967,39 @@ class RfedChannelClient(
             if (!isOutbound &&
                 UserPreferences.isChannelNotificationsEnabled(appContext, channelHashHex)
             ) {
-                val senderLabel = sourceHashHex.take(8) + "…"
+                // §5.3 channel label; a channel name shows its short hash beside it.
+                val names = contactDao.findByHash(sourceHashHex)?.let {
+                    ContactNames(it.localName, it.messageName, it.announceName)
+                }
+                val label = DisplayNames.channelPost(channelName, names, sourceHashHex)
                 MessageNotificationHelper.notify(
                     appContext,
-                    senderName = "#${channel.channelName} ($senderLabel)",
+                    senderName = label.secondaryHash?.let { "${label.name} ($it)" } ?: label.name,
                     content = content,
                     chatId = channelHashHex,
+                    conversationTitle = "#${channel.channelName}",
                 )
             }
         }
+
+    /**
+     * Record [senderHex] as seen in [channelId] and apply its post's name
+     * field. Returns the poster's channel name there afterwards.
+     */
+    private suspend fun recordChannelSender(channelId: String, senderHex: String, field: NameField): String? {
+        val hex = senderHex.lowercase()
+        channelDao.insertSenderIfAbsent(
+            ChannelSenderEntity(channelId = channelId, senderHex = hex, firstSeenAt = System.currentTimeMillis())
+        )
+        val current = channelDao.findSender(channelId, hex)?.channelName
+        return when (val update = DisplayNames.acceptChannelName(current, field)) {
+            NameUpdate.Unchanged -> current
+            is NameUpdate.Set -> {
+                channelDao.setSenderChannelName(channelId, hex, update.name)
+                update.name
+            }
+        }
+    }
 
     // ── msgpack helpers ────────────────────────────────────────────────
 

@@ -40,6 +40,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.newendian.retichat.MemberStatus
 import com.newendian.retichat.data.db.entity.GroupMemberEntity
+import com.newendian.retichat.names.DisplayNames
+import com.newendian.retichat.names.NameBook
 import com.newendian.retichat.service.UserPreferences
 import com.newendian.retichat.ui.components.AvatarCircle
 
@@ -79,8 +81,10 @@ fun ChatInfoSheet(
     title: String,
     isGroup: Boolean,
     peerHashHex: String?,
+    /** The user's own name for the DM peer (DISPLAY_NAMES.md §5.1), or null. */
+    localName: String?,
     members: List<GroupMemberEntity>,
-    contactNames: Map<String, String>,
+    names: NameBook,
     onDismiss: () -> Unit,
     onRename: (String) -> Unit,
     onArchive: () -> Unit,
@@ -90,7 +94,15 @@ fun ChatInfoSheet(
     val context = LocalContext.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
-    var renameText by remember(title) { mutableStateOf(title) }
+    // A group's name is edited in place. For a DM the field is the user's own
+    // name for the contact: empty shows the name the contact provides
+    // (placeholder), and saving it empty clears the local name.
+    val savedName = if (isGroup) title else localName.orEmpty()
+    var renameText by remember(savedName) { mutableStateOf(savedName) }
+    // What the contact shows with no local name (the field's placeholder).
+    val providedName = if (isGroup || peerHashHex == null) null else {
+        DisplayNames.contact(names.names(peerHashHex)?.copy(localName = null), peerHashHex)
+    }
     var notificationsEnabled by remember(chatId) {
         mutableStateOf(!UserPreferences.isChatMuted(context, chatId))
     }
@@ -163,7 +175,8 @@ fun ChatInfoSheet(
                         OutlinedTextField(
                             value = renameText,
                             onValueChange = { renameText = it },
-                            label = { Text("Name") },
+                            label = { Text(if (isGroup) "Name" else "Your name for this contact") },
+                            placeholder = providedName?.let { provided -> { Text(provided) } },
                             singleLine = true,
                             modifier = Modifier.weight(1f),
                         )
@@ -171,11 +184,12 @@ fun ChatInfoSheet(
                         TextButton(
                             onClick = {
                                 val trimmed = renameText.trim()
-                                if (trimmed.isNotEmpty()) {
+                                if (trimmed.isNotEmpty() || !isGroup) {
                                     onRename(trimmed)
                                 }
                             },
-                            enabled = renameText.trim().isNotEmpty() && renameText.trim() != title,
+                            enabled = renameText.trim() != savedName &&
+                                (renameText.trim().isNotEmpty() || !isGroup),
                         ) {
                             Text("Save")
                         }
@@ -234,8 +248,7 @@ fun ChatInfoSheet(
                         )
                         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                             members.forEach { member ->
-                                val name = contactNames[member.destHashHex]
-                                    ?: member.displayName.ifBlank { member.destHashHex.take(8) }
+                                val name = names.member(member.destHashHex)
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     verticalAlignment = Alignment.CenterVertically,

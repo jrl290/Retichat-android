@@ -17,11 +17,17 @@ object UserPreferences {
     const val PREF_NAME = "user_prefs"
 
     // ── Existing keys ──────────────────────────────────────────────────
+    /** The pre-2026-09-27 single display name; read once into [PREF_KEY_MESSAGE_DISPLAY_NAME]. */
     const val PREF_KEY_DISPLAY_NAME = "display_name"
+    /** DISPLAY_NAMES.md §1: sent in field 0xD1 of messages, only to the people messaged. */
+    const val PREF_KEY_MESSAGE_DISPLAY_NAME = "message_display_name"
+    /** DISPLAY_NAMES.md §1: public, in the lxmf.delivery announces. Empty by default. */
+    const val PREF_KEY_ANNOUNCE_DISPLAY_NAME = "announce_display_name"
     const val PREF_KEY_DEFAULT_TCP = "default_tcp_enabled"
     const val PREF_KEY_DROP_ANNOUNCES = "drop_announces"
 
     // ── New keys (iOS parity) ──────────────────────────────────────────
+    /** DISPLAY_NAMES.md §1: on channel posts only. Never falls back to another name. */
     const val PREF_KEY_CHANNEL_DISPLAY_NAME = "channel_display_name"
     /** rfed.notify destination hash (32-char hex), empty when push disabled. */
     const val PREF_KEY_RFED_NOTIFY_HASH = "rfed_notify_hash"
@@ -33,7 +39,10 @@ object UserPreferences {
     const val PREF_KEY_RFED_NODE_IDENTITY_HASH = "rfed_node_identity_hash"
     /** Optional explicit lxmf.propagation override derived from RFed node. */
     const val PREF_KEY_RFED_LXMF_PROP_OVERRIDE = "rfed_lxmf_prop_override"
-    /** Reject inbound messages from non-allowlisted contacts (default true). */
+    /**
+     * Keep direct messages and group invites only from allowlisted contacts
+     * (default true). Enforced in the app, as on iOS (DeliveryPolicy).
+     */
     const val PREF_KEY_FILTER_STRANGERS = "filter_strangers"
     /** Comma-separated chat IDs with notifications muted. */
     const val PREF_KEY_MUTED_CHAT_IDS = "muted_chat_ids"
@@ -41,29 +50,56 @@ object UserPreferences {
     const val PREF_KEY_CHANNEL_NOTIFICATIONS_ON = "channel_notifications_on"
     const val PREF_KEY_CHANNEL_PUSH_ENABLED     = "channel_push_enabled"
 
-    private const val DEFAULT_DISPLAY_NAME = "Retichat"
+    /**
+     * The placeholder Android sent as the name of every user who never set
+     * one. DISPLAY_NAMES.md §5.4: it migrates to no name.
+     */
+    private const val OLD_PLACEHOLDER_NAME = "Retichat"
 
     private fun prefs(context: Context): SharedPreferences =
         context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
 
-    // ── Display name ───────────────────────────────────────────────────
+    // ── Display names (LXMF-rust/DISPLAY_NAMES.md) ────────────────────
+    //
+    // Three independent names, all empty by default; none falls back to
+    // another. The values stored are already cleaned (§3, cleaned by
+    // DisplayNameSettings on save), "" meaning no name.
 
-    /** Returns the user's chosen display name, or "Retichat" if unset/blank. */
-    fun getDisplayName(context: Context): String {
-        val name = prefs(context).getString(PREF_KEY_DISPLAY_NAME, null)
-        return if (name.isNullOrBlank()) DEFAULT_DISPLAY_NAME else name.trim()
+    /** The name sent in 0xD1 of messages ("" = none). */
+    fun getMessageDisplayName(context: Context): String {
+        val p = prefs(context)
+        p.getString(PREF_KEY_MESSAGE_DISPLAY_NAME, null)?.let { return it }
+        // §5.4: the old display name becomes the Message Display Name; the
+        // "Retichat" placeholder becomes no name.
+        val migrated = migratedMessageName(p.getString(PREF_KEY_DISPLAY_NAME, null))
+        p.edit().putString(PREF_KEY_MESSAGE_DISPLAY_NAME, migrated).apply()
+        return migrated
     }
 
-    fun setDisplayName(context: Context, name: String) {
-        prefs(context).edit().putString(PREF_KEY_DISPLAY_NAME, name.trim()).apply()
+    fun setMessageDisplayName(context: Context, name: String) {
+        prefs(context).edit().putString(PREF_KEY_MESSAGE_DISPLAY_NAME, name).apply()
     }
 
-    /** Optional override used only on outgoing channel messages. Empty = fall back to displayName. */
+    /** The PUBLIC name in this device's (and its distro's) announces ("" = anonymous). */
+    fun getAnnounceDisplayName(context: Context): String =
+        prefs(context).getString(PREF_KEY_ANNOUNCE_DISPLAY_NAME, "").orEmpty()
+
+    fun setAnnounceDisplayName(context: Context, name: String) {
+        prefs(context).edit().putString(PREF_KEY_ANNOUNCE_DISPLAY_NAME, name).apply()
+    }
+
+    /** The name on this device's channel posts ("" = posts carry no name). */
     fun getChannelDisplayName(context: Context): String =
         prefs(context).getString(PREF_KEY_CHANNEL_DISPLAY_NAME, "").orEmpty().trim()
 
     fun setChannelDisplayName(context: Context, name: String) {
-        prefs(context).edit().putString(PREF_KEY_CHANNEL_DISPLAY_NAME, name.trim()).apply()
+        prefs(context).edit().putString(PREF_KEY_CHANNEL_DISPLAY_NAME, name).apply()
+    }
+
+    /** §5.4: the pre-2026-09-27 display name as a Message Display Name. */
+    fun migratedMessageName(old: String?): String {
+        val trimmed = old.orEmpty().trim()
+        return if (trimmed == OLD_PLACEHOLDER_NAME) "" else trimmed
     }
 
     // ── Default TCP endpoint ──────────────────────────────────────────

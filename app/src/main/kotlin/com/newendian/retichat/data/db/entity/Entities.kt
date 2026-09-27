@@ -4,15 +4,31 @@ import androidx.room.Entity
 import androidx.room.PrimaryKey
 import com.newendian.retichat.MemberStatus
 
+/**
+ * A contact, keyed by the lxmf.delivery hash its messages come from.
+ *
+ * Three independent name slots (LXMF-rust/DISPLAY_NAMES.md §5.1), shown
+ * through the one resolver ([com.newendian.retichat.names.NameBook]):
+ * [localName] is the user's own name for the contact (cleared by saving an
+ * empty rename), [messageName] comes from field 0xD1 of the contact's
+ * messages, [announceName] from the contact's announce. None falls back to
+ * another; an empty slot is null.
+ *
+ * [isAllowlisted] is iOS's `ContactEntity.isAllowlisted`: the privacy filter
+ * keeps direct messages and group invites only from allowlisted contacts
+ * ([com.newendian.retichat.data.repository.DeliveryPolicy]). Contacts the
+ * user adds, group co-members and inviters are allowlisted; a contact row
+ * created for a message that got through with the filter off is not.
+ */
 @Entity(tableName = "contacts")
 data class ContactEntity(
     @PrimaryKey val destHashHex: String,
-    val displayName: String,
+    val localName: String? = null,
+    val messageName: String? = null,
+    val announceName: String? = null,
     val publicKeyHex: String? = null,
     val addedAt: Long = System.currentTimeMillis(),
-    /** True when the user has manually renamed this contact; protects the name from
-     *  being overwritten by a later delivery announce. */
-    val isNameManual: Boolean = false,
+    val isAllowlisted: Boolean = false,
 )
 
 @Entity(tableName = "chats")
@@ -41,6 +57,12 @@ data class MessageEntity(
     val state: Int = 0,
     val nativeHandle: Long = 0,        // for tracking outbound progress
     val progress: Float = 0f,          // resource transfer progress 0..1
+    /**
+     * Null for an ordinary message. [com.newendian.retichat.names.SystemText.MEMBER]
+     * for a system line about [senderHashHex] ("… joined the group"): the
+     * text holds no name, and the member's name is resolved when shown.
+     */
+    val systemKind: String? = null,
 )
 
 @Entity(tableName = "attachments")
@@ -58,7 +80,12 @@ data class GroupMemberEntity(
     @PrimaryKey(autoGenerate = true) val rowId: Long = 0,
     val chatId: String,
     val destHashHex: String,
-    val displayName: String,
+    /**
+     * Unused since 2026-09-27 (written ""): member names are resolved from
+     * the contacts when shown (DISPLAY_NAMES.md §5.3). Kept so the table
+     * needs no rebuild.
+     */
+    val displayName: String = "",
     /** One of MemberStatus: invited, accepted, left, declined. */
     val inviteStatus: String = MemberStatus.ACCEPTED,
 )
@@ -147,3 +174,32 @@ data class ChannelMessageEntity(
         const val SEND_STATE_FAILED = 2
     }
 }
+
+/**
+ * A poster seen in an RFed channel (DISPLAY_NAMES.md §4.2, §5.1).
+ *
+ * [channelName] is the name that sender's posts in this channel carry
+ * (field 0xD1, accepted only after the key binding and signature checks); it
+ * never becomes the contact's messageName. [firstSeenAt] (local ms) feeds the
+ * send rule: a sender first seen after our last name inclusion gets the name
+ * again.
+ */
+@Entity(tableName = "channel_senders", primaryKeys = ["channelId", "senderHex"])
+data class ChannelSenderEntity(
+    val channelId: String,
+    val senderHex: String,
+    val channelName: String? = null,
+    val firstSeenAt: Long,
+)
+
+/**
+ * The channel send rule's persisted state (DISPLAY_NAMES.md §4.2): the digest
+ * of the Channel Display Name last included in a post here (hex; the empty
+ * name's digest after a clear), and when.
+ */
+@Entity(tableName = "channel_name_state")
+data class ChannelNameStateEntity(
+    @PrimaryKey val channelId: String,
+    val lastDigestHex: String,
+    val lastIncludedAt: Long,
+)

@@ -4,6 +4,12 @@ import androidx.annotation.Keep
 
 /**
  * Callback interface for receiving inbound LXMF messages from the Rust layer.
+ *
+ * `unverifiedReason` is 0 when the signature validated, 1 when the source is
+ * unknown (no key yet), 2 when the signature is invalid. A received 0xD1 name
+ * is accepted by it (DISPLAY_NAMES.md §5.2), never by `signatureValid` alone.
+ * The native side calls exactly this 9-argument signature
+ * (`([B[B[BLjava/lang/String;Ljava/lang/String;DZI[B)V`).
  */
 @Keep
 interface MessageCallback {
@@ -15,12 +21,16 @@ interface MessageCallback {
         content: String,
         timestamp: Double,
         signatureValid: Boolean,
+        unverifiedReason: Int,
         fieldsRaw: ByteArray,
     )
 }
 
 /**
  * Callback interface for receiving LXMF delivery announces from the Rust layer.
+ * `displayName` is the announce name already cleaned by the router
+ * (DISPLAY_NAMES.md §3; "Anonymous Peer" is null), or null when the announce
+ * has none.
  */
 @Keep
 interface AnnounceCallback {
@@ -206,10 +216,47 @@ object RetichatBridge {
     fun routerCreate(identityHandle: Long, storagePath: String): Long =
         nativeRouterCreate(identityHandle, storagePath)
 
-    /** Register delivery identity.  Returns destination handle (0 = error). */
+    /**
+     * Register delivery identity.  Returns destination handle (0 = error).
+     * [messageDisplayName] is the initial Message Display Name the router
+     * sends in field 0xD1 (DISPLAY_NAMES.md §4.1); it is never announced.
+     * "" = none.
+     */
     fun routerRegisterDelivery(
-        router: Long, identity: Long, name: String, stampCost: Int = -1
-    ): Long = nativeRouterRegisterDelivery(router, identity, name, stampCost)
+        router: Long, identity: Long, messageDisplayName: String, stampCost: Int = -1
+    ): Long = nativeRouterRegisterDelivery(router, identity, messageDisplayName, stampCost)
+
+    /**
+     * DISPLAY_NAMES.md §4.1: the Message Display Name the router adds (0xD1)
+     * to outbound messages under its name-ledger rule. null or "" clears it.
+     * Takes effect at once, no restart. Takes the router lock: call off the
+     * main thread.
+     */
+    fun routerSetMessageDisplayName(router: Long, name: String?): Boolean =
+        nativeRouterSetMessageDisplayName(router, name) == 0
+
+    /**
+     * DISPLAY_NAMES.md §2.2: the PUBLIC name in this device's lxmf.delivery
+     * announce. null or "" announces nil. The next announce carries it; set it
+     * before the first announce. Takes the router lock: call off the main thread.
+     */
+    fun routerSetAnnounceDisplayName(router: Long, name: String?): Boolean =
+        nativeRouterSetAnnounceDisplayName(router, name) == 0
+
+    /**
+     * DISPLAY_NAMES.md §3 cleaning, the one Rust implementation: the name
+     * exactly as it would be sent, or null when it cleans to no name.
+     * [announce] also treats "Anonymous Peer" as no name.
+     */
+    fun displayNameClean(raw: String, announce: Boolean): String? =
+        nativeDisplayNameClean(raw.toByteArray(Charsets.UTF_8), announce)
+
+    /**
+     * Field 0xD1 from a delivery callback's `fieldsRaw`, as
+     * `name_state u8 | name_len u16 BE | name` (parse with
+     * [com.newendian.retichat.names.NameField.fromTrailer]).
+     */
+    fun displayNameDecode(fieldsRaw: ByteArray): ByteArray? = nativeDisplayNameDecode(fieldsRaw)
 
     /** Register the inbound-message callback. */
     fun routerSetDeliveryCallback(router: Long, callback: MessageCallback): Boolean =
@@ -236,6 +283,10 @@ object RetichatBridge {
      *
      * Idempotent: a second call updates the existing entry without
      * triggering an immediate announce. Replaces an app-side announce timer.
+     *
+     * The router's delivery destination is published with the router's
+     * app_data (`[announce_name | nil, stamp_cost]`). False (native -1) when
+     * the publish failed; [lastError] says why.
      */
     fun transportPublishDestination(destHash: ByteArray, refreshSecs: Double): Boolean =
         nativeTransportPublishDestination(destHash, refreshSecs) == 0
@@ -248,6 +299,10 @@ object RetichatBridge {
     fun routerWatchDestination(router: Long, destHash: ByteArray): Boolean =
         nativeRouterWatchDestination(router, destHash) == 0
 
+    /**
+     * The router's own stranger filter. The app keeps it off and applies the
+     * privacy filter itself ([com.newendian.retichat.data.repository.DeliveryPolicy]).
+     */
     fun routerSetFilterStrangers(router: Long, enabled: Boolean): Boolean =
         nativeRouterSetFilterStrangers(router, enabled) == 0
 
@@ -270,6 +325,10 @@ object RetichatBridge {
     private external fun nativeRouterRegisterDelivery(
         router: Long, identity: Long, name: String, stampCost: Int
     ): Long
+    private external fun nativeRouterSetMessageDisplayName(router: Long, name: String?): Int
+    private external fun nativeRouterSetAnnounceDisplayName(router: Long, name: String?): Int
+    private external fun nativeDisplayNameClean(raw: ByteArray, announce: Boolean): String?
+    private external fun nativeDisplayNameDecode(fieldsRaw: ByteArray): ByteArray?
     private external fun nativeRouterSetDeliveryCallback(router: Long, callback: MessageCallback): Int
     private external fun nativeRouterSetAnnounceCallback(router: Long, callback: AnnounceCallback): Int
     private external fun nativeRouterAnnounce(router: Long, destHash: ByteArray): Int
@@ -481,14 +540,22 @@ object RetichatBridge {
         nativeDistroRegisterPayload(deviceHandle, distroHandle)
     /** msgpack [distro_hash, distro_pubkey, sig(distro_hash)] for /rfed/distro/list. */
     fun distroListPayload(distroHandle: Long): ByteArray? = nativeDistroListPayload(distroHandle)
-    /** The pre-signed lxmf.delivery announce RFed replays on the distro's behalf. */
-    fun distroAnnouncePayload(distroHandle: Long, appData: ByteArray? = null): ByteArray? =
-        nativeDistroAnnouncePayload(distroHandle, appData)
+    /**
+     * The pre-signed lxmf.delivery announce RFed replays on the distro's
+     * behalf. Its app_data is `[announce_name | nil, nil, [0xD0]]`
+     * (DISPLAY_NAMES.md §2.2): [announceName] is the raw Announce Display
+     * Name, null or empty for none; it is cleaned natively.
+     */
+    fun distroAnnouncePayload(distroHandle: Long, announceName: String?): ByteArray? =
+        nativeDistroAnnouncePayload(distroHandle, announceName?.takeIf { it.isNotEmpty() }?.toByteArray(Charsets.UTF_8))
     /**
      * Decrypt a fan-out blob with the distro identity. Returns JSON
      * (source_hash, timestamp, title, content, is_delivery_notification,
-     * ticket, distro_transfer_key), "" when the blob belongs to another
-     * distro, or null on error (see lastError()).
+     * ticket, distro_transfer_key, sent_to, sent_by, display_name_state
+     * 0/1/2, display_name, signature_validated, unverified_reason 0/1/2),
+     * "" when the blob belongs to another distro, or null on error (see
+     * lastError()). Whether to accept the name depends on the signature
+     * fields (DISPLAY_NAMES.md §5.2).
      */
     fun distroUnwrap(distroHandle: Long, blob: ByteArray): String? = nativeDistroUnwrap(distroHandle, blob)
 
@@ -497,7 +564,7 @@ object RetichatBridge {
     private external fun nativeDistroDeliveryHash(handle: Long): ByteArray?
     private external fun nativeDistroRegisterPayload(deviceHandle: Long, distroHandle: Long): ByteArray?
     private external fun nativeDistroListPayload(distroHandle: Long): ByteArray?
-    private external fun nativeDistroAnnouncePayload(distroHandle: Long, appData: ByteArray?): ByteArray?
+    private external fun nativeDistroAnnouncePayload(distroHandle: Long, announceName: ByteArray?): ByteArray?
     private external fun nativeDistroUnwrap(distroHandle: Long, blob: ByteArray): String?
     private external fun nativeWatchAnnounce(destHash: ByteArray)
     private external fun nativeUnwatchAnnounce(destHash: ByteArray)
@@ -789,14 +856,25 @@ object RetichatBridge {
         senderIdentityHandle: Long,
         content: ByteArray,
         title: ByteArray = ByteArray(0),
-    ): ByteArray? = nativeChannelLxmPack(name, senderIdentityHandle, content, title)
+        displayName: com.newendian.retichat.names.NameField = com.newendian.retichat.names.NameField.Absent,
+    ): ByteArray? = nativeChannelLxmPack(
+        name, senderIdentityHandle, content, title,
+        // DISPLAY_NAMES.md §2.3: 0 no 0xD1, 1 an empty 0xD1 (clear), 2 the
+        // Channel Display Name (cleaned natively).
+        displayName.state,
+        (displayName as? com.newendian.retichat.names.NameField.Name)?.name?.toByteArray(Charsets.UTF_8),
+    )
 
     /**
      * Unpack a received channel message. Input is the full lxmf_data:
      *   `[ channel_id_hash(16) | EC_encrypted_tail ]`
      *
      * Returns flat parsed-message bytes (see [ChannelLxmUnpackResult.parse]):
-     *   `[source_hash(16) | ts_ms_be(8) | sig_ok(1) | reason(1) | title_len_be(2) | content_len_be(4) | title | content]`
+     *   `[source_hash(16) | ts_ms_be(8) | sig_ok(1) | reason(1) | title_len_be(2) | content_len_be(4) | title | content |
+     *     name_state(1) | name_len_be(2) | name]`
+     * The name trailer is the post's Channel Display Name, reported only when
+     * the signature validated. A post whose public key does not produce its
+     * claimed source hash is rejected (null, "key binding" in [lastError]).
      */
     fun channelLxmUnpack(name: String, lxmfData: ByteArray): ByteArray? =
         nativeChannelLxmUnpack(name, lxmfData)
@@ -805,7 +883,8 @@ object RetichatBridge {
     private external fun nativeChannelDecrypt(name: String, ciphertext: ByteArray): ByteArray?
     private external fun nativeComputeChannelStamp(payload: ByteArray, cost: Int): ByteArray?
     private external fun nativeChannelLxmPack(
-        name: String, senderHandle: Long, content: ByteArray, title: ByteArray
+        name: String, senderHandle: Long, content: ByteArray, title: ByteArray,
+        displayNameState: Int, displayName: ByteArray?,
     ): ByteArray?
     private external fun nativeChannelLxmUnpack(name: String, lxmfData: ByteArray): ByteArray?
 
@@ -831,6 +910,8 @@ data class ChannelLxmUnpackResult(
     val unverifiedReason: Int,
     val title: ByteArray,
     val content: ByteArray,
+    /** The post's field 0xD1 (the poster's Channel Display Name in this channel). */
+    val displayName: com.newendian.retichat.names.NameField = com.newendian.retichat.names.NameField.Absent,
 ) {
     companion object {
         fun parse(raw: ByteArray): ChannelLxmUnpackResult? {
@@ -854,13 +935,21 @@ data class ChannelLxmUnpackResult(
             if (raw.size < 32 + titleLen + contentLen) return null
             val title = raw.copyOfRange(32, 32 + titleLen)
             val content = raw.copyOfRange(32 + titleLen, 32 + titleLen + contentLen)
+            val validated = sigOk == 1
             return ChannelLxmUnpackResult(
                 sourceHash = source,
                 timestampMs = ts,
-                signatureValidated = sigOk == 1,
+                signatureValidated = validated,
                 unverifiedReason = reason,
                 title = title,
                 content = content,
+                // The trailer follows the content; the native side reports a
+                // name only for a validated post, and so does this.
+                displayName = if (validated) {
+                    com.newendian.retichat.names.NameField.fromTrailer(raw, 32 + titleLen + contentLen)
+                } else {
+                    com.newendian.retichat.names.NameField.Absent
+                },
             )
         }
     }

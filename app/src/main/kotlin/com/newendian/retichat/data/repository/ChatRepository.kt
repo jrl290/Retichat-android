@@ -23,6 +23,13 @@ import com.newendian.retichat.data.db.dao.ContactDao
 import com.newendian.retichat.data.db.dao.MessageDao
 import com.newendian.retichat.data.db.entity.*
 import com.newendian.retichat.data.model.*
+import com.newendian.retichat.names.ContactNames
+import com.newendian.retichat.names.DisplayNames
+import com.newendian.retichat.names.NameBook
+import com.newendian.retichat.names.NameField
+import com.newendian.retichat.names.NameUpdate
+import com.newendian.retichat.names.Signature
+import com.newendian.retichat.names.SystemText
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -133,29 +140,27 @@ class ChatRepository(
     }
 
     /**
-     * Apply persisted core delivery privacy settings to the running router.
-     * Called once at stack startup after [configure] to seed the router with
-     * the user's saved preferences (filter strangers, drop announces, etc.).
+     * Keep the router's own stranger filter off: the privacy filter is the
+     * app's, applied in [onMessageReceived] as iOS applies it
+     * ([DeliveryPolicy]). Called once at stack startup after [configure],
+     * before the delivery callback is registered. Until 2026-09-27 the
+     * preference was pushed to the router, whose allowlist nothing filled,
+     * and every router-delivered message was dropped.
      */
     fun primeCoreDeliveryPrivacy() {
         if (routerHandle == 0L) return
-        val ctx = appContext ?: return
-        val enabled = UserPreferences.isFilterStrangersEnabled(ctx)
-        RetichatBridge.routerSetFilterStrangers(routerHandle, enabled)
-        Log.d(TAG, "primeCoreDeliveryPrivacy: filterStrangers=$enabled")
+        if (!RetichatBridge.routerSetFilterStrangers(routerHandle, false)) {
+            Log.e(TAG, "router stranger filter not turned off: ${RetichatBridge.lastError()}")
+        }
+        Log.d(TAG, "primeCoreDeliveryPrivacy: app-side filterStrangers=${UserPreferences.isFilterStrangersEnabled(appContext)}")
     }
 
     /**
-     * Toggle the "filter strangers" delivery privacy setting on the live router
-     * and persist the preference. Called from Settings whenever the user flips
-     * the toggle.
+     * The Settings "Privacy filter" toggle: persisted and read at every
+     * delivery ([DeliveryPolicy]), so it applies at once.
      */
     fun setCoreFilterStrangers(enabled: Boolean) {
-        if (routerHandle != 0L) {
-            RetichatBridge.routerSetFilterStrangers(routerHandle, enabled)
-        }
-        val ctx = appContext ?: return
-        UserPreferences.setFilterStrangersEnabled(ctx, enabled)
+        UserPreferences.setFilterStrangersEnabled(appContext, enabled)
     }
 
     /**
@@ -185,34 +190,95 @@ class ChatRepository(
 
     // ---- Contacts ----
 
+    /** Every contact, each with its resolved name, sorted by it. */
     fun contacts(): Flow<List<Contact>> =
         contactDao.allContacts().map { list ->
-            list.map { it.toDomain() }
+            list.map { it.toDomain() }.sortedBy { it.displayName.lowercase() }
         }
 
-    suspend fun addContact(destHash: ByteArray, name: String, publicKey: ByteArray? = null) {
-        contactDao.upsert(
-            ContactEntity(
-                destHashHex = destHash.toHex(),
-                displayName = name,
-                publicKeyHex = publicKey?.toHex(),
-                isNameManual = false,
-            )
-        )
+    /**
+     * The resolver every surface reads names through (DISPLAY_NAMES.md §5.3),
+     * live: a new name, a rename or an announce re-emits it.
+     */
+    fun nameBook(): Flow<NameBook> =
+        contactDao.allContacts().map { list -> nameBookOf(list) }
+
+    private fun nameBookOf(list: List<ContactEntity>): NameBook =
+        NameBook(list.associate { it.destHashHex.lowercase() to it.names() }, selfDestHash.toHex())
+
+    /** One contact's resolved name, for a notification posted now. */
+    suspend fun resolvedName(hashHex: String): String =
+        DisplayNames.contact(contactDao.findByHash(hashHex)?.names(), hashHex)
+
+    /**
+     * The user added [destHash] (QR code, link, hash entry, New Chat): an
+     * allowlisted contact. An existing contact keeps its names and key
+     * (until 2026-09-27 an upsert here reset them, and group invite
+     * acceptance lost the key); a [publicKey] given here is stored.
+     */
+    suspend fun addContact(destHash: ByteArray, publicKey: ByteArray? = null) {
+        val hex = destHash.toHex()
+        contactDao.insertIfAbsent(ContactEntity(destHashHex = hex, isAllowlisted = true))
+        contactDao.setAllowlisted(hex)
+        publicKey?.let { contactDao.setPublicKey(hex, it.toHex()) }
     }
 
     suspend fun findContact(destHash: ByteArray): Contact? =
         contactDao.findByHash(destHash.toHex())?.toDomain()
 
-    /** Rename a contact and update the corresponding DM chat name. */
+    /**
+     * The user's own name for a contact (§5.1 `localName`). Saving an empty
+     * name clears it, and the contact shows its provided name again.
+     */
     suspend fun renameContact(destHashHex: String, newName: String) {
-        val existing = contactDao.findByHash(destHashHex)
-        if (existing != null) {
-            contactDao.upsert(existing.copy(displayName = newName, isNameManual = true))
+        val hex = destHashHex.lowercase()
+        contactDao.insertIfAbsent(ContactEntity(destHashHex = hex))
+        contactDao.setLocalName(hex, newName.trim().ifEmpty { null })
+    }
+
+    /**
+     * A contact row for [hex] (not allowlisted) so a received name has a
+     * place to go. An existing row is left as it is.
+     */
+    private suspend fun ensureContact(hex: String) {
+        contactDao.insertIfAbsent(ContactEntity(destHashHex = hex))
+    }
+
+    /**
+     * iOS `ensureAllowlistedContact`: [hex] passes the privacy filter from now
+     * on (the user started a chat, a group co-member, an inviter).
+     */
+    private suspend fun ensureAllowlistedContact(hex: String) {
+        contactDao.insertIfAbsent(ContactEntity(destHashHex = hex, isAllowlisted = true))
+        contactDao.setAllowlisted(hex)
+    }
+
+    /**
+     * DISPLAY_NAMES.md §5.2: apply a received 0xD1 to the LXMF source
+     * [srcHex]'s `messageName`. [unverifiedReason] decides (validated, source
+     * unknown, invalid). The caller has already let the message through and
+     * made sure the contact row exists.
+     */
+    private suspend fun acceptMessageName(srcHex: String, field: NameField, unverifiedReason: Int) {
+        if (field == NameField.Absent) return
+        val current = contactDao.findByHash(srcHex)?.messageName
+        when (val update = DisplayNames.acceptMessageName(current, field, unverifiedReason)) {
+            NameUpdate.Unchanged -> Unit
+            is NameUpdate.Set -> {
+                contactDao.setMessageName(srcHex, update.name)
+                Log.i(TAG, "name: ${srcHex.take(8)} messageName ${if (update.name == null) "cleared" else "set"} (reason=$unverifiedReason)")
+            }
         }
-        // Also update the 1:1 chat display name
-        val chatId = "dm_$destHashHex"
-        chatDao.updateChatName(chatId, newName)
+    }
+
+    /** The privacy filter's answer for a direct message or invite from [srcHex] (iOS `allowlistDecision`). */
+    private suspend fun allowlisted(srcHex: String): Boolean {
+        val contact = contactDao.findByHash(srcHex)
+        return DeliveryPolicy.allowlisted(
+            filterStrangers = UserPreferences.isFilterStrangersEnabled(appContext),
+            contactExists = contact != null,
+            allowlisted = contact?.isAllowlisted == true,
+        )
     }
 
     suspend fun renameGroup(chatId: String, newName: String) {
@@ -242,16 +308,23 @@ class ChatRepository(
 
     fun messagesForChatPaged(chatId: String) = messageDao.messagesForChatPaged(chatId)
 
-    suspend fun getOrCreateDirectChat(contact: Contact): String {
-        val chatId = directChatId(contact.destHash)
+    /**
+     * The DM chat with [destHash], created if needed. The user chose this
+     * peer, so it is an allowlisted contact (iOS `createDirectChat`). A DM's
+     * title is resolved from the contact when shown; `chats.name` is unused
+     * for DMs.
+     */
+    suspend fun getOrCreateDirectChat(destHash: ByteArray): String {
+        addContact(destHash)
+        val chatId = directChatId(destHash)
         val existing = chatDao.findById(chatId)
         if (existing == null) {
             chatDao.upsert(
                 ChatEntity(
                     id = chatId,
                     isGroup = false,
-                    name = contact.displayName,
-                    memberHashes = contact.destHashHex,
+                    name = "",
+                    memberHashes = destHash.toHex(),
                 )
             )
         } else if (existing.isArchived) {
@@ -286,13 +359,13 @@ class ChatRepository(
 
         sorted.forEach { hash ->
             val hexHash = hash.toHex()
-            val contact = findContact(hash)
             val isSelf = hexHash == selfDestHash.toHex()
+            // Co-members pass the privacy filter (iOS createGroupChat).
+            if (!isSelf) ensureAllowlistedContact(hexHash)
             messageDao.upsertGroupMember(
                 GroupMemberEntity(
                     chatId = chatId,
                     destHashHex = hexHash,
-                    displayName = contact?.displayName ?: hexHash.take(8),
                     inviteStatus = if (isSelf) MemberStatus.ACCEPTED else MemberStatus.INVITED,
                 )
             )
@@ -1228,7 +1301,12 @@ class ChatRepository(
         }
     }
 
-    /** Called from the Rust delivery callback (background thread). */
+    /**
+     * Called from the Rust delivery callback (background thread): direct,
+     * opportunistic, propagated and stream-ingested messages all arrive here.
+     * [unverifiedReason] is 0 validated, 1 source unknown, 2 invalid; it
+     * decides whether the message's 0xD1 name is accepted (§5.2).
+     */
     fun onMessageReceived(
         hash: ByteArray,
         srcHash: ByteArray,
@@ -1237,9 +1315,12 @@ class ChatRepository(
         content: String,
         timestamp: Double,
         signatureValid: Boolean,
+        unverifiedReason: Int,
         fieldsRaw: ByteArray = ByteArray(0),
     ) {
         val fields = LxmfFields.decode(fieldsRaw)
+        // Field 0xD1, decoded by the one Rust decoder (bin or str; §3).
+        val nameField = NameField.fromTrailer(RetichatBridge.displayNameDecode(fieldsRaw))
         val groupId = fields.getString(LxmfFields.GROUP_ID)
         Log.i(TAG, "onMessageReceived: src=${srcHash.toHex().take(16)}, groupId=$groupId, content='${content.take(40)}'")
         // A distro identity transfer from another of our devices (RFed SPEC §17.9):
@@ -1255,24 +1336,28 @@ class ChatRepository(
             val srcHex = srcHash.toHex()
             val msgId = hash.toHex()
 
-            // Auto-create contact if unknown.
-            // Prefer FIELD_SENDER_NAME from the message fields (privacy-preserving,
-            // only message recipients see it), fall back to truncated hash.
-            val senderName = fields.getString(LxmfFields.FIELD_SENDER_NAME)
-            if (contactDao.findByHash(srcHex) == null) {
-                contactDao.upsert(
-                    ContactEntity(
-                        destHashHex = srcHex,
-                        displayName = senderName ?: srcHex.take(8),
-                    )
+            // The privacy filter, exactly as iOS applies it (DeliveryPolicy),
+            // before any write, so a stranger leaves nothing behind.
+            if (groupId != null) {
+                val action = fields.getString(LxmfFields.GROUP_ACTION)
+                val allowed = DeliveryPolicy.groupMessage(
+                    action = action,
+                    inviterAllowed = allowlisted(srcHex),
+                    groupExists = chatDao.findByGroupId(groupId)?.isGroup == true,
                 )
-            } else if (senderName != null) {
-                // Update existing contact name if not manually set
-                val existing = contactDao.findByHash(srcHex)
-                if (existing != null && !existing.isNameManual && existing.displayName != senderName) {
-                    contactDao.upsert(existing.copy(displayName = senderName))
+                if (!allowed) {
+                    Log.i(TAG, "onMessageReceived: DROPPED group ${if (action == null) "message" else action} for unknown group or from a non-allowlisted source ${srcHex.take(8)}")
+                    return@launch
                 }
+            } else if (!allowlisted(srcHex)) {
+                Log.i(TAG, "onMessageReceived: DROPPED by the privacy filter src=${srcHex.take(8)}")
+                return@launch
             }
+
+            // 0xD1 always names the LXMF source, group messages and relayed
+            // copies included (there it names the relayer).
+            ensureContact(srcHex)
+            acceptMessageName(srcHex, nameField, unverifiedReason)
 
             if (groupId != null) {
                 handleGroupMessage(msgId, srcHex, content, timestamp, fields)
@@ -1288,14 +1373,22 @@ class ChatRepository(
      * the LXMF hash, so the id is derived from source, timestamp and content;
      * RfedDistroClient has already deduplicated on source+timestamp.
      */
-    fun onDistroMessageReceived(srcHash: ByteArray, title: String, content: String, timestamp: Double) {
+    fun onDistroMessageReceived(
+        srcHash: ByteArray,
+        title: String,
+        content: String,
+        timestamp: Double,
+        nameField: NameField = NameField.Absent,
+        unverifiedReason: Int = Signature.INVALID,
+    ) {
         val srcHex = srcHash.toHex()
         val msgId = DistroCodec.messageId(srcHex, timestamp, content)
         Log.i(TAG, "onDistroMessageReceived: src=${srcHex.take(16)} via=distro content='${content.take(40)}'")
+        // No privacy filter: mail to the distro is mail to this person (iOS
+        // storeIncomingDirect via distro fan-out does not filter either).
         scope.launch(Dispatchers.IO) {
-            if (contactDao.findByHash(srcHex) == null) {
-                contactDao.upsert(ContactEntity(destHashHex = srcHex, displayName = srcHex.take(8)))
-            }
+            ensureContact(srcHex)
+            acceptMessageName(srcHex, nameField, unverifiedReason)
             handleDirectMessage(msgId, srcHash, srcHex, content, timestamp, LxmfFields.decode(ByteArray(0)))
         }
     }
@@ -1329,12 +1422,12 @@ class ChatRepository(
             val chatId = directChatId(recipient)
             val existingChat = chatDao.findById(chatId)
             if (existingChat == null) {
-                val contact = contactDao.findByHash(recipientHex)
+                // A DM's title is resolved from the contact when shown.
                 chatDao.upsert(
                     ChatEntity(
                         id = chatId,
                         isGroup = false,
-                        name = contact?.displayName ?: recipientHex.take(8),
+                        name = "",
                         memberHashes = recipientHex,
                     )
                 )
@@ -1376,13 +1469,9 @@ class ChatRepository(
         // Determine the actual sender (may be relayed on behalf of another member)
         val actualSenderHex = groupSender ?: srcHex
 
-        // Stranger filter: only accept invites from known contacts
-        if (groupAction == GroupChatManager.Action.INVITE) {
-            if (contactDao.findByHash(srcHex) == null) {
-                Log.i(TAG, "Dropped group invite from stranger ${srcHex.take(8)}")
-                return
-            }
-        }
+        // The privacy filter ran in onMessageReceived (DeliveryPolicy): an
+        // invite reaches here only from an allowed source, anything else
+        // only for a group that exists here.
 
         // Look up existing group chat by groupId
         var chat = chatDao.findByGroupId(groupId!!)
@@ -1403,11 +1492,12 @@ class ChatRepository(
                     Log.w(TAG, "Ignored mismatched group member key for ${memberHash.take(8)}")
                     return@forEach
                 }
-                val existing = contactDao.findByHash(memberHash)
-                contactDao.upsert(
-                    existing?.copy(publicKeyHex = publicKeyHex)
-                        ?: ContactEntity(destHashHex = memberHash, displayName = memberHash.take(8), publicKeyHex = publicKeyHex)
-                )
+                // A co-member whose key checked out passes the privacy
+                // filter (iOS handleGroupInvite). Its names are kept.
+                if (memberHash != selfHex()) {
+                    ensureAllowlistedContact(memberHash)
+                    contactDao.setPublicKey(memberHash, publicKeyHex)
+                }
             }
         }
 
@@ -1428,12 +1518,10 @@ class ChatRepository(
             )
 
             (groupMembers.split(",") + srcHex).filter { it.isNotEmpty() }.distinct().forEach { memberHex ->
-                val contact = contactDao.findByHash(memberHex)
                 messageDao.upsertGroupMember(
                     GroupMemberEntity(
                         chatId = chatId,
                         destHashHex = memberHex,
-                        displayName = contact?.displayName ?: memberHex.take(8),
                         inviteStatus = if (memberHex == srcHex) {
                             MemberStatus.ACCEPTED
                         } else {
@@ -1454,27 +1542,27 @@ class ChatRepository(
 
         when (groupAction) {
             GroupChatManager.Action.INVITE -> {
+                // The inviter passes the privacy filter from now on, so we can
+                // talk back (iOS handleGroupInvite).
+                ensureAllowlistedContact(srcHex)
                 // The authenticated invite source implicitly accepted when it
                 // created and sent the invitation. Apply this on duplicate
                 // pending invites as well.
                 val inviter = messageDao.groupMembersList(chat.id)
                     .firstOrNull { it.destHashHex == srcHex }
                 if (inviter == null) {
-                    val contact = contactDao.findByHash(srcHex)
                     messageDao.upsertGroupMember(
                         GroupMemberEntity(
                             chatId = chat.id,
                             destHashHex = srcHex,
-                            displayName = contact?.displayName ?: srcHex.take(8),
                             inviteStatus = MemberStatus.ACCEPTED,
                         )
                     )
                 } else {
                     messageDao.setGroupMemberStatus(chat.id, srcHex, MemberStatus.ACCEPTED)
                 }
-                // Insert a system invite message (idempotent on inviteMsgId)
-                val senderName = contactDao.findByHash(actualSenderHex)?.displayName
-                    ?: actualSenderHex.take(8)
+                // Insert a system invite message (idempotent on inviteMsgId).
+                // It keeps the inviter's hash; the name is resolved when shown.
                 val inviteMsgId = "inv_${groupId.take(16)}"
                 val firstInviteChunk = messageDao.findById(inviteMsgId) == null
                 messageDao.upsert(
@@ -1482,17 +1570,18 @@ class ChatRepository(
                         id = inviteMsgId,
                         chatId = chat.id,
                         senderHashHex = actualSenderHex,
-                        content = "$senderName invited you to \"${chat.name}\" — tap Accept or Decline below",
+                        content = "invited you to \"${chat.name}\" — tap Accept or Decline below",
                         timestamp = (timestamp * 1000).toLong(),
                         isOutbound = false,
                         state = RetichatBridge.MessageState.DELIVERED,
+                        systemKind = SystemText.MEMBER,
                     )
                 )
                 if (firstInviteChunk && RetichatApp.activeChatId != chat.id) {
                     MessageNotificationHelper.notify(
                         appContext,
                         "Group invite",
-                        "$senderName invited you to \"${chat.name}\"",
+                        "${resolvedName(actualSenderHex)} invited you to \"${chat.name}\"",
                         chat.id,
                     )
                 }
@@ -1501,20 +1590,22 @@ class ChatRepository(
             GroupChatManager.Action.ACCEPT -> {
                 Log.i(TAG, "${actualSenderHex.take(8)} accepted group ${chat.id}")
                 messageDao.setGroupMemberStatus(chat.id, actualSenderHex, MemberStatus.ACCEPTED)
+                // A confirmed member passes the privacy filter (iOS handleGroupAccept).
+                if (actualSenderHex != selfHex()) ensureAllowlistedContact(actualSenderHex)
 
-                // Insert a system "X joined the group" message (idempotent)
-                val joinerName = contactDao.findByHash(actualSenderHex)?.displayName
-                    ?: actualSenderHex.take(8)
+                // Insert a system "X joined the group" message (idempotent);
+                // the name is resolved when shown.
                 val sysId = "acc_${actualSenderHex.take(8)}_${groupId.take(8)}"
                 messageDao.upsert(
                     MessageEntity(
                         id = sysId,
                         chatId = chat.id,
                         senderHashHex = actualSenderHex,
-                        content = "$joinerName joined the group",
+                        content = "joined the group",
                         timestamp = (timestamp * 1000).toLong(),
                         isOutbound = false,
                         state = RetichatBridge.MessageState.DELIVERED,
+                        systemKind = SystemText.MEMBER,
                     )
                 )
             }
@@ -1522,17 +1613,16 @@ class ChatRepository(
             GroupChatManager.Action.LEAVE -> {
                 Log.i(TAG, "${actualSenderHex.take(8)} left group ${chat.id}")
                 messageDao.setGroupMemberStatus(chat.id, actualSenderHex, MemberStatus.LEFT)
-                val leaverName = contactDao.findByHash(actualSenderHex)?.displayName
-                    ?: actualSenderHex.take(8)
                 messageDao.upsert(
                     MessageEntity(
                         id = msgId,
                         chatId = chat.id,
                         senderHashHex = actualSenderHex,
-                        content = "$leaverName left the group",
+                        content = "left the group",
                         timestamp = (timestamp * 1000).toLong(),
                         isOutbound = false,
                         state = RetichatBridge.MessageState.DELIVERED,
+                        systemKind = SystemText.MEMBER,
                     )
                 )
             }
@@ -1578,12 +1668,11 @@ class ChatRepository(
                     saveInboundAttachments(msgId, fields)
 
                     if (RetichatApp.activeChatId != chat.id) {
-                        val contact = contactDao.findByHash(actualSenderHex)
-                        val senderName = contact?.displayName ?: actualSenderHex.take(8)
                         val notifText = if (content.isNotBlank()) content
                                         else "\uD83D\uDCCE ${attachments.size} attachment(s)"
                         MessageNotificationHelper.notify(
-                            appContext, "$senderName (${chat.name})", notifText, chat.id,
+                            appContext, resolvedName(actualSenderHex), notifText, chat.id,
+                            conversationTitle = chat.name,
                         )
                     }
                 }
@@ -1628,6 +1717,8 @@ class ChatRepository(
         }
 
         messageDao.setGroupMemberStatus(chatId, selfHex, MemberStatus.ACCEPTED)
+        // Every member passes the privacy filter (iOS acceptGroupInvite).
+        allMembers.filter { it != selfHex }.forEach { ensureAllowlistedContact(it) }
         groupChatManager?.sendAccept(groupId, allMembers)
             ?: Log.w(TAG, "acceptGroupInvite: stack offline, accept will not be broadcast")
 
@@ -1686,17 +1777,17 @@ class ChatRepository(
             if (chat != null) {
                 Log.i(TAG, "STOP received from $srcHex for group ${chat.id}")
                 messageDao.setGroupMemberStatus(chat.id, srcHex, MemberStatus.LEFT)
-                val leaverName = contactDao.findByHash(srcHex)?.displayName ?: srcHex.take(8)
-                // Insert a system message in the group chat
+                // Insert a system message in the group chat (name resolved when shown)
                 messageDao.upsert(
                     MessageEntity(
                         id = msgId,
                         chatId = chat.id,
                         senderHashHex = srcHex,
-                        content = "$leaverName left the group",
+                        content = "left the group",
                         timestamp = (timestamp * 1000).toLong(),
                         isOutbound = false,
                         state = RetichatBridge.MessageState.DELIVERED,
+                        systemKind = SystemText.MEMBER,
                     )
                 )
                 return
@@ -1706,12 +1797,12 @@ class ChatRepository(
         val chatId = directChatId(srcHash)
         val existingChat = chatDao.findById(chatId)
         if (existingChat == null) {
-            val contact = contactDao.findByHash(srcHex)
+            // A DM's title is resolved from the contact when shown.
             chatDao.upsert(
                 ChatEntity(
                     id = chatId,
                     isGroup = false,
-                    name = contact?.displayName ?: srcHex.take(8),
+                    name = "",
                     memberHashes = srcHex,
                 )
             )
@@ -1736,8 +1827,7 @@ class ChatRepository(
 
         // Show notification unless the user is viewing this chat
         if (RetichatApp.activeChatId != chatId) {
-            val contact = contactDao.findByHash(srcHex)
-            val senderName = contact?.displayName ?: srcHex.take(8)
+            val senderName = resolvedName(srcHex)
             Log.i(TAG, "Posting notification: sender=$senderName")
             MessageNotificationHelper.notify(appContext, senderName, content, chatId)
         }
@@ -1812,8 +1902,11 @@ class ChatRepository(
 
     /**
      * Called when we receive a delivery announce from the network.
-     * Updates the contact's display name and, if a DM chat exists, its name too.
-     * Does NOT overwrite a name that the user has manually set.
+     * DISPLAY_NAMES.md §5.1: the announce name (cleaned by the router,
+     * "Anonymous Peer" as none) replaces the contact's `announceName` on every
+     * announce, and an announce without a name clears it. The other slots are
+     * never touched. Announces from destinations that are not contacts are
+     * ignored.
      */
     fun onAnnounceReceived(destHash: ByteArray, displayName: String?) {
         val hex = destHash.toHex()
@@ -1823,22 +1916,15 @@ class ChatRepository(
             UserPreferences.setDistroContact(appContext, hex, true)
             Log.i(TAG, "contact ${hex.take(8)} announced as a distro address")
         }
-        if (displayName.isNullOrBlank()) return
         scope.launch(Dispatchers.IO) {
             val existing = contactDao.findByHash(hex)
             if (existing != null) {
-                // Never overwrite a name the user has manually set
-                if (existing.isNameManual) return@launch
-                // Only update if the name actually changed
-                if (existing.displayName != displayName) {
-                    contactDao.upsert(existing.copy(displayName = displayName))
-                    // Also update the DM chat name if one exists
-                    val chatId = "dm_$hex"
-                    val chat = chatDao.findById(chatId)
-                    if (chat != null) {
-                        chatDao.upsert(chat.copy(name = displayName))
+                when (val update = DisplayNames.acceptAnnounceName(existing.announceName, displayName)) {
+                    NameUpdate.Unchanged -> Unit
+                    is NameUpdate.Set -> {
+                        contactDao.setAnnounceName(hex, update.name)
+                        Log.i(TAG, "name: ${hex.take(8)} announceName ${if (update.name == null) "cleared" else "set"}")
                     }
-                    Log.i(TAG, "Updated contact $hex name: '${existing.displayName}' → '$displayName'")
                 }
             } else {
                 // Ignore announces from unknown destinations – never auto-create contacts
@@ -1938,11 +2024,14 @@ class ChatRepository(
 
     private fun directChatId(peerHash: ByteArray): String = "dm_${peerHash.toHex()}"
 
+    private fun ContactEntity.names() = ContactNames(localName, messageName, announceName)
+
     private fun ContactEntity.toDomain() = Contact(
         destHash = destHashHex.hexToBytes(),
-        displayName = displayName,
+        displayName = DisplayNames.contact(names(), destHashHex),
         publicKey = publicKeyHex?.hexToBytes(),
         addedAt = addedAt,
-        isNameManual = isNameManual,
+        localName = localName,
+        isAllowlisted = isAllowlisted,
     )
 }

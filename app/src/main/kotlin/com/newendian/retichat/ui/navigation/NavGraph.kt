@@ -19,6 +19,7 @@ import com.newendian.retichat.RetichatApp
 import com.newendian.retichat.bridge.RetichatBridge
 import com.newendian.retichat.data.model.Contact
 import com.newendian.retichat.data.model.hexToBytes
+import com.newendian.retichat.names.NameBook
 import com.newendian.retichat.ui.chatlist.ChatListScreen
 import com.newendian.retichat.ui.chatlist.ChatListViewModel
 import com.newendian.retichat.ui.contacts.QrCodeScreen
@@ -90,6 +91,13 @@ fun RetichatNavHost(navController: NavHostController) {
 
         composable(Routes.NEW_CHAT) {
             val scope = rememberCoroutineScope()
+            // The contacts the user added or shares a group with (allowlisted,
+            // as iOS lists them), each under its resolved name.
+            val allContacts by repository.contacts().collectAsState(initial = emptyList())
+            val selfHex = remember { repository.selfDestHash.joinToString("") { "%02x".format(it) } }
+            val contacts = remember(allContacts, selfHex) {
+                allContacts.filter { it.isAllowlisted && it.destHashHex != selfHex }
+            }
             NewChatScreen(
                 onChatCreated = { chatId ->
                     navController.navigate(Routes.conversation(chatId)) {
@@ -103,10 +111,17 @@ fun RetichatNavHost(navController: NavHostController) {
                 onDestHashChat = { hexHash ->
                     scope.launch {
                         val destBytes = hexHash.hexToBytes()
-                        repository.addContact(destBytes, hexHash.take(8))
                         DistroContacts.adopt(app, hexHash)
-                        val contact = Contact(destBytes, hexHash.take(8))
-                        val chatId = repository.getOrCreateDirectChat(contact)
+                        val chatId = repository.getOrCreateDirectChat(destBytes)
+                        navController.navigate(Routes.conversation(chatId)) {
+                            popUpTo(Routes.CHAT_LIST)
+                        }
+                    }
+                },
+                contacts = contacts,
+                onSelectContact = { contact ->
+                    scope.launch {
+                        val chatId = repository.getOrCreateDirectChat(contact.destHash)
                         navController.navigate(Routes.conversation(chatId)) {
                             popUpTo(Routes.CHAT_LIST)
                         }
@@ -116,15 +131,17 @@ fun RetichatNavHost(navController: NavHostController) {
         }
 
         composable(Routes.NEW_GROUP) {
-            // Show everyone the user has a DM chat with as potential group members
+            // Show everyone the user has a DM chat with as potential group
+            // members, each under its resolved name (DISPLAY_NAMES.md §5.3).
             val chatPreviews by repository.chatPreviews().collectAsState(initial = emptyList())
-            val dmContacts = remember(chatPreviews) {
+            val names by repository.nameBook().collectAsState(initial = NameBook.EMPTY)
+            val dmContacts = remember(chatPreviews, names) {
                 chatPreviews
                     .filter { !it.isGroup }
                     .map { preview ->
                         Contact(
                             destHash = preview.memberHashes.hexToBytes(),
-                            displayName = preview.name,
+                            displayName = names.contact(preview.memberHashes),
                         )
                     }
             }
@@ -172,10 +189,8 @@ fun RetichatNavHost(navController: NavHostController) {
                     // add as contact, ensure DM chat exists, navigate.
                     scope.launch {
                         val destBytes = destHashHex.hexToBytes()
-                        repository.addContact(destBytes, destHashHex.take(8))
                         DistroContacts.adopt(app, destHashHex)
-                        val contact = Contact(destBytes, destHashHex.take(8))
-                        val chatId = repository.getOrCreateDirectChat(contact)
+                        val chatId = repository.getOrCreateDirectChat(destBytes)
                         navController.navigate(Routes.conversation(chatId)) {
                             popUpTo(Routes.CHAT_LIST)
                         }

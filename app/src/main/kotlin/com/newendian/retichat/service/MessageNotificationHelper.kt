@@ -29,12 +29,13 @@ object MessageNotificationHelper {
      */
     private fun notifIdForChat(chatId: String): Int = chatId.hashCode() and 0x7FFFFFFF
 
-    /** Tracks accumulated messages per chat for MessagingStyle history. */
-    private data class ChatMessages(
-        val senderName: String,
-        val messages: MutableList<Pair<String, Long>>,   // content, timestamp
-    )
-    private val activeChatMessages = mutableMapOf<String, ChatMessages>()
+    /**
+     * Accumulated messages per chat for MessagingStyle history, each with its
+     * own sender. Until 2026-09-27 a chat kept one sender name, and a stacked
+     * group or channel notification credited every earlier message to the
+     * latest sender.
+     */
+    private val history = NotificationHistory()
 
     /**
      * Create the notification channel (idempotent, safe to call multiple times).
@@ -60,11 +61,16 @@ object MessageNotificationHelper {
      * Messages from the same chat stack inside a single expandable notification
      * using MessagingStyle, and a summary groups all chats together.
      */
+    /**
+     * [senderName] is the resolved name of this message's sender (NameBook).
+     * [conversationTitle] names a group or channel; a DM has none.
+     */
     fun notify(
         context: Context,
         senderName: String,
         content: String,
         chatId: String,
+        conversationTitle: String? = null,
     ) {
         Log.i(TAG, "notify: sender=$senderName, content='${content.take(30)}', chatId=$chatId")
         val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -75,20 +81,17 @@ object MessageNotificationHelper {
         }
 
         // Accumulate messages for this chat
-        val now = System.currentTimeMillis()
-        val chatMsgs = activeChatMessages.getOrPut(chatId) {
-            ChatMessages(senderName, mutableListOf())
-        }
-        chatMsgs.messages.add(content to now)
+        val chatMsgs = history.add(chatId, senderName, content, System.currentTimeMillis())
 
-        // Build MessagingStyle with conversation history
-        val sender = Person.Builder().setName(senderName).build()
+        // Build MessagingStyle with conversation history, each message
+        // under its own sender.
         val style = NotificationCompat.MessagingStyle(
             Person.Builder().setName("Me").build()
-        ).setConversationTitle(if (chatMsgs.messages.size > 1) senderName else null)
+        ).setConversationTitle(NotificationHistory.title(conversationTitle, chatMsgs))
+            .setGroupConversation(conversationTitle != null)
 
-        for ((msg, ts) in chatMsgs.messages) {
-            style.addMessage(msg, ts, sender)
+        for (entry in chatMsgs) {
+            style.addMessage(entry.content, entry.timestamp, Person.Builder().setName(entry.sender).build())
         }
 
         // PendingIntent opens the specific chat
@@ -112,15 +115,15 @@ object MessageNotificationHelper {
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setDefaults(NotificationCompat.DEFAULT_ALL)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
-            .setNumber(chatMsgs.messages.size)
+            .setNumber(chatMsgs.size)
             .build()
 
         nm.notify(chatId, notifId, notification)
 
         // Summary notification (groups all chat notifications together)
-        if (activeChatMessages.size > 1) {
-            val totalMessages = activeChatMessages.values.sumOf { it.messages.size }
-            val chatCount = activeChatMessages.size
+        if (history.chatCount > 1) {
+            val totalMessages = history.totalMessages
+            val chatCount = history.chatCount
             val summaryText = "$totalMessages messages from $chatCount chats"
 
             val summaryIntent = Intent(context, MainActivity::class.java).apply {
@@ -150,15 +153,48 @@ object MessageNotificationHelper {
      * Clear accumulated messages for a chat (call when user opens the conversation).
      */
     fun clearChat(chatId: String) {
-        activeChatMessages.remove(chatId)
+        history.clear(chatId)
     }
 
     /**
      * Clear all accumulated messages (call on full app open, etc.).
      */
     fun clearAll(context: Context) {
-        activeChatMessages.clear()
+        history.clearAll()
         val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         nm.cancelAll()
+    }
+}
+
+/**
+ * The messages a chat's notification stacks, each with its own sender
+ * (pure, so the stacking rule is unit-tested).
+ */
+class NotificationHistory {
+    data class Entry(val sender: String, val content: String, val timestamp: Long)
+
+    private val chats = mutableMapOf<String, MutableList<Entry>>()
+
+    /** Record one message; returns the chat's messages so far, oldest first. */
+    @Synchronized
+    fun add(chatId: String, sender: String, content: String, timestamp: Long): List<Entry> {
+        val list = chats.getOrPut(chatId) { mutableListOf() }
+        list.add(Entry(sender, content, timestamp))
+        return list.toList()
+    }
+
+    @Synchronized fun clear(chatId: String) { chats.remove(chatId) }
+    @Synchronized fun clearAll() { chats.clear() }
+
+    val chatCount: Int @Synchronized get() = chats.size
+    val totalMessages: Int @Synchronized get() = chats.values.sumOf { it.size }
+
+    companion object {
+        /**
+         * A group or channel is titled by its name; a DM stack by its one
+         * sender once it holds more than one message.
+         */
+        fun title(conversationTitle: String?, entries: List<Entry>): String? =
+            conversationTitle ?: entries.takeIf { it.size > 1 }?.last()?.sender
     }
 }

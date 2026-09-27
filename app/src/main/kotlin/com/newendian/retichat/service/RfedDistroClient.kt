@@ -14,6 +14,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import com.newendian.retichat.names.NameField
+import com.newendian.retichat.names.Signature
 import org.json.JSONObject
 
 /**
@@ -101,8 +103,25 @@ object RfedDistroClient {
         }
     }
 
+    /**
+     * The Announce Display Name changed: hand RFed a new pre-signed distro
+     * announce carrying it (DISPLAY_NAMES.md §2.2). Nothing to do without a
+     * registered distro; registration publishes the current name itself.
+     */
+    fun republishAnnounce(context: Context) {
+        val distro = DistroManager.identityHandle
+        if (distro == 0L || registeredForHandle != distro) return
+        scope.launch {
+            val dest = destHash(context, "register") ?: return@launch
+            publishAnnounce(context, dest, distro)
+        }
+    }
+
     private suspend fun publishAnnounce(context: Context, dest: ByteArray, distro: Long) {
-        val payload = RetichatBridge.distroAnnouncePayload(distro, null) ?: run {
+        // [announce_name | nil, nil, [0xD0]]: the distro is anonymous unless
+        // the user filled in the public Announce Display Name.
+        val announceName = UserPreferences.getAnnounceDisplayName(context)
+        val payload = RetichatBridge.distroAnnouncePayload(distro, announceName) ?: run {
             Log.w(TAG, "announce payload: ${RetichatBridge.lastError()}")
             return
         }
@@ -182,6 +201,16 @@ object RfedDistroClient {
         // read null explicitly; an empty sent_by is still a marker.
         val sentTo = if (o.isNull("sent_to")) null else o.optString("sent_to")
         val sentBy = if (o.isNull("sent_by")) null else o.optString("sent_by")
+        // DISPLAY_NAMES.md §5.2: the sender's 0xD1 and how far its signature
+        // checked out; the repository decides whether to accept the name.
+        val nameField = NameField.fromState(
+            o.optInt("display_name_state", 0),
+            if (o.isNull("display_name")) null else o.optString("display_name"),
+        )
+        val unverifiedReason = Signature.reason(
+            o.optBoolean("signature_validated", false),
+            if (o.isNull("unverified_reason")) null else o.optInt("unverified_reason", Signature.INVALID),
+        )
 
         val key = DistroCodec.seenKey(srcHex, timestamp)
         if (!UserPreferences.markDistroSeen(context, key)) {
@@ -220,7 +249,7 @@ object RfedDistroClient {
             }
         }
         val srcHash = DistroCodec.hexToBytes(srcHex) ?: return
-        app.repository.onDistroMessageReceived(srcHash, title, content, timestamp)
+        app.repository.onDistroMessageReceived(srcHash, title, content, timestamp, nameField, unverifiedReason)
     }
 
     /** Another device offered us a distro key (field 0x0D or a distro blob). */
