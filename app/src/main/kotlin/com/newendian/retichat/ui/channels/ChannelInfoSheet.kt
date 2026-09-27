@@ -1,9 +1,18 @@
 package com.newendian.retichat.ui.channels
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
+import android.os.Build
+import android.widget.Toast
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.automirrored.filled.ExitToApp
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -11,6 +20,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.newendian.retichat.RetichatApp
@@ -20,7 +30,11 @@ import kotlinx.coroutines.launch
 /**
  * Bottom-sheet shown from the Conversation screen when the user is viewing
  * an RFed channel and taps the info button. Mirrors iOS `ChannelInfoSheet`:
- *  - "#name" header + raw 32-hex channel id
+ *  - the full channel name ("<root>.<name>"), selectable and never
+ *    truncated, since that name is how a channel is shared (for a private
+ *    channel it is the invite); the 32-hex channel id is secondary text
+ *  - "Copy name" (exactly [ChannelShare.shareText]) and "Share" (ACTION_SEND
+ *    chooser), with a hint saying who the name lets in
  *  - "Push All Messages" toggle (registers/deregisters rfed.notify)
  *  - "Notifications" toggle (gated on push)
  *  - "Leave Channel" destructive action
@@ -37,6 +51,7 @@ fun ChannelInfoSheet(
     val app = context.applicationContext as RetichatApp
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val scope = rememberCoroutineScope()
+    val shareName = ChannelShare.shareText(channelName)
 
     var pushEnabled by remember(channelId) {
         mutableStateOf(UserPreferences.isChannelPushEnabled(context, channelId))
@@ -74,10 +89,22 @@ fun ChannelInfoSheet(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
+                // The full name, not "#name": this is the text people select
+                // and copy to share the channel, so it must be exactly the
+                // name. It wraps rather than truncates (private roots are long).
+                SelectionContainer {
+                    Text(
+                        shareName,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        textAlign = TextAlign.Center,
+                    )
+                }
                 Text(
-                    "#${channelName}",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
+                    ChannelShare.hint(shareName),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
                 )
                 Text(
                     channelId,
@@ -85,6 +112,27 @@ fun ChannelInfoSheet(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     overflow = TextOverflow.Ellipsis,
                 )
+                Row(
+                    modifier = Modifier.padding(top = 6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    OutlinedButton(
+                        onClick = { copyChannelName(context, shareName) },
+                        enabled = shareName.isNotEmpty(),
+                    ) {
+                        Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Copy name")
+                    }
+                    OutlinedButton(
+                        onClick = { shareChannelName(context, shareName) },
+                        enabled = shareName.isNotEmpty(),
+                    ) {
+                        Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Share")
+                    }
+                }
             }
 
             Surface(
@@ -192,4 +240,29 @@ fun ChannelInfoSheet(
             }
         }
     }
+}
+
+/**
+ * Puts exactly the full channel name on the clipboard. Android 13+ shows its
+ * own copied-to-clipboard confirmation, so the Toast is only for older
+ * versions (the platform guidance: never both).
+ */
+private fun copyChannelName(context: Context, name: String) {
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    clipboard.setPrimaryClip(ClipData.newPlainText("Channel name", name))
+    if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.S_V2) {
+        Toast.makeText(context, "Channel name copied", Toast.LENGTH_SHORT).show()
+    }
+}
+
+/** Offers the full channel name, and nothing else, to the system share chooser. */
+private fun shareChannelName(context: Context, name: String) {
+    val send = Intent(Intent.ACTION_SEND).apply {
+        type = "text/plain"
+        putExtra(Intent.EXTRA_TEXT, name)
+    }
+    val chooser = Intent.createChooser(send, "Share channel name").apply {
+        if (context !is android.app.Activity) addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    context.startActivity(chooser)
 }
