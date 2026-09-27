@@ -6,12 +6,14 @@ import android.util.Log
 import com.newendian.retichat.GroupMemberStatuses
 import com.newendian.retichat.MemberStatus
 import com.newendian.retichat.RetichatApp
+import com.newendian.retichat.bridge.GroupEntry
 import com.newendian.retichat.bridge.LxmfFields
 import com.newendian.retichat.service.DistroCodec
 import com.newendian.retichat.service.DistroManager
 import com.newendian.retichat.service.RfedDistroClient
 import com.newendian.retichat.bridge.RetichatBridge
 import com.newendian.retichat.service.GroupChatManager
+import com.newendian.retichat.service.GroupFields
 import com.newendian.retichat.service.MessageNotificationHelper
 import com.newendian.retichat.service.NetworkMonitor
 import com.newendian.retichat.service.PropagationNodeManager
@@ -1275,8 +1277,8 @@ class ChatRepository(
                 )
                 if (handle != 0L) {
                     // Attach group metadata
-                    RetichatBridge.messageAddFieldString(handle, LxmfFields.GROUP_ID, groupIdHex)
-                    RetichatBridge.messageAddFieldString(handle, LxmfFields.GROUP_SENDER, selfHex)
+                    GroupFields.set(handle, GroupEntry.ID, groupIdHex)
+                    GroupFields.set(handle, GroupEntry.SENDER, selfHex)
 
                     attachments.forEach { (name, data) ->
                         RetichatBridge.messageAddAttachment(handle, name, data)
@@ -1360,7 +1362,7 @@ class ChatRepository(
         val fields = LxmfFields.decode(fieldsRaw)
         // Field 0xD1, decoded by the one Rust decoder (bin or str; §3).
         val nameField = NameField.fromTrailer(RetichatBridge.displayNameDecode(fieldsRaw))
-        val groupId = fields.getString(LxmfFields.GROUP_ID)
+        val groupId = fields.group(GroupEntry.ID)
         Log.i(TAG, "onMessageReceived: src=${srcHash.toHex().take(16)}, groupId=$groupId, content='${content.take(40)}'")
         // A distro identity transfer from another of our devices (RFed SPEC §17.9):
         // LXMF's custom pair with our type string; not a message to display —
@@ -1378,7 +1380,7 @@ class ChatRepository(
             // The privacy filter, exactly as iOS applies it (DeliveryPolicy),
             // before any write, so a stranger leaves nothing behind.
             if (groupId != null) {
-                val action = fields.getString(LxmfFields.GROUP_ACTION)
+                val action = fields.group(GroupEntry.ACTION)
                 val allowed = DeliveryPolicy.groupMessage(
                     action = action,
                     inviterAllowed = allowlisted(srcHex),
@@ -1499,14 +1501,14 @@ class ChatRepository(
         timestamp: Double,
         fields: LxmfFields,
     ) {
-        val groupId = fields.getString(LxmfFields.GROUP_ID)
-        val groupMembers = fields.getString(LxmfFields.GROUP_MEMBERS)
-        val groupName = fields.getString(LxmfFields.GROUP_NAME)
-        val groupSender = fields.getString(LxmfFields.GROUP_SENDER)
-        val groupAction = fields.getString(LxmfFields.GROUP_ACTION)
-        val groupRelayFor = fields.getString(LxmfFields.GROUP_RELAY_FOR)
-        val groupRelaySeen = fields.getString(LxmfFields.GROUP_RELAY_SEEN)
-        val groupMemberKeys = fields.getString(LxmfFields.GROUP_MEMBER_KEYS)
+        val groupId = fields.group(GroupEntry.ID)
+        val groupMembers = fields.group(GroupEntry.MEMBERS)
+        val groupName = fields.group(GroupEntry.NAME)
+        val groupSender = fields.group(GroupEntry.SENDER)
+        val groupAction = fields.group(GroupEntry.ACTION)
+        val groupRelayFor = fields.group(GroupEntry.RELAY_FOR)
+        val groupRelaySeen = fields.group(GroupEntry.RELAY_SEEN)
+        val groupMemberKeys = fields.group(GroupEntry.MEMBER_KEYS)
 
         // Determine the actual sender (may be relayed on behalf of another member)
         val actualSenderHex = groupSender ?: srcHex
@@ -1910,8 +1912,8 @@ class ChatRepository(
                     identityHandle = identityHandle,
                 )
                 if (handle != 0L) {
-                    RetichatBridge.messageAddFieldString(handle, LxmfFields.GROUP_ID, groupIdHex)
-                    RetichatBridge.messageAddFieldString(handle, LxmfFields.GROUP_SENDER, selfHex)
+                    GroupFields.set(handle, GroupEntry.ID, groupIdHex)
+                    GroupFields.set(handle, GroupEntry.SENDER, selfHex)
                     // A leave is signalled by having GROUP_ID + GROUP_SENDER + content="left the group"
                     // but no GROUP_MEMBERS (which distinguishes it from a create message)
                     RetichatBridge.messageSendViaAppLinks(handle)

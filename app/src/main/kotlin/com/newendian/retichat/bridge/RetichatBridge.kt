@@ -395,13 +395,31 @@ object RetichatBridge {
     fun messageAddAttachment(handle: Long, filename: String, data: ByteArray): Boolean =
         nativeMessageAddAttachment(handle, filename, data) == 0
 
-    /** Add a string-valued LXMF field (e.g. group metadata). */
+    /**
+     * Add a string-valued top-level LXMF field. 0xD1 (the Retichat field) is
+     * refused: its entries go through [messageSetRetichatString]. Group
+     * entries are written only by `service.GroupFields`.
+     */
     fun messageAddFieldString(handle: Long, key: Int, value: String): Boolean =
         nativeMessageAddFieldString(handle, key, value) == 0
 
-    /** Add a boolean-valued LXMF field. */
+    /** Add a boolean-valued top-level LXMF field; 0xD1 is refused. */
     fun messageAddFieldBool(handle: Long, key: Int, value: Boolean): Boolean =
         nativeMessageAddFieldBool(handle, key, value) == 0
+
+    /**
+     * DISPLAY_NAMES.md §10: set str entry [key] of the Retichat field 0xD1,
+     * merged into `{0xD1: {key: value}}` beside the entries already there.
+     * [key] must be 1..127 (0 is the display name, which only the router
+     * writes), and keys 1-9 must take their own type (all str but 8).
+     * False, with [lastError], and the message unchanged, otherwise.
+     */
+    fun messageSetRetichatString(handle: Long, key: Int, value: String): Boolean =
+        nativeMessageSetRetichatString(handle, key, value) == 0
+
+    /** As [messageSetRetichatString], for a bool entry (of keys 1-9 only 8). */
+    fun messageSetRetichatBool(handle: Long, key: Int, value: Boolean): Boolean =
+        nativeMessageSetRetichatBool(handle, key, value) == 0
 
     /** Clone a message as a fresh PROPAGATED copy, preserving fields/attachments. */
     fun messageClonePropagated(handle: Long): Long = nativeMessageClonePropagated(handle)
@@ -458,6 +476,8 @@ object RetichatBridge {
     private external fun nativeMessageAddAttachment(handle: Long, filename: String, data: ByteArray): Int
     private external fun nativeMessageAddFieldString(handle: Long, key: Int, value: String): Int
     private external fun nativeMessageAddFieldBool(handle: Long, key: Int, value: Boolean): Int
+    private external fun nativeMessageSetRetichatString(handle: Long, key: Int, value: String): Int
+    private external fun nativeMessageSetRetichatBool(handle: Long, key: Int, value: Boolean): Int
     private external fun nativeMessageClonePropagated(handle: Long): Long
     private external fun nativeRouterIngestPropagated(router: Long, lxmfData: ByteArray): Boolean
     private external fun nativeRouterSetMessageStateCallback(router: Long, callback: MessageStateCallback): Int

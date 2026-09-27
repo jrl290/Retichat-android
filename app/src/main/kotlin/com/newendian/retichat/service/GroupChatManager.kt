@@ -3,7 +3,7 @@ package com.newendian.retichat.service
 import android.content.Context
 import android.util.Base64
 import android.util.Log
-import com.newendian.retichat.bridge.LxmfFields
+import com.newendian.retichat.bridge.GroupEntry
 import com.newendian.retichat.bridge.RetichatBridge
 import com.newendian.retichat.data.model.hexToBytes
 import com.newendian.retichat.data.model.toHex
@@ -17,9 +17,10 @@ import java.util.concurrent.ConcurrentHashMap
  * Network-level group chat protocol operations.
  *
  * All outbound LXMF messages are sent DIRECT (method 0x02).
- * Every message carries GROUP_ID (0xA0) and GROUP_SENDER (0xA4) so the
- * receiver can attribute the message correctly even when it arrives via
- * a relay hop.
+ * Every message carries the group id and GROUP_SENDER so the receiver can
+ * attribute the message correctly even when it arrives via a relay hop.
+ * Group entries are written only through [GroupFields] (DISPLAY_NAMES.md §10:
+ * the old fields 0xA0-0xA8 until the switch, then the Retichat field 0xD1).
  *
  * See RFed-spec/Group.md for the full protocol specification.
  */
@@ -86,12 +87,12 @@ class GroupChatManager(
         allMembers.filter { it != selfHex }.forEach { target ->
             memberKeyEntries.forEach { memberKeyEntry ->
                 send(target, content) { handle ->
-                    setField(handle, LxmfFields.GROUP_ID, groupId)
-                    setField(handle, LxmfFields.GROUP_NAME, groupName)
-                    setField(handle, LxmfFields.GROUP_MEMBERS, membersCSV)
-                    setField(handle, LxmfFields.GROUP_MEMBER_KEYS, memberKeyEntry)
-                    setField(handle, LxmfFields.GROUP_ACTION, Action.INVITE)
-                    setField(handle, LxmfFields.GROUP_SENDER, selfHex)
+                    GroupFields.set(handle, GroupEntry.ID, groupId)
+                    GroupFields.set(handle, GroupEntry.NAME, groupName)
+                    GroupFields.set(handle, GroupEntry.MEMBERS, membersCSV)
+                    GroupFields.set(handle, GroupEntry.MEMBER_KEYS, memberKeyEntry)
+                    GroupFields.set(handle, GroupEntry.ACTION, Action.INVITE)
+                    GroupFields.set(handle, GroupEntry.SENDER, selfHex)
                 }
             }
         }
@@ -112,9 +113,9 @@ class GroupChatManager(
     ) {
         members.filter { it != selfHex }.forEach { target ->
             send(target) { handle ->
-                setField(handle, LxmfFields.GROUP_ID,     groupId)
-                setField(handle, LxmfFields.GROUP_ACTION, Action.ACCEPT)
-                setField(handle, LxmfFields.GROUP_SENDER, selfHex)
+                GroupFields.set(handle, GroupEntry.ID,     groupId)
+                GroupFields.set(handle, GroupEntry.ACTION, Action.ACCEPT)
+                GroupFields.set(handle, GroupEntry.SENDER, selfHex)
             }
         }
     }
@@ -124,10 +125,10 @@ class GroupChatManager(
     /** Confirm to [requesterHex] that the relay was completed. */
     private fun sendRelayDone(groupId: String, requesterHex: String) {
         send(requesterHex) { handle ->
-            setField(handle, LxmfFields.GROUP_ID,       groupId)
-            setField(handle, LxmfFields.GROUP_ACTION,   Action.RELAY_DONE)
-            setField(handle, LxmfFields.GROUP_SENDER,   selfHex)
-            setFieldBool(handle, LxmfFields.GROUP_RELAY_DONE, true)
+            GroupFields.set(handle, GroupEntry.ID,       groupId)
+            GroupFields.set(handle, GroupEntry.ACTION,   Action.RELAY_DONE)
+            GroupFields.set(handle, GroupEntry.SENDER,   selfHex)
+            GroupFields.set(handle, GroupEntry.RELAY_DONE, true)
         }
     }
 
@@ -142,9 +143,9 @@ class GroupChatManager(
     ) {
         acceptedMembers.filter { it != selfHex }.forEach { target ->
             send(target, "left the group") { handle ->
-                setField(handle, LxmfFields.GROUP_ID,     groupId)
-                setField(handle, LxmfFields.GROUP_ACTION, Action.LEAVE)
-                setField(handle, LxmfFields.GROUP_SENDER, selfHex)
+                GroupFields.set(handle, GroupEntry.ID,     groupId)
+                GroupFields.set(handle, GroupEntry.ACTION, Action.LEAVE)
+                GroupFields.set(handle, GroupEntry.SENDER, selfHex)
             }
         }
     }
@@ -183,9 +184,9 @@ class GroupChatManager(
                 attachments.forEach { (name, data) ->
                     RetichatBridge.messageAddAttachment(handle, name, data)
                 }
-                setField(handle, LxmfFields.GROUP_ID,     groupId)
-                setField(handle, LxmfFields.GROUP_NAME,   groupName)
-                setField(handle, LxmfFields.GROUP_SENDER, selfHex)
+                GroupFields.set(handle, GroupEntry.ID,     groupId)
+                GroupFields.set(handle, GroupEntry.NAME,   groupName)
+                GroupFields.set(handle, GroupEntry.SENDER, selfHex)
                 val ok = RetichatBridge.messageSendViaAppLinks(handle)
                 if (ok) {
                     track(handle)
@@ -214,12 +215,12 @@ class GroupChatManager(
         relayerHex: String,
     ) {
         send(relayerHex, content) { handle ->
-            setField(handle, LxmfFields.GROUP_ID,       groupId)
-            setField(handle, LxmfFields.GROUP_ACTION,   Action.RELAY_REQUEST)
-            setField(handle, LxmfFields.GROUP_SENDER,   originalSender)
-            setField(handle, LxmfFields.GROUP_RELAY_FOR, originalSender)
+            GroupFields.set(handle, GroupEntry.ID,       groupId)
+            GroupFields.set(handle, GroupEntry.ACTION,   Action.RELAY_REQUEST)
+            GroupFields.set(handle, GroupEntry.SENDER,   originalSender)
+            GroupFields.set(handle, GroupEntry.RELAY_FOR, originalSender)
             if (alreadySeen.isNotEmpty()) {
-                setField(handle, LxmfFields.GROUP_RELAY_SEEN, alreadySeen.joinToString(","))
+                GroupFields.set(handle, GroupEntry.RELAY_SEEN, alreadySeen.joinToString(","))
             }
         }
     }
@@ -249,11 +250,11 @@ class GroupChatManager(
         // Forward to uncovered members
         targets.forEach { target ->
             send(target, content) { handle ->
-                setField(handle, LxmfFields.GROUP_ID,         groupId)
-                setField(handle, LxmfFields.GROUP_NAME,       groupName)
-                setField(handle, LxmfFields.GROUP_SENDER,     originalSender)
-                setField(handle, LxmfFields.GROUP_RELAY_FOR,  originalSender)
-                setField(handle, LxmfFields.GROUP_RELAY_SEEN, newSeen.joinToString(","))
+                GroupFields.set(handle, GroupEntry.ID,         groupId)
+                GroupFields.set(handle, GroupEntry.NAME,       groupName)
+                GroupFields.set(handle, GroupEntry.SENDER,     originalSender)
+                GroupFields.set(handle, GroupEntry.RELAY_FOR,  originalSender)
+                GroupFields.set(handle, GroupEntry.RELAY_SEEN, newSeen.joinToString(","))
             }
         }
 
@@ -368,14 +369,6 @@ class GroupChatManager(
         // cannot replace the direct handle under their shared canonical hash.
         RetichatBridge.messageDestroy(propagated)
         Log.i(TAG, "group propagation fallback dispatched")
-    }
-
-    private fun setField(handle: Long, key: Int, value: String) {
-        RetichatBridge.messageAddFieldString(handle, key, value)
-    }
-
-    private fun setFieldBool(handle: Long, key: Int, value: Boolean) {
-        RetichatBridge.messageAddFieldBool(handle, key, value)
     }
 
     private fun destroyAfterDelay(handle: Long, delayMs: Long = 0L) {

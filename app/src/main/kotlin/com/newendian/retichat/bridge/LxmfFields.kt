@@ -28,6 +28,32 @@ class LxmfFields private constructor(
         else -> entries.containsKey(key)  // field present without value = true
     }
 
+    /**
+     * DISPLAY_NAMES.md §10: a str group entry, from the Retichat field 0xD1
+     * when the map holds [entry]'s key as a msgpack str, otherwise from its
+     * old top-level field when that is a str, otherwise null. The map wins
+     * entry by entry (an empty str there is a value). Types are strict: bin
+     * is not a str.
+     */
+    fun group(entry: GroupEntry): String? {
+        require(entry.type == GroupEntry.Type.STR) { "$entry is not a str entry" }
+        return (retichatEntry(entry.key) as? String) ?: (entries[entry.legacyField] as? String)
+    }
+
+    /** As [group], for the one bool entry ([GroupEntry.RELAY_DONE]): msgpack bool only. */
+    fun groupBool(entry: GroupEntry): Boolean? {
+        require(entry.type == GroupEntry.Type.BOOL) { "$entry is not a bool entry" }
+        return (retichatEntry(entry.key) as? Boolean) ?: (entries[entry.legacyField] as? Boolean)
+    }
+
+    /**
+     * Key [key] of the Retichat field 0xD1, or null when 0xD1 is absent or
+     * not a map (§2.1: then it is ignored whole). The display name (key 0) is
+     * never read here: it is decoded by the one Rust decoder
+     * ([RetichatBridge.displayNameDecode]).
+     */
+    private fun retichatEntry(key: Int): Any? = (entries[FIELD_RETICHAT] as? Map<*, *>)?.get(key)
+
     /** Get a raw binary field, or null. */
     fun getBytes(key: Int): ByteArray? = entries[key] as? ByteArray
 
@@ -66,17 +92,6 @@ class LxmfFields private constructor(
     }
 
     companion object {
-        /** Application-level group field IDs (mirrors iOS LxmfFieldKey). */
-        const val GROUP_ID             = 0xA0  // str: 32-hex group identifier
-        const val GROUP_MEMBERS        = 0xA1  // str: comma-sep member hashes (invite only)
-        const val GROUP_NAME           = 0xA2  // str: human-readable group name
-        const val GROUP_ACTION         = 0xA3  // str: "invite"|"accept"|"leave"|"relay_req"|"relay_done"
-        const val GROUP_SENDER         = 0xA4  // str: original sender hex
-        const val GROUP_RELAY_SEEN     = 0xA5  // str: comma-sep hashes already delivered
-        const val GROUP_RELAY_FOR      = 0xA6  // str: hash of member requesting relay
-        const val GROUP_RELAY_DONE     = 0xA7  // bool: relay-complete confirmation
-        const val GROUP_MEMBER_KEYS    = 0xA8  // str: one hash:base64-public-key pair per invite chunk
-
         /** Standard LXMF field IDs (for reference). */
         const val FIELD_EMBEDDED_LXMS    = 0x01
         const val FIELD_TELEMETRY        = 0x02
@@ -107,12 +122,36 @@ class LxmfFields private constructor(
         const val DISTRO_TRANSFER_TYPE   = "rfed.distro.transfer"
         const val DISTRO_SENT_TYPE       = "rfed.distro.sent"
         /**
-         * FIELD_DISPLAY_NAME (LXMF-rust/DISPLAY_NAMES.md §2.1): the sender's
-         * Message Display Name, added by the router, never by the app, and
-         * decoded by the one Rust decoder ([RetichatBridge.displayNameDecode]),
-         * not here. It replaced 0x10, which no Retichat client sends or reads.
+         * FIELD_RETICHAT (LXMF-rust/DISPLAY_NAMES.md §2.1, §10): Retichat's
+         * one field number. Its value is a msgpack map with small integer
+         * keys: 0 the sender's Message Display Name (added by the router,
+         * never by the app, and decoded by the one Rust decoder,
+         * [RetichatBridge.displayNameDecode], not here), 1-9 the group
+         * entries ([GroupEntry]). A 0xD1 that is not a map is ignored whole.
          */
-        const val FIELD_DISPLAY_NAME     = 0xD1
+        const val FIELD_RETICHAT         = 0xD1
+
+        /** §10: the Retichat field's keys (lxmf_rust::retichat_field::RF_*). */
+        const val RF_DISPLAY_NAME        = 0
+        const val RF_GROUP_ID            = 1
+        const val RF_GROUP_MEMBERS       = 2
+        const val RF_GROUP_NAME          = 3
+        const val RF_GROUP_ACTION        = 4
+        const val RF_GROUP_SENDER        = 5
+        const val RF_GROUP_RELAY_SEEN    = 6
+        const val RF_GROUP_RELAY_FOR     = 7
+        const val RF_GROUP_RELAY_DONE    = 8
+        const val RF_GROUP_MEMBER_KEYS   = 9
+
+        /**
+         * §10 transition: false sends group entries in the old top-level
+         * fields 0xA0-0xA8, which released apps read; true sends them only in
+         * the Retichat field. Readers take both either way ([group]). Set to
+         * true in every client together, around 2026-10-26 (with
+         * DELIVERY_PACKET_PROOF = Required). All writes go through
+         * [com.newendian.retichat.service.GroupFields].
+         */
+        const val GROUP_ENTRIES_IN_RETICHAT_FIELD = false
 
         /** Empty fields instance. */
         val EMPTY = LxmfFields(emptyMap())
@@ -147,10 +186,13 @@ class LxmfFields private constructor(
             repeat(count) {
                 val key = readValue(buf)
                 val value = readValue(buf)
+                // Integer keys of any width holding 0..Int.MAX_VALUE. A
+                // negative or larger key (a uint64 above 2^63 reads as
+                // negative) matches nothing, rather than wrapping onto a
+                // small one; string keys never match (§10).
                 val intKey = when (key) {
-                    is Long -> key.toInt()
-                    is Int -> key
-                    else -> return@repeat  // skip non-integer keys
+                    is Long -> if (key in 0L..Int.MAX_VALUE.toLong()) key.toInt() else return@repeat
+                    else -> return@repeat
                 }
                 result[intKey] = value
             }
@@ -251,4 +293,24 @@ class LxmfFields private constructor(
             return result
         }
     }
+}
+
+/**
+ * DISPLAY_NAMES.md §10: the nine group entries, each with its key in the
+ * Retichat field 0xD1, the old top-level field it had, and its type
+ * (lxmf_rust::retichat_field::GROUP_ENTRIES). Group semantics: RFed-spec
+ * Group.md.
+ */
+enum class GroupEntry(val key: Int, val legacyField: Int, val type: Type) {
+    ID(LxmfFields.RF_GROUP_ID, 0xA0, Type.STR),                    // 32-hex group identifier
+    MEMBERS(LxmfFields.RF_GROUP_MEMBERS, 0xA1, Type.STR),          // comma-sep member hashes (invite only)
+    NAME(LxmfFields.RF_GROUP_NAME, 0xA2, Type.STR),                // human-readable group name
+    ACTION(LxmfFields.RF_GROUP_ACTION, 0xA3, Type.STR),            // invite|accept|leave|relay_req|relay_done
+    SENDER(LxmfFields.RF_GROUP_SENDER, 0xA4, Type.STR),            // original sender hex
+    RELAY_SEEN(LxmfFields.RF_GROUP_RELAY_SEEN, 0xA5, Type.STR),    // comma-sep hashes already delivered
+    RELAY_FOR(LxmfFields.RF_GROUP_RELAY_FOR, 0xA6, Type.STR),      // hash of member requesting relay
+    RELAY_DONE(LxmfFields.RF_GROUP_RELAY_DONE, 0xA7, Type.BOOL),   // relay-complete confirmation
+    MEMBER_KEYS(LxmfFields.RF_GROUP_MEMBER_KEYS, 0xA8, Type.STR);  // one hash:base64-public-key pair per invite chunk
+
+    enum class Type { STR, BOOL }
 }
