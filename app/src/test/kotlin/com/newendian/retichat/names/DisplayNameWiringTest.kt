@@ -108,7 +108,7 @@ class DisplayNameWiringTest {
     }
 
     @Test
-    fun channelPostsShowTheirSecondaryTextAndNotifyWithTheMainLabel() {
+    fun channelPostsShowTheirSecondaryTextInBubblesAndNotifications() {
         // §5.3: the conversation screen labels a channel post through the one
         // resolver and draws whatever secondary text it carries (a channel
         // name under a local name, or a short hash under a channel name).
@@ -118,11 +118,11 @@ class DisplayNameWiringTest {
         assertTrue(bubble.contains("text = senderLabel.name,"))
         assertTrue(Regex("senderLabel\\.secondary\\?\\.let \\{ secondary ->\\s+Spacer\\(Modifier\\.width\\(6\\.dp\\)\\)\\s+Text\\(\\s+text = secondary,")
             .containsMatchIn(bubble))
-        // A channel post's notification names the poster by the main label alone.
+        // A channel post's notification names the poster through
+        // notificationSenderName (main label then secondary text, as the bubble).
         val notify = channels.substring(channels.indexOf("isChannelNotificationsEnabled(appContext, channelHashHex)"))
             .substringBefore("conversationTitle")
         assertTrue(notify.contains("senderName = notificationSenderName(channelName, names, sourceHashHex),"))
-        assertFalse(notify.contains("secondary"))
     }
 
     @Test

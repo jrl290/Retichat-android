@@ -59,10 +59,11 @@ class DisplayNamesTest {
     }
 
     @Test
-    fun aChannelPostNotificationUsesTheMainLabelAlone() {
+    fun aChannelPostNotificationNamesThePosterAsTheBubbleDoes() {
         val com = com.newendian.retichat.service.RfedChannelClient
-        assertEquals("Mum", com.notificationSenderName("Night Owl", ContactNames(localName = "Mum"), hash))
-        assertEquals("Night Owl", com.notificationSenderName("Night Owl", ContactNames(messageName = "Alice"), hash))
+        assertEquals("Mum · Night Owl", com.notificationSenderName("Night Owl", ContactNames(localName = "Mum"), hash))
+        assertEquals("Night Owl · ${DisplayNames.shortHash(hash)}",
+            com.notificationSenderName("Night Owl", ContactNames(messageName = "Alice"), hash))
         assertEquals("Alice", com.notificationSenderName(null, ContactNames(messageName = "Alice"), hash))
     }
 

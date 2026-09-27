@@ -91,9 +91,16 @@ class RfedChannelClient(
         fun rfedDestHash(identityHashHex: String, app: String, aspects: List<String>): String? =
             FcmTokenRegistrar.rnsDestHash(identityHashHex, app, aspects)
 
-        /** §5.3: a channel post's notification names its poster by the main label alone. */
-        internal fun notificationSenderName(channelName: String?, names: ContactNames?, sourceHashHex: String): String =
-            DisplayNames.channelPost(channelName, names, sourceHashHex).name
+        /**
+         * §5.3: a channel post's notification names its poster as the bubble
+         * does, the main label then the secondary text ("Mum · Night Owl",
+         * "Night Owl · 1a2b3c4d…"), so a channel name never stands alone.
+         * Same format as iOS DisplayNames.channelNotificationTitle.
+         */
+        internal fun notificationSenderName(channelName: String?, names: ContactNames?, sourceHashHex: String): String {
+            val label = DisplayNames.channelPost(channelName, names, sourceHashHex)
+            return label.secondary?.let { "${label.name} · $it" } ?: label.name
+        }
 
         internal fun pullStateKey(channelId: String): String =
             channelId.lowercase()
