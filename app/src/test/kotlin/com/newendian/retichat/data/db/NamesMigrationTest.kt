@@ -22,6 +22,7 @@ class NamesMigrationTest {
     private fun createVersion10() {
         exec("CREATE TABLE IF NOT EXISTS `contacts` (`destHashHex` TEXT NOT NULL, `displayName` TEXT NOT NULL, `publicKeyHex` TEXT, `addedAt` INTEGER NOT NULL, `isNameManual` INTEGER NOT NULL, PRIMARY KEY(`destHashHex`))")
         exec("CREATE TABLE IF NOT EXISTS `messages` (`id` TEXT NOT NULL, `chatId` TEXT NOT NULL, `senderHashHex` TEXT NOT NULL, `content` TEXT NOT NULL, `timestamp` INTEGER NOT NULL, `isOutbound` INTEGER NOT NULL, `state` INTEGER NOT NULL, `nativeHandle` INTEGER NOT NULL, `progress` REAL NOT NULL, PRIMARY KEY(`id`))")
+        exec("CREATE TABLE IF NOT EXISTS `chats` (`id` TEXT NOT NULL, `isGroup` INTEGER NOT NULL, `name` TEXT NOT NULL, `memberHashes` TEXT NOT NULL, `groupIdHex` TEXT, `currentRelayerHex` TEXT, `createdAt` INTEGER NOT NULL, `isArchived` INTEGER NOT NULL, PRIMARY KEY(`id`))")
         exec("CREATE TABLE IF NOT EXISTS `channel_messages` (`id` TEXT NOT NULL, `channelId` TEXT NOT NULL, `sourceHashHex` TEXT NOT NULL, `title` TEXT NOT NULL, `content` TEXT NOT NULL, `timestamp` INTEGER NOT NULL, `isOutbound` INTEGER NOT NULL, `signatureValidated` INTEGER NOT NULL, `sendState` INTEGER NOT NULL, PRIMARY KEY(`id`))")
     }
 
@@ -62,6 +63,16 @@ class NamesMigrationTest {
             it.setString(1, hash); it.setString(2, name); it.setString(3, key); it.setInt(4, if (manual) 1 else 0)
             it.executeUpdate()
         }
+
+    private fun addChat(id: String, name: String, group: Boolean = false) =
+        db.prepareStatement("INSERT INTO chats VALUES (?, ?, ?, ?, NULL, NULL, 7, 0)").use {
+            it.setString(1, id); it.setInt(2, if (group) 1 else 0); it.setString(3, name); it.setString(4, id.removePrefix("dm_"))
+            it.executeUpdate()
+        }
+
+    private fun contactCount(): Int = db.createStatement().use { st ->
+        st.executeQuery("SELECT COUNT(*) FROM contacts").use { rs -> rs.next(); rs.getInt(1) }
+    }
 
     @Test
     fun theMigratedSchemaIsTheOneRoomExpects() {
@@ -127,5 +138,72 @@ class NamesMigrationTest {
                 rs.next(); assertEquals(0, rs.getInt(1))
             }
         }
+    }
+
+    @Test
+    fun appPlaceholdersReceivedAsNamesAreDropped() {
+        // §1: no placeholder names. The sender's own migration turns its
+        // "Retichat" into no name and an unset sender never sends a clear, so
+        // a migrated placeholder would stay for good.
+        createVersion10()
+        val a = "0123456789abcdef0123456789abcdef"
+        val b = "fedcba9876543210fedcba9876543210"
+        val c = "aaaaaaaabbbbbbbbccccccccdddddddd"
+        val d = "11111111222222223333333344444444"
+        addContact(a, "Retichat", manual = false)
+        addContact(b, " retichat web ", manual = false)
+        addContact(c, "Anonymous Peer", manual = false)
+        addContact(d, "Retichat", manual = true)          // typed by the user: kept
+        migrate()
+        assertEquals(Row(null, null, null, null, 1), contact(a))
+        assertEquals(Row(null, null, null, null, 1), contact(b))
+        assertEquals(Row(null, null, null, null, 1), contact(c))
+        assertEquals(Row("Retichat", null, null, null, 1), contact(d))
+    }
+
+    @Test
+    fun aRenameOnlyTheDmChatStillHoldsBecomesTheLocalName() {
+        // Old build: rename to "Mum" wrote the contact and the chat; re-adding
+        // the contact (QR code) reset the contact to its hash and kept the chat.
+        createVersion10()
+        val a = "0123456789abcdef0123456789abcdef"
+        val b = "fedcba9876543210fedcba9876543210"
+        val c = "aaaaaaaabbbbbbbbccccccccdddddddd"
+        val d = "11111111222222223333333344444444"
+        val e = "99999999888888887777777766666666"
+        val f = "abababababababababababababababab"
+        addContact(a, "01234567", manual = false); addChat("dm_$a", "Mum")
+        addContact(b, "Jane", manual = false); addChat("dm_$b", "Mum")        // reset, then a name arrived
+        addContact(c, "Alice", manual = false); addChat("dm_$c", "Alice")     // the chat just mirrored it
+        addContact(d, "11111111", manual = false); addChat("dm_$d", "11111111")
+        addContact(e, "99999999", manual = false); addChat("dm_$e", "Retichat")
+        addContact(f, "Dad", manual = true); addChat("dm_$f", "Pop")          // the contact's rename wins
+        migrate()
+        assertEquals(Row("Mum", null, null, null, 1), contact(a))
+        assertEquals(Row("Mum", "Jane", null, null, 1), contact(b))
+        assertEquals(Row(null, "Alice", null, null, 1), contact(c))
+        assertEquals(Row(null, null, null, null, 1), contact(d))
+        assertEquals(Row(null, null, null, null, 1), contact(e))
+        assertEquals(Row("Dad", null, null, null, 1), contact(f))
+    }
+
+    @Test
+    fun aDmChatWithNoContactGetsOneCarryingItsName() {
+        // A distro sent-copy created the chat without a contact; renaming it
+        // wrote only chats.name.
+        createVersion10()
+        val a = "0123456789abcdef0123456789abcdef"
+        val b = "fedcba9876543210fedcba9876543210"
+        val c = "aaaaaaaabbbbbbbbccccccccdddddddd"
+        addChat("dm_$a", "Carol")
+        addChat("dm_$b", "fedcba98")
+        addContact(c, "Alice", manual = false); addChat("dm_$c", "Alice")
+        addChat("group_0123456789abcdef", "Friends", group = true)
+        addChat("dm_notahash", "Nope")
+        migrate()
+        assertEquals(Row("Carol", null, null, null, 0), contact(a))
+        assertEquals(Row(null, null, null, null, 0), contact(b))
+        assertEquals(Row(null, "Alice", null, null, 1), contact(c))
+        assertEquals(3, contactCount())
     }
 }
