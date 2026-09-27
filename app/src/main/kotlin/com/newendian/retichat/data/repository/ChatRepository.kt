@@ -23,7 +23,6 @@ import com.newendian.retichat.data.db.dao.ContactDao
 import com.newendian.retichat.data.db.dao.MessageDao
 import com.newendian.retichat.data.db.entity.*
 import com.newendian.retichat.data.model.*
-import com.newendian.retichat.names.ContactNames
 import com.newendian.retichat.names.DisplayNames
 import com.newendian.retichat.names.NameBook
 import com.newendian.retichat.names.NameField
@@ -254,8 +253,15 @@ class ChatRepository(
      */
     suspend fun renameContact(destHashHex: String, newName: String) {
         val hex = destHashHex.lowercase()
+        // §3 cleaning by the one Rust cleaner, as for the own names; text
+        // that cleans to nothing clears the local name.
+        val name = withContext(Dispatchers.IO) {
+            DisplayNames.localName(newName) { raw ->
+                if (RetichatBridge.isLoaded) RetichatBridge.displayNameClean(raw, announce = false) else raw.trim()
+            }
+        }
         contactDao.insertIfAbsent(ContactEntity(destHashHex = hex))
-        contactDao.setLocalName(hex, newName.trim().ifEmpty { null })
+        contactDao.setLocalName(hex, name)
     }
 
     /**
@@ -279,17 +285,26 @@ class ChatRepository(
     /**
      * DISPLAY_NAMES.md §5.2: apply a received 0xD1 to the LXMF source
      * [srcHex]'s `messageName`. [unverifiedReason] decides (validated, source
-     * unknown, invalid). The caller has already let the message through and
-     * made sure the contact row exists.
+     * unknown, invalid), and only a message newer than `messageNameAt` is
+     * accepted ([messageAt] is its LXMF timestamp, seconds); accepting records
+     * it and drops `legacyName`. The caller has already let the message
+     * through and made sure the contact row exists.
      */
-    private suspend fun acceptMessageName(srcHex: String, field: NameField, unverifiedReason: Int) {
+    private suspend fun acceptMessageName(srcHex: String, field: NameField, unverifiedReason: Int, messageAt: Double) {
         if (field == NameField.Absent) return
-        val current = contactDao.findByHash(srcHex)?.messageName
-        when (val update = DisplayNames.acceptMessageName(current, field, unverifiedReason)) {
-            NameUpdate.Unchanged -> Unit
+        val contact = contactDao.findByHash(srcHex)
+        when (val update = DisplayNames.acceptMessageName(
+            contact?.messageName, contact?.messageNameAt, field, unverifiedReason, messageAt,
+        )) {
+            NameUpdate.Unchanged ->
+                Log.i(TAG, "name: ${srcHex.take(8)} 0xD1 not accepted (reason=$unverifiedReason, at=$messageAt, held at ${contact?.messageNameAt})")
             is NameUpdate.Set -> {
-                contactDao.setMessageName(srcHex, update.name)
-                Log.i(TAG, "name: ${srcHex.take(8)} messageName ${if (update.name == null) "cleared" else "set"} (reason=$unverifiedReason)")
+                // The write repeats the order guard (NameSql), so a concurrent
+                // older delivery cannot land last.
+                val rows = contactDao.acceptMessageName(
+                    srcHex, update.name, messageAt, onlyIfNone = unverifiedReason != Signature.VALIDATED,
+                )
+                Log.i(TAG, "name: ${srcHex.take(8)} messageName ${if (update.name == null) "cleared" else "set"} (reason=$unverifiedReason, at=$messageAt, rows=$rows)")
             }
         }
     }
@@ -1380,7 +1395,7 @@ class ChatRepository(
             // 0xD1 always names the LXMF source, group messages and relayed
             // copies included (there it names the relayer).
             ensureContact(srcHex)
-            acceptMessageName(srcHex, nameField, unverifiedReason)
+            acceptMessageName(srcHex, nameField, unverifiedReason, timestamp)
 
             if (groupId != null) {
                 handleGroupMessage(msgId, srcHex, content, timestamp, fields)
@@ -1411,7 +1426,7 @@ class ChatRepository(
         // storeIncomingDirect via distro fan-out does not filter either).
         scope.launch(Dispatchers.IO) {
             ensureContact(srcHex)
-            acceptMessageName(srcHex, nameField, unverifiedReason)
+            acceptMessageName(srcHex, nameField, unverifiedReason, timestamp)
             handleDirectMessage(msgId, srcHash, srcHex, content, timestamp, LxmfFields.decode(ByteArray(0)))
         }
     }
@@ -1930,8 +1945,9 @@ class ChatRepository(
      * Called when we receive a delivery announce from the network.
      * DISPLAY_NAMES.md §5.1: the announce name (cleaned by the router,
      * "Anonymous Peer" as none) replaces the contact's `announceName` on every
-     * announce, and an announce without a name clears it. The other slots are
-     * never touched. Announces from destinations that are not contacts are
+     * announce, and an announce without a name clears it. One carrying a
+     * name also drops a migrated `legacyName`. The other slots are never
+     * touched. Announces from destinations that are not contacts are
      * ignored.
      */
     fun onAnnounceReceived(destHash: ByteArray, displayName: String?) {
@@ -1945,7 +1961,7 @@ class ChatRepository(
         scope.launch(Dispatchers.IO) {
             val existing = contactDao.findByHash(hex)
             if (existing != null) {
-                when (val update = DisplayNames.acceptAnnounceName(existing.announceName, displayName)) {
+                when (val update = DisplayNames.acceptAnnounceName(existing.announceName, displayName, existing.legacyName)) {
                     NameUpdate.Unchanged -> Unit
                     is NameUpdate.Set -> {
                         contactDao.setAnnounceName(hex, update.name)
@@ -2049,8 +2065,6 @@ class ChatRepository(
     // ---- Helpers ----
 
     private fun directChatId(peerHash: ByteArray): String = "dm_${peerHash.toHex()}"
-
-    private fun ContactEntity.names() = ContactNames(localName, messageName, announceName)
 
     private fun ContactEntity.toDomain() = Contact(
         destHash = destHashHex.hexToBytes(),

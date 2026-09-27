@@ -12,7 +12,7 @@ data class NameBook(
 ) {
     fun names(hashHex: String): ContactNames? = contacts[hashHex.lowercase()]
 
-    /** A contact, group member or DM peer: `localName ?? messageName ?? announceName ?? shortHash`. */
+    /** A contact, group member or DM peer: `localName ?? messageName ?? announceName ?? legacyName ?? shortHash`. */
     fun contact(hashHex: String): String = DisplayNames.contact(names(hashHex), hashHex)
 
     /** Like [contact], but this device reads "You" (member lists). */

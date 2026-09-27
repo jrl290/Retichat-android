@@ -1,6 +1,7 @@
 package com.newendian.retichat.data.db.dao
 
 import androidx.room.*
+import com.newendian.retichat.data.db.NameSql
 import com.newendian.retichat.data.db.entity.ContactEntity
 import kotlinx.coroutines.flow.Flow
 
@@ -27,10 +28,16 @@ interface ContactDao {
     @Query("UPDATE contacts SET localName = :name WHERE destHashHex = :hex")
     suspend fun setLocalName(hex: String, name: String?)
 
-    @Query("UPDATE contacts SET messageName = :name WHERE destHashHex = :hex")
-    suspend fun setMessageName(hex: String, name: String?)
+    /**
+     * DISPLAY_NAMES.md §5.2: record an accepted 0xD1 from the message at [at]
+     * (LXMF seconds). Guarded by the order in SQL ([NameSql.ACCEPT_MESSAGE_NAME]);
+     * returns the rows changed (0 when a newer message got there first).
+     */
+    @Query(NameSql.ACCEPT_MESSAGE_NAME)
+    suspend fun acceptMessageName(hex: String, name: String?, at: Double, onlyIfNone: Boolean): Int
 
-    @Query("UPDATE contacts SET announceName = :name WHERE destHashHex = :hex")
+    /** §5.1: the announce name (null clears it); one carrying a name drops `legacyName`. */
+    @Query(NameSql.SET_ANNOUNCE_NAME)
     suspend fun setAnnounceName(hex: String, name: String?)
 
     @Query("UPDATE contacts SET isAllowlisted = 1 WHERE destHashHex = :hex")

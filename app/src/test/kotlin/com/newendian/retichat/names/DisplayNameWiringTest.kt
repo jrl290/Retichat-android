@@ -89,7 +89,15 @@ class DisplayNameWiringTest {
     fun namesAreDecodedByRustAndAcceptedByTheSignatureRule() {
         assertFalse(src("bridge/LxmfFields.kt").contains("FIELD_SENDER_NAME"))
         assertTrue(repo.contains("NameField.fromTrailer(RetichatBridge.displayNameDecode(fieldsRaw))"))
-        assertTrue(repo.contains("acceptMessageName(srcHex, nameField, unverifiedReason)"))
+        // §5.2 order on both accept paths (router: DMs, groups, relayed
+        // copies; distro unwrap): the message's LXMF timestamp goes in.
+        assertEquals(2, Regex("acceptMessageName\\(srcHex, nameField, unverifiedReason, timestamp\\)").findAll(repo).count())
+        val accept = repo.substring(repo.indexOf("private suspend fun acceptMessageName("), repo.indexOf("/** The privacy filter's answer"))
+        assertTrue(accept.contains("contact?.messageNameAt"))
+        assertTrue(accept.contains("contactDao.acceptMessageName("))
+        assertFalse(repo.contains("setMessageName("))
+        // An announce carrying a name drops the legacy name.
+        assertTrue(repo.contains("DisplayNames.acceptAnnounceName(existing.announceName, displayName, existing.legacyName)"))
         // Distro unwrap carries the name state and the signature result.
         val distro = src("service/RfedDistroClient.kt")
         assertTrue(distro.contains("\"display_name_state\"") && distro.contains("\"unverified_reason\""))
@@ -113,8 +121,17 @@ class DisplayNameWiringTest {
         // DM titles are never snapshotted into chats.name any more.
         val rename = repo.substring(repo.indexOf("suspend fun renameContact("), repo.indexOf("private suspend fun ensureContact("))
         assertFalse(rename.contains("updateChatName"))
-        // Saving an empty rename clears the local name.
-        assertTrue(rename.contains("ifEmpty { null }"))
+        // A rename is cleaned by the Rust cleaner (§3), like the own names;
+        // nothing left (an empty rename included) clears the local name.
+        assertTrue(rename.contains("DisplayNames.localName(newName)"))
+        assertTrue(rename.contains("RetichatBridge.displayNameClean(raw, announce = false)"))
+        assertTrue(rename.contains("contactDao.setLocalName(hex, name)"))
+        // renameContact is the only writer of localName.
+        for (path in listOf("ui/conversation/ConversationScreen.kt", "ui/conversation/ChatInfoSheet.kt",
+                "ui/conversation/ConversationViewModel.kt", "ui/navigation/NavGraph.kt", "MainActivity.kt")) {
+            assertFalse(path, src(path).contains("setLocalName("))
+        }
+        assertEquals(1, Regex("setLocalName\\(").findAll(repo).count())
         assertFalse(repo.contains("name = contact?.displayName"))
     }
 }

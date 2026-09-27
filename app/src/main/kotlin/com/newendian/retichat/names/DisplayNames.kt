@@ -79,11 +79,16 @@ sealed class NameUpdate {
     data class Set(val name: String?) : NameUpdate()
 }
 
-/** The names a contact has (§5.1). Keyed by the hash the messages come from. */
+/**
+ * The names a contact has (§5.1). Keyed by the hash the messages come from.
+ * [legacyName] is a name migrated from before the three slots whose origin
+ * is unknown (§5.4): never written afterwards, and last in the resolver.
+ */
 data class ContactNames(
     val localName: String? = null,
     val messageName: String? = null,
     val announceName: String? = null,
+    val legacyName: String? = null,
 )
 
 /** A channel post's label (§5.3): the name, and the short hash beside it when the name is the poster's own channel name. */
@@ -96,16 +101,26 @@ object DisplayNames {
     /** §5.3: the first 8 hex characters followed by `…`, on every surface. */
     fun shortHash(hashHex: String): String = hashHex.lowercase().take(8) + "…"
 
-    /** §5.3 contact: `localName ?? messageName ?? announceName ?? shortHash`. */
+    /** §5.3 contact: `localName ?? messageName ?? announceName ?? legacyName ?? shortHash`. */
     fun contact(names: ContactNames?, hashHex: String): String =
         names?.localName.nonEmpty()
             ?: names?.messageName.nonEmpty()
             ?: names?.announceName.nonEmpty()
+            ?: names?.legacyName.nonEmpty()
             ?: shortHash(hashHex)
 
     /**
+     * §5.1 `localName` from a rename: the typed text cleaned by §3 ([clean]
+     * is the one Rust cleaner, as for the three own names), so a pasted bidi
+     * override or control character never reaches a label and the 64
+     * character cap applies. Text that cleans to nothing clears the local
+     * name, and the contact shows its provided name again.
+     */
+    fun localName(raw: String, clean: (String) -> String?): String? = clean(raw).nonEmpty()
+
+    /**
      * §5.3 channel post: `channelName ?? localName ?? messageName ??
-     * announceName ?? shortHash`. A label taken from the channel name carries
+     * announceName ?? legacyName ?? shortHash`. A label taken from the channel name carries
      * the short hash as secondary text: channel names are public and anyone
      * can pick any name.
      */
@@ -126,51 +141,90 @@ object DisplayNames {
      * | validated | set s | clear |
      * | source unknown | set only if none | ignore |
      * | invalid | ignore | ignore |
+     *
+     * Order: [currentAt] is the LXMF timestamp (seconds) of the message that
+     * last set or cleared the name (`messageNameAt`, null before any), and
+     * [messageAt] this message's. Only a newer message is accepted: a
+     * propagated copy landing after a later direct one must not bring an old
+     * name back, since the sender's ledger would then never resend the new
+     * one. [NameUpdate.Set] means accepted, even when it repeats the current
+     * name or clear: the caller records [messageAt] as `messageNameAt` and
+     * drops `legacyName`.
      */
-    fun acceptMessageName(current: String?, field: NameField, unverifiedReason: Int): NameUpdate =
-        when (field) {
+    fun acceptMessageName(
+        current: String?,
+        currentAt: Double?,
+        field: NameField,
+        unverifiedReason: Int,
+        messageAt: Double,
+    ): NameUpdate {
+        if (field == NameField.Absent || !messageAt.isFinite()) return NameUpdate.Unchanged
+        if (currentAt != null && messageAt <= currentAt) return NameUpdate.Unchanged
+        return when (field) {
             NameField.Absent -> NameUpdate.Unchanged
             NameField.Clear ->
-                if (unverifiedReason == Signature.VALIDATED && current != null) NameUpdate.Set(null)
-                else NameUpdate.Unchanged
+                if (unverifiedReason == Signature.VALIDATED) NameUpdate.Set(null) else NameUpdate.Unchanged
             is NameField.Name -> when (unverifiedReason) {
-                Signature.VALIDATED ->
-                    if (current == field.name) NameUpdate.Unchanged else NameUpdate.Set(field.name)
+                Signature.VALIDATED -> NameUpdate.Set(field.name)
                 Signature.SOURCE_UNKNOWN ->
                     if (current == null) NameUpdate.Set(field.name) else NameUpdate.Unchanged
                 else -> NameUpdate.Unchanged
             }
         }
+    }
 
     /**
      * §5.2 channel posts: the unpack reports a name only after the key
      * binding and the signature checked out, so the post's 0xD1 sets or
-     * clears the poster's `channelName` in that channel. [postAt] is the
-     * post's timestamp and [currentAt] that of the newest post that named or
-     * cleared it: an older post (history pulled late) does not undo a newer
-     * name. A newer post that repeats the name (or the clear) is still a
-     * [NameUpdate.Set], so the caller records its timestamp; otherwise an
-     * older clear or name pulled later would win over it.
+     * clears the poster's `channelName` in that channel. The same order as
+     * [acceptMessageName], per (channel, sender): [postAt] is the post's
+     * timestamp and [currentAt] that of the post that last named or cleared
+     * it (0 before any); only a newer post is accepted, so an older post
+     * (history pulled late) does not undo a newer name. A newer post that
+     * repeats the name (or the clear) is still a [NameUpdate.Set], so the
+     * caller records its timestamp; otherwise an older clear or name pulled
+     * later would win over it.
      */
     fun acceptChannelName(current: String?, currentAt: Long, field: NameField, postAt: Long): NameUpdate {
-        if (postAt < currentAt) return NameUpdate.Unchanged
-        val next = when (field) {
-            NameField.Absent -> return NameUpdate.Unchanged
-            NameField.Clear -> null
-            is NameField.Name -> field.name
+        if (postAt <= currentAt) return NameUpdate.Unchanged
+        return when (field) {
+            NameField.Absent -> NameUpdate.Unchanged
+            NameField.Clear -> NameUpdate.Set(null)
+            is NameField.Name -> NameUpdate.Set(field.name)
         }
-        return if (next == current && postAt == currentAt) NameUpdate.Unchanged else NameUpdate.Set(next)
     }
 
     /**
      * §5.1 announces: the announce name replaces `announceName` every time,
      * and an announce with no name clears it. The router has already cleaned
-     * it and turned "Anonymous Peer" into none.
+     * it and turned "Anonymous Peer" into none. An announce carrying a name
+     * also drops a migrated [legacy] name, so a [NameUpdate.Set] with a name
+     * tells the caller to drop it (it is a Set even when the announce name
+     * is unchanged but a legacy name is still held).
      */
-    fun acceptAnnounceName(current: String?, announced: String?): NameUpdate {
+    fun acceptAnnounceName(current: String?, announced: String?, legacy: String? = null): NameUpdate {
         val next = announced.nonEmpty()
-        return if (next == current) NameUpdate.Unchanged else NameUpdate.Set(next)
+        return if (next == current && (next == null || legacy == null)) NameUpdate.Unchanged
+        else NameUpdate.Set(next)
     }
+
+    /**
+     * §5.4 placeholders, dropped by the migration wherever the name was not
+     * typed by the user: hash forms (8 to 32 hex, with or without a leading
+     * `?` or a trailing `…`), "Retichat", "Retichat Web" and "Anonymous
+     * Peer", all case-insensitive. The migration runs the same rule in SQL
+     * ([com.newendian.retichat.data.db.NamesMigration.placeholderSql]); the
+     * JVM test checks the two agree.
+     */
+    fun isPlaceholder(name: String): Boolean {
+        val v = name.trim().lowercase()
+        return v in APP_PLACEHOLDERS || HASH_PLACEHOLDER.matches(v)
+    }
+
+    /** "Retichat", "Retichat Web" and "Anonymous Peer", lowercased. */
+    val APP_PLACEHOLDERS: List<String> = listOf("retichat", "retichat web", "anonymous peer")
+
+    private val HASH_PLACEHOLDER = Regex("\\??[0-9a-f]{8,32}\u2026?")
 
     /** §4.1: the first 16 bytes of SHA-256 of the cleaned name (none hashes ""). */
     fun digest(name: String?): ByteArray =

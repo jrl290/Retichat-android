@@ -4,6 +4,7 @@ import androidx.room.Dao
 import androidx.room.Delete
 import androidx.room.Query
 import androidx.room.Upsert
+import com.newendian.retichat.data.db.NameSql
 import com.newendian.retichat.data.db.entity.ChannelEntity
 import com.newendian.retichat.data.db.entity.ChannelMessageEntity
 import com.newendian.retichat.data.db.entity.ChannelNameStateEntity
@@ -82,8 +83,9 @@ interface ChannelDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertSenderIfAbsent(sender: ChannelSenderEntity): Long
 
-    @Query("UPDATE channel_senders SET channelName = :name, nameAt = :postTimestampMs WHERE channelId = :channelId AND senderHex = :senderHex")
-    suspend fun setSenderChannelName(channelId: String, senderHex: String, name: String?, postTimestampMs: Long)
+    /** §5.2 order per (channel, sender): only a post newer than `nameAt` lands ([NameSql.SET_SENDER_CHANNEL_NAME]). */
+    @Query(NameSql.SET_SENDER_CHANNEL_NAME)
+    suspend fun setSenderChannelName(channelId: String, senderHex: String, name: String?, postTimestampMs: Long): Int
 
     /** Posters first seen here after [sinceMs] (the send rule's "new sender"). */
     @Query("SELECT COUNT(*) FROM channel_senders WHERE channelId = :channelId AND firstSeenAt > :sinceMs")

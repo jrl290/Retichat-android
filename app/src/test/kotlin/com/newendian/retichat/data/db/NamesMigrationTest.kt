@@ -1,9 +1,14 @@
 package com.newendian.retichat.data.db
 
 import org.junit.After
+import org.junit.Assume
+import com.newendian.retichat.names.DisplayNames
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Assert.assertNull
 import org.junit.Test
+import java.io.File
 import java.sql.Connection
 import java.sql.DriverManager
 
@@ -28,7 +33,7 @@ class NamesMigrationTest {
 
     /** Version 11 as Room generates it from the entities (RetichatDatabase_Impl.createAllTables). */
     private val version11 = mapOf(
-        "contacts" to "CREATE TABLE `contacts` (`destHashHex` TEXT NOT NULL, `localName` TEXT, `messageName` TEXT, `announceName` TEXT, `publicKeyHex` TEXT, `addedAt` INTEGER NOT NULL, `isAllowlisted` INTEGER NOT NULL, PRIMARY KEY(`destHashHex`))",
+        "contacts" to "CREATE TABLE `contacts` (`destHashHex` TEXT NOT NULL, `localName` TEXT, `messageName` TEXT, `messageNameAt` REAL, `announceName` TEXT, `legacyName` TEXT, `publicKeyHex` TEXT, `addedAt` INTEGER NOT NULL, `isAllowlisted` INTEGER NOT NULL, PRIMARY KEY(`destHashHex`))",
         "messages" to "CREATE TABLE `messages` (`id` TEXT NOT NULL, `chatId` TEXT NOT NULL, `senderHashHex` TEXT NOT NULL, `content` TEXT NOT NULL, `timestamp` INTEGER NOT NULL, `isOutbound` INTEGER NOT NULL, `state` INTEGER NOT NULL, `nativeHandle` INTEGER NOT NULL, `progress` REAL NOT NULL, `systemKind` TEXT, PRIMARY KEY(`id`))",
         "channel_senders" to "CREATE TABLE `channel_senders` (`channelId` TEXT NOT NULL, `senderHex` TEXT NOT NULL, `channelName` TEXT, `firstSeenAt` INTEGER NOT NULL, `nameAt` INTEGER NOT NULL, PRIMARY KEY(`channelId`, `senderHex`))",
         "channel_name_state" to "CREATE TABLE `channel_name_state` (`channelId` TEXT NOT NULL, `lastDigestHex` TEXT NOT NULL, `lastIncludedAt` INTEGER NOT NULL, PRIMARY KEY(`channelId`))",
@@ -46,15 +51,19 @@ class NamesMigrationTest {
 
     private fun migrate() = NamesMigration.STATEMENTS.forEach(::exec)
 
-    private data class Row(val local: String?, val message: String?, val announce: String?, val key: String?, val allowlisted: Int)
+    /** A migrated contact; `messageName`, `messageNameAt` and `announceName` must all be empty. */
+    private data class Row(val local: String?, val legacy: String?, val key: String?, val allowlisted: Int)
 
     private fun contact(hash: String): Row = db.prepareStatement(
-        "SELECT localName, messageName, announceName, publicKeyHex, isAllowlisted FROM contacts WHERE destHashHex = ?"
+        "SELECT localName, legacyName, publicKeyHex, isAllowlisted, messageName, messageNameAt, announceName FROM contacts WHERE destHashHex = ?"
     ).use { st ->
         st.setString(1, hash)
         st.executeQuery().use { rs ->
             rs.next()
-            Row(rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4), rs.getInt(5))
+            // §5.4: nothing migrates into messageName (it would outrank a
+            // current announce name for good) and no order is inherited.
+            assertNull(rs.getString(5)); assertNull(rs.getObject(6)); assertNull(rs.getString(7))
+            Row(rs.getString(1), rs.getString(2), rs.getString(3), rs.getInt(4))
         }
     }
 
@@ -86,7 +95,20 @@ class NamesMigrationTest {
     }
 
     @Test
-    fun namesTheUserTypedBecomeLocalNamesAndPlaceholdersAreDropped() {
+    fun theVersion11SchemaHereIsWhatRoomGenerates() {
+        // exportSchema is off, so Room's generated createAllTables is the
+        // schema of record; testDebugUnitTest runs after kspDebugKotlin.
+        val impl = File("build/generated/ksp/debug/java/com/newendian/retichat/data/db/RetichatDatabase_Impl.java")
+        Assume.assumeTrue(impl.exists())
+        val generated = impl.readText()
+        for ((table, sql) in version11) {
+            val room = Regex("CREATE TABLE IF NOT EXISTS `$table` \\([^\"]*").find(generated)?.value
+            assertEquals(table, sql, room?.replace("IF NOT EXISTS ", ""))
+        }
+    }
+
+    @Test
+    fun namesTheUserTypedBecomeLocalNamesOthersLegacyNamesAndPlaceholdersAreDropped() {
         createVersion10()
         val a = "0123456789abcdef0123456789abcdef"
         val b = "fedcba9876543210fedcba9876543210"
@@ -99,22 +121,55 @@ class NamesMigrationTest {
         addContact(d, "11111111", manual = true)         // typed by the user: kept
         addContact(e, "  ", manual = false)
         migrate()
-        assertEquals(Row("Mum", null, null, "ab".repeat(64), 1), contact(a))
-        assertEquals(Row(null, "Alice", null, null, 1), contact(b))
-        assertEquals(Row(null, null, null, null, 1), contact(c))
-        assertEquals(Row("11111111", null, null, null, 1), contact(d))
-        assertEquals(Row(null, null, null, null, 1), contact(e))
+        assertEquals(Row("Mum", null, "ab".repeat(64), 1), contact(a))
+        assertEquals(Row(null, "Alice", null, 1), contact(b))
+        assertEquals(Row(null, null, null, 1), contact(c))
+        assertEquals(Row("11111111", null, null, 1), contact(d))
+        assertEquals(Row(null, null, null, 1), contact(e))
+    }
+
+    /** §5.4's one placeholder list, and names that are not on it. */
+    private val placeholders = listOf(
+        "deadbeef", "DEADBEEF", "01234567", "?01234567", "01234567\u2026", "?01234567\u2026",
+        "0123456789abcdef", "0123456789abcdef0123456789abcdef", "?0123456789abcdef0123456789abcdef",
+        " 01234567 ", "Retichat", "RETICHAT", "retichat web", "Retichat Web", "Anonymous Peer", " anonymous PEER ",
+    )
+    private val names = listOf(
+        "Alice", "0123456", "?0123456", "0123456\u2026", "0123456789abcdef0123456789abcdef0", "0123456g",
+        "??01234567", "01234567...", "01234567?", "Retichat fan", "Retichat Webb", "Anonymous", "dead beef", "",
+    )
+
+    @Test
+    fun thePlaceholderListIsTheSpecsInSqlAndKotlin() {
+        for (p in placeholders) assertTrue(p, DisplayNames.isPlaceholder(p))
+        for (n in names) assertFalse(n, DisplayNames.isPlaceholder(n))
+        // The migration's SQL gives the same answer as the Kotlin rule.
+        db.prepareStatement("SELECT ${NamesMigration.placeholderSql("?1")}").use { st ->
+            for (v in placeholders + names) {
+                st.setString(1, v)
+                st.executeQuery().use { rs -> rs.next(); assertEquals(v, DisplayNames.isPlaceholder(v), rs.getInt(1) == 1) }
+            }
+        }
     }
 
     @Test
-    fun aHexNameThatIsNotThisContactsHashIsKept() {
+    fun everyHashFormIsAPlaceholderWhateverHashItIs() {
+        // §5.4: 8 to 32 hex, with or without "?" or "…", not only a prefix
+        // of this contact's own hash (the web's "?hash" names, picker forms).
         createVersion10()
         val a = "0123456789abcdef0123456789abcdef"
+        val b = "fedcba9876543210fedcba9876543210"
+        val c = "aaaaaaaabbbbbbbbccccccccdddddddd"
+        val d = "11111111222222223333333344444444"
         addContact(a, "deadbeef", manual = false)
-        addContact("abcdefabcdefabcdefabcdefabcdefab", "ABCDEFAB", manual = false)
+        addContact(b, "?FEDCBA98", manual = false)
+        addContact(c, "12345678\u2026", manual = false)
+        addContact(d, "1234567", manual = false)           // 7 hex: a name
         migrate()
-        assertEquals("deadbeef", contact(a).message)
-        assertNull(contact("abcdefabcdefabcdefabcdefabcdefab").message)
+        assertEquals(Row(null, null, null, 1), contact(a))
+        assertEquals(Row(null, null, null, 1), contact(b))
+        assertEquals(Row(null, null, null, 1), contact(c))
+        assertEquals(Row(null, "1234567", null, 1), contact(d))
     }
 
     @Test
@@ -155,10 +210,10 @@ class NamesMigrationTest {
         addContact(c, "Anonymous Peer", manual = false)
         addContact(d, "Retichat", manual = true)          // typed by the user: kept
         migrate()
-        assertEquals(Row(null, null, null, null, 1), contact(a))
-        assertEquals(Row(null, null, null, null, 1), contact(b))
-        assertEquals(Row(null, null, null, null, 1), contact(c))
-        assertEquals(Row("Retichat", null, null, null, 1), contact(d))
+        assertEquals(Row(null, null, null, 1), contact(a))
+        assertEquals(Row(null, null, null, 1), contact(b))
+        assertEquals(Row(null, null, null, 1), contact(c))
+        assertEquals(Row("Retichat", null, null, 1), contact(d))
     }
 
     @Test
@@ -179,12 +234,12 @@ class NamesMigrationTest {
         addContact(e, "99999999", manual = false); addChat("dm_$e", "Retichat")
         addContact(f, "Dad", manual = true); addChat("dm_$f", "Pop")          // the contact's rename wins
         migrate()
-        assertEquals(Row("Mum", null, null, null, 1), contact(a))
-        assertEquals(Row("Mum", "Jane", null, null, 1), contact(b))
-        assertEquals(Row(null, "Alice", null, null, 1), contact(c))
-        assertEquals(Row(null, null, null, null, 1), contact(d))
-        assertEquals(Row(null, null, null, null, 1), contact(e))
-        assertEquals(Row("Dad", null, null, null, 1), contact(f))
+        assertEquals(Row("Mum", null, null, 1), contact(a))
+        assertEquals(Row("Mum", "Jane", null, 1), contact(b))
+        assertEquals(Row(null, "Alice", null, 1), contact(c))
+        assertEquals(Row(null, null, null, 1), contact(d))
+        assertEquals(Row(null, null, null, 1), contact(e))
+        assertEquals(Row("Dad", null, null, 1), contact(f))
     }
 
     @Test
@@ -201,9 +256,9 @@ class NamesMigrationTest {
         addChat("group_0123456789abcdef", "Friends", group = true)
         addChat("dm_notahash", "Nope")
         migrate()
-        assertEquals(Row("Carol", null, null, null, 0), contact(a))
-        assertEquals(Row(null, null, null, null, 0), contact(b))
-        assertEquals(Row(null, "Alice", null, null, 1), contact(c))
+        assertEquals(Row("Carol", null, null, 0), contact(a))
+        assertEquals(Row(null, null, null, 0), contact(b))
+        assertEquals(Row(null, "Alice", null, 1), contact(c))
         assertEquals(3, contactCount())
     }
 }

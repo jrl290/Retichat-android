@@ -10,7 +10,7 @@ import com.newendian.retichat.data.db.dao.ChannelDao
 import com.newendian.retichat.data.db.dao.ContactDao
 import com.newendian.retichat.data.db.entity.ChannelNameStateEntity
 import com.newendian.retichat.data.db.entity.ChannelSenderEntity
-import com.newendian.retichat.names.ContactNames
+import com.newendian.retichat.data.db.entity.names
 import com.newendian.retichat.names.DisplayNames
 import com.newendian.retichat.names.NameField
 import com.newendian.retichat.names.NameUpdate
@@ -970,9 +970,7 @@ class RfedChannelClient(
                 UserPreferences.isChannelNotificationsEnabled(appContext, channelHashHex)
             ) {
                 // §5.3 channel label; a channel name shows its short hash beside it.
-                val names = contactDao.findByHash(sourceHashHex)?.let {
-                    ContactNames(it.localName, it.messageName, it.announceName)
-                }
+                val names = contactDao.findByHash(sourceHashHex)?.names()
                 val label = DisplayNames.channelPost(channelName, names, sourceHashHex)
                 MessageNotificationHelper.notify(
                     appContext,
@@ -1005,8 +1003,9 @@ class RfedChannelClient(
         return when (val update = DisplayNames.acceptChannelName(current, sender?.nameAt ?: 0L, field, postTimestampMs)) {
             NameUpdate.Unchanged -> current
             is NameUpdate.Set -> {
-                channelDao.setSenderChannelName(channelId, hex, update.name, postTimestampMs)
-                update.name
+                // The write repeats the order guard; 0 rows means a newer post landed first.
+                if (channelDao.setSenderChannelName(channelId, hex, update.name, postTimestampMs) > 0) update.name
+                else channelDao.findSender(channelId, hex)?.channelName
             }
         }
     }

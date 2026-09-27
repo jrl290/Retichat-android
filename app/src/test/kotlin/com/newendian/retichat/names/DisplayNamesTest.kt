@@ -20,11 +20,12 @@ class DisplayNamesTest {
     }
 
     @Test
-    fun contactResolvesLocalThenMessageThenAnnounceThenHash() {
-        val all = ContactNames(localName = "Mum", messageName = "Alice", announceName = "alice@home")
+    fun contactResolvesLocalThenMessageThenAnnounceThenLegacyThenHash() {
+        val all = ContactNames(localName = "Mum", messageName = "Alice", announceName = "alice@home", legacyName = "Ally")
         assertEquals("Mum", DisplayNames.contact(all, hash))
         assertEquals("Alice", DisplayNames.contact(all.copy(localName = null), hash))
         assertEquals("alice@home", DisplayNames.contact(all.copy(localName = null, messageName = null), hash))
+        assertEquals("Ally", DisplayNames.contact(all.copy(localName = null, messageName = null, announceName = null), hash))
         assertEquals("01234567…", DisplayNames.contact(ContactNames(), hash))
         assertEquals("01234567…", DisplayNames.contact(null, hash))
         // An empty slot is no name, never a blank label.
@@ -38,6 +39,31 @@ class DisplayNamesTest {
         // No channel name: the contact's name, with no hash beside it.
         assertEquals(ChannelLabel("Mum", null), DisplayNames.channelPost(null, names, hash))
         assertEquals(ChannelLabel("01234567…", null), DisplayNames.channelPost(null, null, hash))
+        assertEquals(ChannelLabel("Ally", null), DisplayNames.channelPost(null, ContactNames(legacyName = "Ally"), hash))
+        assertEquals(ChannelLabel("Owl", "01234567…"), DisplayNames.channelPost("Owl", ContactNames(legacyName = "Ally"), hash))
+    }
+
+    @Test
+    fun nameBookResolvesTheLegacyNameLast() {
+        val book = NameBook(mapOf(hash to ContactNames(legacyName = "Ally")))
+        assertEquals("Ally", book.contact(hash))
+        assertEquals("Ally", book.member(hash))
+        assertEquals(ChannelLabel("Ally", null), book.channelPost(hash, null))
+        val announced = NameBook(mapOf(hash to ContactNames(announceName = "alice@home", legacyName = "Ally")))
+        assertEquals("alice@home", announced.contact(hash))
+    }
+
+    // ── §5.1 local names ─────────────────────────────────────────────
+
+    @Test
+    fun aRenameIsCleanedAndNothingLeftClearsIt() {
+        // A stand-in for the Rust cleaner: the app must use what it returns.
+        val clean: (String) -> String? = { raw -> raw.replace("\u202E", "").trim().takeIf { it.isNotEmpty() } }
+        assertEquals("Mum", DisplayNames.localName("  \u202EMum ", clean))
+        assertEquals(null, DisplayNames.localName("\u202E", clean))
+        assertEquals(null, DisplayNames.localName("   ", clean))
+        assertEquals(null, DisplayNames.localName("x") { "" })
+        assertEquals("As cleaned", DisplayNames.localName("raw") { "As cleaned" })
     }
 
     @Test
@@ -62,31 +88,71 @@ class DisplayNamesTest {
 
     // ── §5.2 accepting a 0xD1 ─────────────────────────────────────────
 
+    private fun accept(current: String?, field: NameField, reason: Int, currentAt: Double? = null, at: Double = 100.0) =
+        DisplayNames.acceptMessageName(current, currentAt, field, reason, at)
+
     @Test
     fun validatedNamesSetAndClear() {
         val ok = Signature.VALIDATED
-        assertEquals(NameUpdate.Set("Alice"), DisplayNames.acceptMessageName(null, NameField.Name("Alice"), ok))
-        assertEquals(NameUpdate.Set("Alicia"), DisplayNames.acceptMessageName("Alice", NameField.Name("Alicia"), ok))
-        assertEquals(NameUpdate.Unchanged, DisplayNames.acceptMessageName("Alice", NameField.Name("Alice"), ok))
-        assertEquals(NameUpdate.Set(null), DisplayNames.acceptMessageName("Alice", NameField.Clear, ok))
-        assertEquals(NameUpdate.Unchanged, DisplayNames.acceptMessageName("Alice", NameField.Absent, ok))
+        assertEquals(NameUpdate.Set("Alice"), accept(null, NameField.Name("Alice"), ok))
+        assertEquals(NameUpdate.Set("Alicia"), accept("Alice", NameField.Name("Alicia"), ok))
+        assertEquals(NameUpdate.Set(null), accept("Alice", NameField.Clear, ok))
+        assertEquals(NameUpdate.Unchanged, accept("Alice", NameField.Absent, ok))
+        // A repeat of the current name (or clear) is accepted: its time is recorded.
+        assertEquals(NameUpdate.Set("Alice"), accept("Alice", NameField.Name("Alice"), ok, currentAt = 50.0))
+        assertEquals(NameUpdate.Set(null), accept(null, NameField.Clear, ok, currentAt = 50.0))
     }
 
     @Test
     fun sourceUnknownOnlyFillsAnEmptySlotAndNeverClears() {
         val unknown = Signature.SOURCE_UNKNOWN
-        assertEquals(NameUpdate.Set("Alice"), DisplayNames.acceptMessageName(null, NameField.Name("Alice"), unknown))
-        assertEquals(NameUpdate.Unchanged, DisplayNames.acceptMessageName("Alice", NameField.Name("Mallory"), unknown))
-        assertEquals(NameUpdate.Unchanged, DisplayNames.acceptMessageName("Alice", NameField.Clear, unknown))
+        assertEquals(NameUpdate.Set("Alice"), accept(null, NameField.Name("Alice"), unknown))
+        assertEquals(NameUpdate.Unchanged, accept("Alice", NameField.Name("Mallory"), unknown))
+        assertEquals(NameUpdate.Unchanged, accept("Alice", NameField.Clear, unknown))
+        assertEquals(NameUpdate.Unchanged, accept(null, NameField.Clear, unknown))
     }
 
     @Test
     fun invalidSignaturesNeverTouchTheName() {
         for (reason in listOf(Signature.INVALID, 7, -1)) {
-            assertEquals(NameUpdate.Unchanged, DisplayNames.acceptMessageName(null, NameField.Name("Mallory"), reason))
-            assertEquals(NameUpdate.Unchanged, DisplayNames.acceptMessageName("Alice", NameField.Name("Mallory"), reason))
-            assertEquals(NameUpdate.Unchanged, DisplayNames.acceptMessageName("Alice", NameField.Clear, reason))
+            assertEquals(NameUpdate.Unchanged, accept(null, NameField.Name("Mallory"), reason))
+            assertEquals(NameUpdate.Unchanged, accept("Alice", NameField.Name("Mallory"), reason))
+            assertEquals(NameUpdate.Unchanged, accept("Alice", NameField.Clear, reason))
         }
+    }
+
+    @Test
+    fun onlyAMessageNewerThanTheOneThatSetTheNameIsAccepted() {
+        val ok = Signature.VALIDATED
+        // A propagated copy from t=150 lands after a direct one from t=200.
+        assertEquals(NameUpdate.Unchanged, accept("New", NameField.Name("Old"), ok, currentAt = 200.0, at = 150.0))
+        assertEquals(NameUpdate.Unchanged, accept("New", NameField.Clear, ok, currentAt = 200.0, at = 150.0))
+        assertEquals(NameUpdate.Unchanged, accept("New", NameField.Name("Other"), ok, currentAt = 200.0, at = 200.0))
+        assertEquals(NameUpdate.Set("Newer"), accept("New", NameField.Name("Newer"), ok, currentAt = 200.0, at = 200.5))
+        // Source unknown obeys the order too, even into an empty slot.
+        assertEquals(NameUpdate.Unchanged, accept(null, NameField.Name("Old"), Signature.SOURCE_UNKNOWN, currentAt = 200.0, at = 150.0))
+        // A message with no usable time never names anyone.
+        assertEquals(NameUpdate.Unchanged, accept(null, NameField.Name("X"), ok, at = Double.NaN))
+    }
+
+    /** What ChatRepository.acceptMessageName keeps: the name and the message time that set it. */
+    private data class Slot(val name: String?, val at: Double?)
+
+    private fun Slot.receive(field: NameField, at: Double, reason: Int = Signature.VALIDATED): Slot =
+        when (val u = DisplayNames.acceptMessageName(name, this.at, field, reason, at)) {
+            NameUpdate.Unchanged -> this
+            is NameUpdate.Set -> Slot(u.name, at)
+        }
+
+    @Test
+    fun anOldNameArrivingLateDoesNotUndoANewOne() {
+        // "A" at 10 (propagated, lands last), "B" at 20 and "B" again at 30 direct.
+        val slot = Slot(null, null)
+            .receive(NameField.Name("B"), 20.0)
+            .receive(NameField.Name("B"), 30.0)
+            .receive(NameField.Name("A"), 10.0)
+            .receive(NameField.Clear, 25.0)
+        assertEquals(Slot("B", 30.0), slot)
     }
 
     @Test
@@ -112,6 +178,9 @@ class DisplayNamesTest {
         assertEquals(NameUpdate.Set("Owl"), DisplayNames.acceptChannelName("Owl", 10, NameField.Name("Owl"), 20))
         assertEquals(NameUpdate.Unchanged, DisplayNames.acceptChannelName("Owl", 20, NameField.Name("Owl"), 20))
         assertEquals(NameUpdate.Set(null), DisplayNames.acceptChannelName(null, 10, NameField.Clear, 20))
+        // §5.2: only a newer post; one with the same timestamp is not newer.
+        assertEquals(NameUpdate.Unchanged, DisplayNames.acceptChannelName("Owl", 20, NameField.Name("Lark"), 20))
+        assertEquals(NameUpdate.Unchanged, DisplayNames.acceptChannelName("Owl", 20, NameField.Clear, 20))
     }
 
     /** What RfedChannelClient.recordChannelSender keeps: the name and the timestamp that set it. */
@@ -144,7 +213,7 @@ class DisplayNamesTest {
     fun anOlderChannelPostPulledLateDoesNotUndoANewerName() {
         assertEquals(NameUpdate.Unchanged, DisplayNames.acceptChannelName("Lark", 20, NameField.Name("Owl"), 10))
         assertEquals(NameUpdate.Unchanged, DisplayNames.acceptChannelName("Lark", 20, NameField.Clear, 10))
-        assertEquals(NameUpdate.Set("Owl"), DisplayNames.acceptChannelName("Lark", 20, NameField.Name("Owl"), 20))
+        assertEquals(NameUpdate.Set("Owl"), DisplayNames.acceptChannelName("Lark", 20, NameField.Name("Owl"), 21))
     }
 
     @Test
@@ -153,6 +222,16 @@ class DisplayNamesTest {
         assertEquals(NameUpdate.Set(null), DisplayNames.acceptAnnounceName("Alice", null))
         assertEquals(NameUpdate.Set(null), DisplayNames.acceptAnnounceName("Alice", ""))
         assertEquals(NameUpdate.Unchanged, DisplayNames.acceptAnnounceName("Alice", "Alice"))
+    }
+
+    @Test
+    fun anAnnounceCarryingANameDropsTheLegacyName() {
+        // §5.1: the same announce name still has to drop a held legacy name.
+        assertEquals(NameUpdate.Set("Alice"), DisplayNames.acceptAnnounceName("Alice", "Alice", legacy = "Ally"))
+        assertEquals(NameUpdate.Set("Alice"), DisplayNames.acceptAnnounceName(null, "Alice", legacy = "Ally"))
+        // A nameless announce keeps it.
+        assertEquals(NameUpdate.Unchanged, DisplayNames.acceptAnnounceName(null, null, legacy = "Ally"))
+        assertEquals(NameUpdate.Set(null), DisplayNames.acceptAnnounceName("Alice", null, legacy = "Ally"))
     }
 
     // ── Bridge trailers ───────────────────────────────────────────────

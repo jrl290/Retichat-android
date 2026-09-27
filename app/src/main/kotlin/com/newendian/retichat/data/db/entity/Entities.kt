@@ -3,6 +3,7 @@ package com.newendian.retichat.data.db.entity
 import androidx.room.Entity
 import androidx.room.PrimaryKey
 import com.newendian.retichat.MemberStatus
+import com.newendian.retichat.names.ContactNames
 
 /**
  * A contact, keyed by the lxmf.delivery hash its messages come from.
@@ -12,7 +13,12 @@ import com.newendian.retichat.MemberStatus
  * [localName] is the user's own name for the contact (cleared by saving an
  * empty rename), [messageName] comes from field 0xD1 of the contact's
  * messages, [announceName] from the contact's announce. None falls back to
- * another; an empty slot is null.
+ * another; an empty slot is null. [messageNameAt] is the LXMF timestamp
+ * (seconds) of the message that last set or cleared [messageName] (§5.2:
+ * only a newer message is accepted). [legacyName] holds a name migrated from
+ * before the slots whose origin is unknown (§5.4): never written afterwards,
+ * dropped when a 0xD1 is accepted or an announce carrying a name arrives,
+ * and last in the resolver.
  *
  * [isAllowlisted] is iOS's `ContactEntity.isAllowlisted`: the privacy filter
  * keeps direct messages and group invites only from allowlisted contacts
@@ -25,11 +31,16 @@ data class ContactEntity(
     @PrimaryKey val destHashHex: String,
     val localName: String? = null,
     val messageName: String? = null,
+    val messageNameAt: Double? = null,
     val announceName: String? = null,
+    val legacyName: String? = null,
     val publicKeyHex: String? = null,
     val addedAt: Long = System.currentTimeMillis(),
     val isAllowlisted: Boolean = false,
 )
+
+/** The name slots the resolver reads (§5.3). */
+fun ContactEntity.names(): ContactNames = ContactNames(localName, messageName, announceName, legacyName)
 
 @Entity(tableName = "chats")
 data class ChatEntity(
