@@ -243,6 +243,50 @@ class NamesMigrationTest {
     }
 
     @Test
+    fun aHexRenameOnlyTheDmChatHoldsIsKeptAndOnlyThePeersOwnHashIsDropped() {
+        // §5.4 "never lose a name the user typed": the old build put hex into a
+        // DM chat name only as the peer's own prefix (take(8)), so any other
+        // hex there was typed. The contact-name placeholder rule (any hash
+        // form) would drop it; the chat-name rule drops only the peer's own.
+        createVersion10()
+        val a = "0123456789abcdef0123456789abcdef"
+        val b = "fedcba9876543210fedcba9876543210"
+        val c = "aaaaaaaabbbbbbbbccccccccdddddddd"
+        val d = "11111111222222223333333344444444"
+        val e = "99999999888888887777777766666666"
+        val f = "abababababababababababababababab"
+        addContact(a, "01234567", manual = false); addChat("dm_$a", "12345678")         // typed, contact reset
+        addContact(b, "Jane", manual = false); addChat("dm_$b", "20260927")             // typed, then a name arrived
+        addContact(c, "Alice", manual = false); addChat("dm_$c", "?AAAAAAAABBBB\u2026")   // the peer's own hash form
+        addContact(d, "11111111", manual = false); addChat("dm_$d", "Retichat Web")
+        addChat("dm_$e", "deadbeef")                                                    // no contact, typed
+        addChat("dm_$f", "abababab\u2026")                                                // no contact, its own hash
+        migrate()
+        assertEquals(Row("12345678", null, null, 1), contact(a))
+        assertEquals(Row("20260927", "Jane", null, 1), contact(b))
+        assertEquals(Row(null, "Alice", null, 1), contact(c))
+        assertEquals(Row(null, null, null, 1), contact(d))
+        assertEquals(Row("deadbeef", null, null, 0), contact(e))
+        assertEquals(Row(null, null, null, 0), contact(f))
+    }
+
+    @Test
+    fun theChatNameRuleIsThePlaceholderRuleLimitedToThePeersOwnHash() {
+        val own = "0123456789abcdef0123456789abcdef"
+        db.prepareStatement("SELECT ${NamesMigration.chatNamePlaceholderSql("?1", "?2")}").use { st ->
+            for (v in placeholders + names) {
+                st.setString(1, v); st.setString(2, own)
+                val hexOfOther = DisplayNames.isPlaceholder(v) &&
+                    v.trim().lowercase().removePrefix("?").removeSuffix("\u2026").let { h ->
+                        h !in DisplayNames.APP_PLACEHOLDERS && !own.startsWith(h)
+                    }
+                val expected = DisplayNames.isPlaceholder(v) && !hexOfOther
+                st.executeQuery().use { rs -> rs.next(); assertEquals(v, expected, rs.getInt(1) == 1) }
+            }
+        }
+    }
+
+    @Test
     fun aDmChatWithNoContactGetsOneCarryingItsName() {
         // A distro sent-copy created the chat without a contact; renaming it
         // wrote only chats.name.

@@ -18,6 +18,9 @@ import com.newendian.retichat.names.DisplayNames
  *   [com.newendian.retichat.names.DisplayNames.isPlaceholder]): hash forms
  *   (8 to 32 hex, with or without a leading `?` or a trailing `…`),
  *   "Retichat", "Retichat Web" and "Anonymous Peer", case-insensitive.
+ *   A DM chat name (below) is the exception: there only the peer's own hash
+ *   forms are placeholders ([chatNamePlaceholderSql]), since other hex in a
+ *   chat name was typed.
  * - Never lose a name the user typed: a DM chat's `chats.name` can hold a
  *   rename the contact row lost. Until 2026-09-27 a rename wrote both, but
  *   re-adding the contact (QR code, link) reset the contact to its hash and
@@ -49,15 +52,40 @@ object NamesMigration {
      * rest is 8 to 32 hex digits; or it is one of the app placeholders.
      */
     fun placeholderSql(name: String): String {
+        val (t, hex) = placeholderParts(name)
+        return "($t IN (${appPlaceholders()}) OR (length($hex) BETWEEN 8 AND 32 AND NOT $hex GLOB '*[^0-9a-f]*'))"
+    }
+
+    /**
+     * §5.4 for a DM chat's `chats.name`, the name the A1 rule treats as
+     * typed: an app placeholder, or a hash form of the peer's own [hash] (a
+     * prefix of it, as the old build named a chat it knew no name for:
+     * `take(8)`). Other hex is kept: nothing but the user ever put hex that
+     * is not the peer's own hash into a chat name, so "12345678" or
+     * "20260927" there was typed, and the first rule is never to lose one.
+     */
+    fun chatNamePlaceholderSql(name: String, hash: String): String {
+        val (t, hex) = placeholderParts(name)
+        return "($t IN (${appPlaceholders()}) OR (length($hex) BETWEEN 8 AND 32 " +
+            "AND NOT $hex GLOB '*[^0-9a-f]*' AND substr(lower($hash), 1, length($hex)) = $hex))"
+    }
+
+    /** [name] trimmed and lowercased, and that with a leading `?` and a trailing `…` stripped. */
+    private fun placeholderParts(name: String): Pair<String, String> {
         val t = "lower(trim($name))"
         val noQ = "(CASE WHEN substr($t, 1, 1) = '?' THEN substr($t, 2) ELSE $t END)"
         val hex = "(CASE WHEN substr($noQ, -1) = '\u2026' THEN substr($noQ, 1, length($noQ) - 1) ELSE $noQ END)"
-        val apps = DisplayNames.APP_PLACEHOLDERS.joinToString(", ") { "'$it'" }
-        return "($t IN ($apps) OR (length($hex) BETWEEN 8 AND 32 AND NOT $hex GLOB '*[^0-9a-f]*'))"
+        return t to hex
     }
+
+    private fun appPlaceholders() = DisplayNames.APP_PLACEHOLDERS.joinToString(", ") { "'$it'" }
 
     /** [name] is a name someone provided: not empty and no placeholder. */
     private fun providedName(name: String) = "(trim($name) != '' AND NOT ${placeholderSql(name)})"
+
+    /** A DM chat's [name] is one the user provided: not empty and no placeholder of the peer [hash]. */
+    private fun providedChatName(name: String, hash: String) =
+        "(trim($name) != '' AND NOT ${chatNamePlaceholderSql(name, hash)})"
 
     /** A DM chat row: `dm_` and the peer's 32 lowercase hex. */
     private const val DM_CHAT = "isGroup = 0 AND id GLOB 'dm_*' AND length(id) = 35 " +
@@ -72,13 +100,13 @@ object NamesMigration {
             "SELECT destHashHex, " +
             "CASE WHEN isNameManual != 0 AND trim(displayName) != '' THEN trim(displayName) " +
             "ELSE (SELECT trim(ch.name) FROM `chats` ch WHERE ch.id = 'dm_' || lower(contacts.destHashHex) AND ch.isGroup = 0 " +
-            "AND ${providedName("ch.name")} " +
+            "AND ${providedChatName("ch.name", "contacts.destHashHex")} " +
             "AND trim(ch.name) != trim(contacts.displayName)) END, " +
             "NULL, NULL, NULL, " +
             "CASE WHEN isNameManual = 0 AND ${providedName("displayName")} THEN trim(displayName) END, " +
             "publicKeyHex, addedAt, 1 FROM `contacts`",
         "INSERT OR IGNORE INTO `contacts_new` (destHashHex, localName, messageName, messageNameAt, announceName, legacyName, publicKeyHex, addedAt, isAllowlisted) " +
-            "SELECT substr(id, 4), CASE WHEN ${providedName("name")} THEN trim(name) END, " +
+            "SELECT substr(id, 4), CASE WHEN ${providedChatName("name", "substr(id, 4)")} THEN trim(name) END, " +
             "NULL, NULL, NULL, NULL, NULL, createdAt, 0 FROM `chats` WHERE $DM_CHAT " +
             "AND NOT EXISTS (SELECT 1 FROM `contacts_new` c WHERE lower(c.destHashHex) = substr(chats.id, 4))",
         "DROP TABLE `contacts`",
