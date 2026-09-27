@@ -91,8 +91,13 @@ data class ContactNames(
     val legacyName: String? = null,
 )
 
-/** A channel post's label (§5.3): the name, and the short hash beside it when the name is the poster's own channel name. */
-data class ChannelLabel(val name: String, val secondaryHash: String?)
+/**
+ * A channel post's label (§5.3): the main label, and the grey secondary text
+ * beside it. [secondary] is the poster's channel name when the user has a
+ * local name for them, the short hash when the channel name stands as the
+ * main label, and null when the poster has no channel name.
+ */
+data class ChannelLabel(val name: String, val secondary: String?)
 
 object DisplayNames {
     /** `CHANNEL_NAME_REFRESH_SECS` (§4.2), in milliseconds. */
@@ -119,17 +124,22 @@ object DisplayNames {
     fun localName(raw: String, clean: (String) -> String?): String? = clean(raw).nonEmpty()
 
     /**
-     * §5.3 channel post: `channelName ?? localName ?? messageName ??
-     * announceName ?? legacyName ?? shortHash`. A label taken from the channel name carries
-     * the short hash as secondary text: channel names are public and anyone
-     * can pick any name.
+     * §5.3 channel post. Channel names are public and anyone can pick any
+     * name, so a channel name never stands alone:
+     *
+     * | The poster has | Main label | Secondary |
+     * |---|---|---|
+     * | a channelName and a localName | localName | channelName |
+     * | a channelName, no localName | channelName | shortHash |
+     * | no channelName | [contact] | none |
      */
     fun channelPost(channelName: String?, names: ContactNames?, hashHex: String): ChannelLabel {
-        val fromChannel = channelName.nonEmpty()
-        return if (fromChannel != null) {
-            ChannelLabel(fromChannel, shortHash(hashHex))
+        val fromChannel = channelName.nonEmpty() ?: return ChannelLabel(contact(names, hashHex), null)
+        val local = names?.localName.nonEmpty()
+        return if (local != null) {
+            ChannelLabel(local, fromChannel)
         } else {
-            ChannelLabel(contact(names, hashHex), null)
+            ChannelLabel(fromChannel, shortHash(hashHex))
         }
     }
 

@@ -34,14 +34,36 @@ class DisplayNamesTest {
     }
 
     @Test
-    fun channelPostPrefersTheChannelNameAndShowsTheHashBesideIt() {
+    fun channelPostWithALocalNameLeadsWithItAndGreysTheChannelName() {
         val names = ContactNames(localName = "Mum", messageName = "Alice")
-        assertEquals(ChannelLabel("Night Owl", "01234567…"), DisplayNames.channelPost("Night Owl", names, hash))
-        // No channel name: the contact's name, with no hash beside it.
+        assertEquals(ChannelLabel("Mum", "Night Owl"), DisplayNames.channelPost("Night Owl", names, hash))
+        // An empty local name is no local name: the channel name leads, the hash beside it.
+        assertEquals(ChannelLabel("Night Owl", "01234567…"), DisplayNames.channelPost("Night Owl", ContactNames(localName = "", messageName = "Alice"), hash))
+    }
+
+    @Test
+    fun channelPostWithOnlyAChannelNameShowsTheHashBesideIt() {
+        // Provided names never lead over the channel name; only the user's own name does.
+        val provided = ContactNames(messageName = "Alice", announceName = "alice@home", legacyName = "Ally")
+        assertEquals(ChannelLabel("Night Owl", "01234567…"), DisplayNames.channelPost("Night Owl", provided, hash))
+        assertEquals(ChannelLabel("Owl", "01234567…"), DisplayNames.channelPost("Owl", null, hash))
+    }
+
+    @Test
+    fun channelPostWithNoChannelNameIsTheContactNameAlone() {
+        val names = ContactNames(localName = "Mum", messageName = "Alice")
         assertEquals(ChannelLabel("Mum", null), DisplayNames.channelPost(null, names, hash))
+        assertEquals(ChannelLabel("Alice", null), DisplayNames.channelPost("", names.copy(localName = null), hash))
         assertEquals(ChannelLabel("01234567…", null), DisplayNames.channelPost(null, null, hash))
         assertEquals(ChannelLabel("Ally", null), DisplayNames.channelPost(null, ContactNames(legacyName = "Ally"), hash))
-        assertEquals(ChannelLabel("Owl", "01234567…"), DisplayNames.channelPost("Owl", ContactNames(legacyName = "Ally"), hash))
+    }
+
+    @Test
+    fun aChannelPostNotificationUsesTheMainLabelAlone() {
+        val com = com.newendian.retichat.service.RfedChannelClient
+        assertEquals("Mum", com.notificationSenderName("Night Owl", ContactNames(localName = "Mum"), hash))
+        assertEquals("Night Owl", com.notificationSenderName("Night Owl", ContactNames(messageName = "Alice"), hash))
+        assertEquals("Alice", com.notificationSenderName(null, ContactNames(messageName = "Alice"), hash))
     }
 
     @Test
@@ -76,6 +98,8 @@ class DisplayNamesTest {
         assertEquals("You", book.member(self))
         assertEquals("ffffffff…", book.contact(self))
         assertEquals(ChannelLabel("Owl", "01234567…"), book.channelPost(hash, "Owl"))
+        val renamed = NameBook(mapOf(hash to ContactNames(localName = "Mum", messageName = "Alice")), self)
+        assertEquals(ChannelLabel("Mum", "Owl"), renamed.channelPost(hash.uppercase(), "Owl"))
     }
 
     @Test

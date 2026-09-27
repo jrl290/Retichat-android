@@ -11,6 +11,7 @@ import com.newendian.retichat.data.db.dao.ContactDao
 import com.newendian.retichat.data.db.entity.ChannelNameStateEntity
 import com.newendian.retichat.data.db.entity.ChannelSenderEntity
 import com.newendian.retichat.data.db.entity.names
+import com.newendian.retichat.names.ContactNames
 import com.newendian.retichat.names.DisplayNames
 import com.newendian.retichat.names.NameField
 import com.newendian.retichat.names.NameUpdate
@@ -89,6 +90,10 @@ class RfedChannelClient(
         /** Compute an RNS SINGLE destination hash (delegates to FcmTokenRegistrar). */
         fun rfedDestHash(identityHashHex: String, app: String, aspects: List<String>): String? =
             FcmTokenRegistrar.rnsDestHash(identityHashHex, app, aspects)
+
+        /** §5.3: a channel post's notification names its poster by the main label alone. */
+        internal fun notificationSenderName(channelName: String?, names: ContactNames?, sourceHashHex: String): String =
+            DisplayNames.channelPost(channelName, names, sourceHashHex).name
 
         internal fun pullStateKey(channelId: String): String =
             channelId.lowercase()
@@ -969,12 +974,10 @@ class RfedChannelClient(
             if (!isOutbound &&
                 UserPreferences.isChannelNotificationsEnabled(appContext, channelHashHex)
             ) {
-                // §5.3 channel label; a channel name shows its short hash beside it.
                 val names = contactDao.findByHash(sourceHashHex)?.names()
-                val label = DisplayNames.channelPost(channelName, names, sourceHashHex)
                 MessageNotificationHelper.notify(
                     appContext,
-                    senderName = label.secondaryHash?.let { "${label.name} ($it)" } ?: label.name,
+                    senderName = notificationSenderName(channelName, names, sourceHashHex),
                     content = content,
                     chatId = channelHashHex,
                     conversationTitle = "#${channel.channelName}",

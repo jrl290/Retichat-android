@@ -108,6 +108,24 @@ class DisplayNameWiringTest {
     }
 
     @Test
+    fun channelPostsShowTheirSecondaryTextAndNotifyWithTheMainLabel() {
+        // §5.3: the conversation screen labels a channel post through the one
+        // resolver and draws whatever secondary text it carries (a channel
+        // name under a local name, or a short hash under a channel name).
+        val screen = src("ui/conversation/ConversationScreen.kt")
+        assertTrue(screen.contains("senderLabel = names.channelPost(msg.senderHashHex, channelNames[msg.senderHashHex.lowercase()])"))
+        val bubble = screen.substring(screen.indexOf("private fun MessageRow("))
+        assertTrue(bubble.contains("text = senderLabel.name,"))
+        assertTrue(Regex("senderLabel\\.secondary\\?\\.let \\{ secondary ->\\s+Spacer\\(Modifier\\.width\\(6\\.dp\\)\\)\\s+Text\\(\\s+text = secondary,")
+            .containsMatchIn(bubble))
+        // A channel post's notification names the poster by the main label alone.
+        val notify = channels.substring(channels.indexOf("isChannelNotificationsEnabled(appContext, channelHashHex)"))
+            .substringBefore("conversationTitle")
+        assertTrue(notify.contains("senderName = notificationSenderName(channelName, names, sourceHashHex),"))
+        assertFalse(notify.contains("secondary"))
+    }
+
+    @Test
     fun noSurfaceFreezesANameOrShowsAHashPrefixAsOne() {
         val ui = listOf(
             "ui/conversation/ConversationScreen.kt",

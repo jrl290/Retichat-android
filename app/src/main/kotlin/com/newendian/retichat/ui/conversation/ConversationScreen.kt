@@ -828,8 +828,9 @@ private fun ChannelConversationContent(
 }
 
 /**
- * One bubble. [senderLabel] is the sender's resolved name (NameBook), with the
- * short hash beside it when the name is a channel name; [text] is the body,
+ * One bubble. [senderLabel] is the sender's resolved name (NameBook), with its
+ * grey secondary text beside it on a channel post (§5.3: the channel name
+ * under a local name, or the short hash under a channel name); [text] is the body,
  * with a system line's member name already resolved.
  */
 @Composable
@@ -896,15 +897,20 @@ private fun MessageRow(
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f, fill = false),
                         )
-                        // A channel name is public and anyone can pick any
-                        // name: its short hash sits beside it (§5.3).
-                        senderLabel.secondaryHash?.let { hash ->
+                        // §5.3 secondary text: the poster's channel name
+                        // beside a local name, or the short hash beside a
+                        // channel name. A channel name can be long, so it is
+                        // capped and ellipsized rather than crowding out the
+                        // main label.
+                        senderLabel.secondary?.let { secondary ->
                             Spacer(Modifier.width(6.dp))
                             Text(
-                                text = hash,
+                                text = secondary,
                                 style = MaterialTheme.typography.labelSmall,
                                 color = contentColor.copy(alpha = 0.55f),
                                 maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.widthIn(max = 140.dp),
                             )
                         }
                     }
