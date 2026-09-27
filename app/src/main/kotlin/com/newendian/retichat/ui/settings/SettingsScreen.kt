@@ -80,7 +80,7 @@ fun SettingsScreen(
                 IdentityNavRow(onClick = onOpenIdentity)
             }
 
-            // ---- Section: Profile (display name + channel display name) ----
+            // ---- Section: Display names (announce, message, channel; DISPLAY_NAMES.md §6) ----
             item {
                 ProfileCard()
             }
