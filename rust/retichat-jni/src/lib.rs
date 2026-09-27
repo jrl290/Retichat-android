@@ -451,8 +451,8 @@ fn optional_jstring(env: &mut JNIEnv, s: &JString) -> Option<String> {
 
 /// `RetichatBridge.nativeRouterSetMessageDisplayName(router: Long, name: String?): Int`
 ///
-/// DISPLAY_NAMES.md §4.1: the Message Display Name the router adds (field
-/// 0xD1) to outbound messages by the name-ledger rule. null or "" clears it;
+/// DISPLAY_NAMES.md §4.1: the Message Display Name the router adds (key 0
+/// of the Retichat field 0xD1) to outbound messages by the name-ledger rule. null or "" clears it;
 /// the name is cleaned (§3). Takes effect at once, no restart. 0 / -1.
 #[no_mangle]
 pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeRouterSetMessageDisplayName(
@@ -513,7 +513,9 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeD
 
 /// `RetichatBridge.nativeDisplayNameDecode(fieldsRaw: ByteArray): ByteArray?`
 ///
-/// Field 0xD1 from the msgpack `fields` a delivery callback hands over:
+/// The name, key 0 of the Retichat field 0xD1 ({0xD1: {0: name}}; a 0xD1
+/// that is not a map is absent), from the msgpack `fields` a delivery
+/// callback hands over:
 /// `[name_state u8 (0 absent, 1 clear, 2 name) | name_len u16 BE | name]`,
 /// always at least 3 bytes. Accepting it depends on the message's
 /// signature (DISPLAY_NAMES.md §5.2).
@@ -896,7 +898,9 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeM
 
 /// An LXMF field key from Kotlin's Int: `lxmf_rust::ffi::field_key` rejects
 /// anything outside 0..=255 (-1, `nativeLastError`) rather than truncating
-/// it, which used to let e.g. 0x1D1 alias 0xD1 (FIELD_DISPLAY_NAME).
+/// it, which used to let e.g. 0x1D1 alias 0xD1 (FIELD_RETICHAT). The
+/// generic setters refuse 0xD1 itself: its entries go through
+/// `nativeMessageSetRetichat*`.
 fn field_key(key: jint) -> Option<u8> {
     match lxmf::field_key(key as i64) {
         Ok(key) => Some(key),
@@ -932,6 +936,51 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeM
 ) -> jint {
     let Some(key) = field_key(key) else { return -1 };
     ok_or_neg(lxmf::message_add_field_bool(handle as u64, key, value != 0))
+}
+
+/// `RetichatBridge.nativeMessageSetRetichatString(handle: Long, key: Int, value: String): Int`
+///
+/// DISPLAY_NAMES.md §10: set an entry of the Retichat field 0xD1, merged
+/// into `{0xD1: {key: value}}` with the entries already there. `key` must be
+/// 1..127 (0 is the display name, which only the router writes); keys 1-9
+/// are the group entries, all strings except 8. Anything else is refused:
+/// -1 with `nativeLastError`, and the message is unchanged. A null value is
+/// refused too.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeMessageSetRetichatString(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    key: jint,
+    value: JString,
+) -> jint {
+    if value.is_null() {
+        rns::set_error("value is null".to_string());
+        return -1;
+    }
+    let v: String = match env.get_string(&value) {
+        Ok(js) => js.into(),
+        Err(e) => {
+            rns::set_error(format!("value: {e}"));
+            return -1;
+        }
+    };
+    ok_or_neg(lxmf::message_set_retichat_string(handle as u64, key as i64, &v))
+}
+
+/// `RetichatBridge.nativeMessageSetRetichatBool(handle: Long, key: Int, value: Boolean): Int`
+///
+/// As `nativeMessageSetRetichatString`, for a bool entry; of the defined
+/// keys only 8 (group relay done) is a bool.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeMessageSetRetichatBool(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    key: jint,
+    value: jni::sys::jboolean,
+) -> jint {
+    ok_or_neg(lxmf::message_set_retichat_bool(handle as u64, key as i64, value != 0))
 }
 
 /// `RetichatBridge.nativeRouterIngestPropagated(routerHandle: Long, lxmfData: ByteArray): Boolean`
@@ -1593,9 +1642,9 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeC
 ///   [ ts_ms_be(8) | channel_id_hash(16) | EC_encrypted(prelude || lxmf_tail) ]
 /// Caller strips the first 8 bytes before sending; uses tsMs for local dedup.
 ///
-/// `displayNameState` is the Channel Display Name to carry in field 0xD1
-/// (DISPLAY_NAMES.md §2.3, §4.2): 0 = none (no 0xD1; the bytes are exactly
-/// the pre-name format), 1 = clear (empty 0xD1), 2 = the name in
+/// `displayNameState` is the Channel Display Name to carry in key 0 of field
+/// 0xD1 (DISPLAY_NAMES.md §2.3, §4.2): 0 = none (no 0xD1; the bytes are
+/// exactly the pre-name format), 1 = clear ({0xD1: {0: empty bin}}), 2 = the name in
 /// `displayName` (raw UTF-8, cleaned here; a name that cleans to nothing is
 /// an error). `displayName` may be null for states 0 and 1.
 #[no_mangle]
