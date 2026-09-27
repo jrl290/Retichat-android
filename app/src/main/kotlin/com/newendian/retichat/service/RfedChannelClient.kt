@@ -608,7 +608,7 @@ class RfedChannelClient(
                 // DISPLAY_NAMES.md §4.2: whether this post carries the
                 // Channel Display Name, decided once for the post (the retry
                 // below sends the same decision).
-                val postName = channelPostName(channel.id)
+                val postName = withContext(Dispatchers.IO) { channelPostName(channel.id) }
 
                 if (trySend(liveChannel, content, optimisticId, ownHashHex, identityHandle, postName)) {
                     return@withLock true

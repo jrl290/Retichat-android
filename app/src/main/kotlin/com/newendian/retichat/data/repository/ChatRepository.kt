@@ -36,6 +36,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
@@ -227,11 +228,12 @@ class ChatRepository(
     /**
      * Let [hex]'s announces through Transport's drop filter (on by default),
      * so its announce name reaches [onAnnounceReceived] (DISPLAY_NAMES.md
-     * §5.1 `announceName`). iOS watches the same contacts.
+     * §5.1 `announceName`). iOS watches the same contacts. On IO: it takes
+     * Transport's lock, and the add-contact flows start on the main thread.
      */
-    private fun watchAnnounces(hex: String) {
+    private suspend fun watchAnnounces(hex: String) {
         if (!RetichatBridge.isLoaded || hex.length != 32) return
-        runCatching { RetichatBridge.watchAnnounce(hex.hexToBytes()) }
+        withContext(Dispatchers.IO) { runCatching { RetichatBridge.watchAnnounce(hex.hexToBytes()) } }
     }
 
     /**
