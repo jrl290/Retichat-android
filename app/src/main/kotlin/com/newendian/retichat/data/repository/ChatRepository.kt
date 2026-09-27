@@ -286,8 +286,9 @@ class ChatRepository(
      * DISPLAY_NAMES.md §5.2: apply a received 0xD1 to the LXMF source
      * [srcHex]'s `messageName`. [unverifiedReason] decides (validated, source
      * unknown, invalid), and only a message newer than `messageNameAt` is
-     * accepted ([messageAt] is its LXMF timestamp, seconds); accepting records
-     * it and drops `legacyName`. The caller has already let the message
+     * accepted ([messageAt] is its LXMF timestamp, seconds); accepting drops
+     * `legacyName` and, for a validated message only, records [messageAt]
+     * ([DisplayNames.recordsMessageTime]). The caller has already let the message
      * through and made sure the contact row exists.
      */
     private suspend fun acceptMessageName(srcHex: String, field: NameField, unverifiedReason: Int, messageAt: Double) {
@@ -302,7 +303,7 @@ class ChatRepository(
                 // The write repeats the order guard (NameSql), so a concurrent
                 // older delivery cannot land last.
                 val rows = contactDao.acceptMessageName(
-                    srcHex, update.name, messageAt, onlyIfNone = unverifiedReason != Signature.VALIDATED,
+                    srcHex, update.name, messageAt, onlyIfNone = !DisplayNames.recordsMessageTime(unverifiedReason),
                 )
                 Log.i(TAG, "name: ${srcHex.take(8)} messageName ${if (update.name == null) "cleared" else "set"} (reason=$unverifiedReason, at=$messageAt, rows=$rows)")
             }

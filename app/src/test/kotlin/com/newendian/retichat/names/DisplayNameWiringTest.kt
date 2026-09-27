@@ -95,6 +95,9 @@ class DisplayNameWiringTest {
         val accept = repo.substring(repo.indexOf("private suspend fun acceptMessageName("), repo.indexOf("/** The privacy filter's answer"))
         assertTrue(accept.contains("contact?.messageNameAt"))
         assertTrue(accept.contains("contactDao.acceptMessageName("))
+        // Only a validated message records its time (a source-unknown name
+        // with a far-future timestamp must not lock out the real sender).
+        assertTrue(accept.contains("onlyIfNone = !DisplayNames.recordsMessageTime(unverifiedReason)"))
         assertFalse(repo.contains("setMessageName("))
         // An announce carrying a name drops the legacy name.
         assertTrue(repo.contains("DisplayNames.acceptAnnounceName(existing.announceName, displayName, existing.legacyName)"))

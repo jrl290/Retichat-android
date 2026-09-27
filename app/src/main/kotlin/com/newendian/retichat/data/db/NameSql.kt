@@ -14,9 +14,16 @@ object NameSql {
      * seconds) only if it is newer than `messageNameAt`; with `onlyIfNone`
      * (source unknown) only if the slot is empty. Accepting drops
      * `legacyName` (§5.1).
+     *
+     * Only a validated message records its time. A source-unknown one fills
+     * the empty slot but leaves `messageNameAt` as it was: nobody vouches for
+     * its timestamp, and recording it would let anyone who claims the
+     * sender's hash, with a far-future timestamp, block every later
+     * validated name from the real sender (§5.2 "validated → messageName = s").
      */
     const val ACCEPT_MESSAGE_NAME =
-        "UPDATE contacts SET messageName = :name, messageNameAt = :at, legacyName = NULL " +
+        "UPDATE contacts SET messageName = :name, " +
+            "messageNameAt = CASE WHEN :onlyIfNone = 0 THEN :at ELSE messageNameAt END, legacyName = NULL " +
             "WHERE destHashHex = :hex AND (messageNameAt IS NULL OR messageNameAt < :at) " +
             "AND (:onlyIfNone = 0 OR messageName IS NULL)"
 

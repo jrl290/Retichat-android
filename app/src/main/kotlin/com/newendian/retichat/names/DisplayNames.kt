@@ -148,8 +148,9 @@ object DisplayNames {
      * propagated copy landing after a later direct one must not bring an old
      * name back, since the sender's ledger would then never resend the new
      * one. [NameUpdate.Set] means accepted, even when it repeats the current
-     * name or clear: the caller records [messageAt] as `messageNameAt` and
-     * drops `legacyName`.
+     * name or clear: the caller drops `legacyName` and, for a validated
+     * message only, records [messageAt] as `messageNameAt`
+     * ([recordsMessageTime]).
      */
     fun acceptMessageName(
         current: String?,
@@ -172,6 +173,17 @@ object DisplayNames {
             }
         }
     }
+
+    /**
+     * Whether accepting a 0xD1 with [unverifiedReason] records the message's
+     * time as `messageNameAt`: only a validated one. A source-unknown name
+     * only fills an empty slot, and nobody vouches for its timestamp; if it
+     * recorded one far in the future, every later validated name from the
+     * real sender would count as older and be ignored for good. Left
+     * unrecorded, the next validated name newer than the last validated one
+     * replaces it, as the §5.2 table says.
+     */
+    fun recordsMessageTime(unverifiedReason: Int): Boolean = unverifiedReason == Signature.VALIDATED
 
     /**
      * §5.2 channel posts: the unpack reports a name only after the key

@@ -3,6 +3,7 @@ package com.newendian.retichat.names
 import com.newendian.retichat.bridge.ChannelLxmUnpackResult
 import org.junit.Assert.assertEquals
 import org.junit.Assume
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -141,8 +142,26 @@ class DisplayNamesTest {
     private fun Slot.receive(field: NameField, at: Double, reason: Int = Signature.VALIDATED): Slot =
         when (val u = DisplayNames.acceptMessageName(name, this.at, field, reason, at)) {
             NameUpdate.Unchanged -> this
-            is NameUpdate.Set -> Slot(u.name, at)
+            is NameUpdate.Set -> Slot(u.name, if (DisplayNames.recordsMessageTime(reason)) at else this.at)
         }
+
+    @Test
+    fun onlyAValidatedMessageRecordsItsTime() {
+        assertTrue(DisplayNames.recordsMessageTime(Signature.VALIDATED))
+        assertFalse(DisplayNames.recordsMessageTime(Signature.SOURCE_UNKNOWN))
+        assertFalse(DisplayNames.recordsMessageTime(Signature.INVALID))
+    }
+
+    @Test
+    fun aFarFutureSourceUnknownNameDoesNotLockOutTheRealSender() {
+        // §5.2 "validated → messageName = s": a message nobody can verify,
+        // dated 2096, fills the empty slot but must not outrank the sender.
+        val slot = Slot(null, null)
+            .receive(NameField.Name("Mallory"), 4e9, Signature.SOURCE_UNKNOWN)
+            .receive(NameField.Name("Alice"), 100.0)
+            .receive(NameField.Name("Old"), 90.0)
+        assertEquals(Slot("Alice", 100.0), slot)
+    }
 
     @Test
     fun anOldNameArrivingLateDoesNotUndoANewOne() {

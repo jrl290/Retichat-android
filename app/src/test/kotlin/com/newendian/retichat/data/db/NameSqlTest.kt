@@ -81,7 +81,30 @@ class NameSqlTest {
     fun sourceUnknownOnlyFillsAnEmptySlot() {
         assertEquals(1, accept("Alice", 10.0, onlyIfNone = true))
         assertEquals(0, accept("Mallory", 20.0, onlyIfNone = true))
-        assertEquals(Slots("Alice", 10.0, null, null), slots())
+        // Filled, but its unvouched time is not recorded.
+        assertEquals(Slots("Alice", null, null, null), slots())
+    }
+
+    @Test
+    fun aFarFutureSourceUnknownNameNeverBlocksTheRealSendersValidatedName() {
+        // Someone claims Alice's hash before her key is known, with 0xD1
+        // "Mallory" and a year-2096 timestamp.
+        assertEquals(1, accept("Mallory", 4e9, onlyIfNone = true))
+        assertEquals(Slots("Mallory", null, null, null), slots())
+        // Alice's own validated name replaces it, and the order among
+        // validated messages still holds.
+        assertEquals(1, accept("Alice", 100.0))
+        assertEquals(0, accept("Old", 90.0))
+        assertEquals(Slots("Alice", 100.0, null, null), slots())
+    }
+
+    @Test
+    fun aSourceUnknownNameAfterAValidatedClearKeepsTheClearsTime() {
+        assertEquals(1, accept(null, 50.0))
+        assertEquals(1, accept("Mallory", 4e9, onlyIfNone = true))
+        assertEquals(Slots("Mallory", 50.0, null, null), slots())
+        assertEquals(1, accept("Alice", 60.0))
+        assertEquals(Slots("Alice", 60.0, null, null), slots())
     }
 
     @Test
