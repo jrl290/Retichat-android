@@ -25,14 +25,12 @@ use jni::sys::{jbyteArray, jfloat, jint, jlong, jstring};
 use jni::{JNIEnv, JavaVM};
 
 use lxmf_rust::ffi as lxmf;
-use lxmf_rust::lx_message::LXMessage;
 use reticulum_rust::destination::{Destination, DestinationType};
 use reticulum_rust::ffi as rns;
 use reticulum_rust::identity::Identity;
 use reticulum_rust::lxstamper::LXStamper;
 use reticulum_rust::packet::Packet;
 use reticulum_rust::transport::Transport;
-use sha2::{Digest, Sha256};
 
 // ---------------------------------------------------------------------------
 // Android logcat output
@@ -424,6 +422,9 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeR
 }
 
 /// `RetichatBridge.nativeRouterRegisterDelivery(router: Long, identity: Long, name: String, stampCost: Int): Long`
+///
+/// `name` is the initial Message Display Name (DISPLAY_NAMES.md §4.1), never
+/// announced; "" = none. Change it with `nativeRouterSetMessageDisplayName`.
 #[no_mangle]
 pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeRouterRegisterDelivery(
     mut env: JNIEnv,
@@ -437,6 +438,93 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeR
     let cost = if stamp_cost < 0 { None } else { Some(stamp_cost as u32) };
     let display = if n.is_empty() { None } else { Some(n.as_str()) };
     ok_or_zero(lxmf::router_register_delivery(router as u64, identity as u64, display, cost))
+}
+
+/// An optional Kotlin `String?` as UTF-8; null or "" is `None`.
+fn optional_jstring(env: &mut JNIEnv, s: &JString) -> Option<String> {
+    if s.is_null() {
+        return None;
+    }
+    let v = jstring_to_string(env, s);
+    if v.is_empty() { None } else { Some(v) }
+}
+
+/// `RetichatBridge.nativeRouterSetMessageDisplayName(router: Long, name: String?): Int`
+///
+/// DISPLAY_NAMES.md §4.1: the Message Display Name the router adds (field
+/// 0xD1) to outbound messages by the name-ledger rule. null or "" clears it;
+/// the name is cleaned (§3). Takes effect at once, no restart. 0 / -1.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeRouterSetMessageDisplayName(
+    mut env: JNIEnv,
+    _class: JClass,
+    router: jlong,
+    name: JString,
+) -> jint {
+    let name = optional_jstring(&mut env, &name);
+    ok_or_neg(lxmf::router_set_message_display_name(router as u64, name.as_deref()).map(|_| ()))
+}
+
+/// `RetichatBridge.nativeRouterSetAnnounceDisplayName(router: Long, name: String?): Int`
+///
+/// DISPLAY_NAMES.md §2.2: the PUBLIC name in the lxmf.delivery announce.
+/// null or "" (the default) announces nil. Cleaned with the announce rules
+/// ("Anonymous Peer" is none); the next announce carries it. 0 / -1.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeRouterSetAnnounceDisplayName(
+    mut env: JNIEnv,
+    _class: JClass,
+    router: jlong,
+    name: JString,
+) -> jint {
+    let name = optional_jstring(&mut env, &name);
+    ok_or_neg(lxmf::router_set_announce_display_name(router as u64, name.as_deref()).map(|_| ()))
+}
+
+/// `RetichatBridge.nativeDisplayNameClean(raw: ByteArray, announce: Boolean): String?`
+///
+/// DISPLAY_NAMES.md §3, for the settings screens: the name exactly as the
+/// router will send it, or null when it cleans to no name. `announce` also
+/// maps "Anonymous Peer" to null.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeDisplayNameClean(
+    env: JNIEnv,
+    _class: JClass,
+    raw: JByteArray,
+    announce: jni::sys::jboolean,
+) -> jstring {
+    let bytes = if raw.is_null() { Vec::new() } else { jbytes_to_vec(&env, &raw) };
+    let cleaned = if announce != 0 {
+        lxmf_rust::display_name::clean_announce(&bytes)
+    } else {
+        lxmf_rust::display_name::clean(&bytes)
+    };
+    match cleaned {
+        Some(name) => match env.new_string(name) {
+            Ok(s) => s.into_raw(),
+            Err(e) => {
+                rns::set_error(format!("jstring: {e}"));
+                std::ptr::null_mut()
+            }
+        },
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// `RetichatBridge.nativeDisplayNameDecode(fieldsRaw: ByteArray): ByteArray?`
+///
+/// Field 0xD1 from the msgpack `fields` a delivery callback hands over:
+/// `[name_state u8 (0 absent, 1 clear, 2 name) | name_len u16 BE | name]`,
+/// always at least 3 bytes. Accepting it depends on the message's
+/// signature (DISPLAY_NAMES.md §5.2).
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeDisplayNameDecode(
+    env: JNIEnv,
+    _class: JClass,
+    fields_raw: JByteArray,
+) -> jbyteArray {
+    let bytes = if fields_raw.is_null() { Vec::new() } else { jbytes_to_vec(&env, &fields_raw) };
+    vec_to_jbytes(&env, &lxmf_rust::display_name::decode_fields_bytes(&bytes).to_trailer())
 }
 
 /// `RetichatBridge.nativeRouterSetDeliveryCallback(routerHandle: Long, callback: MessageCallback): Int`
@@ -660,6 +748,10 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeR
 /// both held per destination and per interface to one announce per
 /// period (`refresh_secs`, or 30 min when 0.0) since the last announce
 /// there, including the app's own announces, which always go out.
+///
+/// For the router's delivery destination the published announces carry the
+/// router's app_data (`[announce_name | nil, stamp_cost]`), which the router
+/// keeps current when the Announce Display Name changes (DISPLAY_NAMES.md §2.2).
 #[no_mangle]
 pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeTransportPublishDestination(
     env: JNIEnv,
@@ -668,7 +760,7 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeT
     refresh_secs: jni::sys::jdouble,
 ) -> jint {
     let h = jbytes_to_vec(&env, &dest_hash);
-    rns::transport_publish_destination(&h, refresh_secs, None);
+    lxmf::publish_destination(&h, refresh_secs);
     0
 }
 
@@ -796,6 +888,19 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeM
     ok_or_neg(lxmf::message_add_attachment(handle as u64, &f, &d))
 }
 
+/// An LXMF field key from Kotlin's Int: `lxmf_rust::ffi::field_key` rejects
+/// anything outside 0..=255 (-1, `nativeLastError`) rather than truncating
+/// it, which used to let e.g. 0x1D1 alias 0xD1 (FIELD_DISPLAY_NAME).
+fn field_key(key: jint) -> Option<u8> {
+    match lxmf::field_key(key as i64) {
+        Ok(key) => Some(key),
+        Err(e) => {
+            rns::set_error(e);
+            None
+        }
+    }
+}
+
 /// `RetichatBridge.nativeMessageAddFieldString(handle: Long, key: Int, value: String): Int`
 #[no_mangle]
 pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeMessageAddFieldString(
@@ -805,8 +910,9 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeM
     key: jint,
     value: JString,
 ) -> jint {
+    let Some(key) = field_key(key) else { return -1 };
     let v = jstring_to_string(&mut env, &value);
-    ok_or_neg(lxmf::message_add_field_string(handle as u64, key as u8, &v))
+    ok_or_neg(lxmf::message_add_field_string(handle as u64, key, &v))
 }
 
 /// `RetichatBridge.nativeMessageAddFieldBool(handle: Long, key: Int, value: Boolean): Int`
@@ -818,7 +924,8 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeM
     key: jint,
     value: jni::sys::jboolean,
 ) -> jint {
-    ok_or_neg(lxmf::message_add_field_bool(handle as u64, key as u8, value != 0))
+    let Some(key) = field_key(key) else { return -1 };
+    ok_or_neg(lxmf::message_add_field_bool(handle as u64, key, value != 0))
 }
 
 /// `RetichatBridge.nativeRouterIngestPropagated(routerHandle: Long, lxmfData: ByteArray): Boolean`
@@ -1372,37 +1479,20 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeR
 // ---------------------------------------------------------------------------
 // Channel crypto / stamp / LXM pack-unpack
 //
-// Mirrors Retichat-ios/rust/retichat-ffi/src/lib.rs verbatim for wire
-// compatibility.  See /memories/repo/retichat-rfed-channel-integration.md
-// for the wire-format contract and historical regressions.
+// The channel key derivation and LXM pack/unpack live once in
+// `lxmf_rust::channel`, shared with Retichat-ios/rust/retichat-ffi, so the
+// wire format and the key-binding check (DISPLAY_NAMES.md §2.3) cannot
+// drift between the platforms. See
+// /memories/repo/retichat-rfed-channel-integration.md for the wire-format
+// contract and historical regressions.
 // ---------------------------------------------------------------------------
 
-const LXMF_APP_NAME: &str = "lxmf";
-const LXMF_DELIVERY_ASPECT: &str = "delivery";
-const CHANNEL_IDENTITY_PRELUDE_MAGIC: &[u8; 4] = b"RTID";
-const CHANNEL_IDENTITY_PRELUDE_LEN: usize = 4 + 64;
-
-fn channel_private_key_bytes(name: &str) -> [u8; 64] {
-    let seed: [u8; 32] = Sha256::digest(name.as_bytes()).into();
-    let mut prv = [0u8; 64];
-    prv[..32].copy_from_slice(&seed);
-    prv[32..].copy_from_slice(&seed);
-    prv
-}
-
 fn channel_identity(name: &str) -> Result<Identity, String> {
-    let prv = channel_private_key_bytes(name);
-    Identity::from_bytes(&prv)
+    lxmf_rust::channel::channel_identity(name)
 }
 
 fn channel_destination(name: &str) -> Result<Destination, String> {
-    let id = channel_identity(name)?;
-    Destination::new_outbound(
-        Some(id),
-        DestinationType::Single,
-        LXMF_APP_NAME.to_string(),
-        vec![LXMF_DELIVERY_ASPECT.to_string()],
-    )
+    lxmf_rust::channel::channel_destination(name)
 }
 
 /// `RetichatBridge.nativeChannelEncrypt(name: String, plaintext: ByteArray): ByteArray?`
@@ -1489,11 +1579,19 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeC
     vec_to_jbytes(&env, &stamp)
 }
 
-/// `RetichatBridge.nativeChannelLxmPack(name, senderHandle, content, title): ByteArray?`
+/// `RetichatBridge.nativeChannelLxmPack(name, senderHandle, content, title, displayNameState, displayName): ByteArray?`
 ///
-/// Returns the same 8-byte-timestamp-prefixed wire buffer that iOS produces:
+/// Pack and unpack live once in `lxmf_rust::channel`, shared with the iOS
+/// FFI (`retichat_channel_lxm_pack`); this is a thin wrapper. Returns the
+/// same 8-byte-timestamp-prefixed buffer iOS produces:
 ///   [ ts_ms_be(8) | channel_id_hash(16) | EC_encrypted(prelude || lxmf_tail) ]
 /// Caller strips the first 8 bytes before sending; uses tsMs for local dedup.
+///
+/// `displayNameState` is the Channel Display Name to carry in field 0xD1
+/// (DISPLAY_NAMES.md §2.3, §4.2): 0 = none (no 0xD1; the bytes are exactly
+/// the pre-name format), 1 = clear (empty 0xD1), 2 = the name in
+/// `displayName` (raw UTF-8, cleaned here; a name that cleans to nothing is
+/// an error). `displayName` may be null for states 0 and 1.
 #[no_mangle]
 pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeChannelLxmPack(
     mut env: JNIEnv,
@@ -1502,127 +1600,42 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeC
     sender_handle: jlong,
     content: JByteArray,
     title: JByteArray,
+    display_name_state: jint,
+    display_name: JByteArray,
 ) -> jbyteArray {
     let n = jstring_to_string(&mut env, &name);
-    if n.is_empty() {
-        rns::set_error("channel name empty".into());
-        return std::ptr::null_mut();
-    }
     let content_v = jbytes_to_vec(&env, &content);
     let title_v = jbytes_to_vec(&env, &title);
-
-    let sender_identity: Identity = match rns::get_handle::<Identity>(sender_handle as u64) {
-        Some(id) => id,
-        None => {
-            rns::set_error("invalid sender identity handle".into());
+    let name_raw = if display_name.is_null() { Vec::new() } else { jbytes_to_vec(&env, &display_name) };
+    let state = match u8::try_from(display_name_state) {
+        Ok(state) => state,
+        Err(_) => {
+            rns::set_error(format!("unknown display name state {display_name_state} (0 none, 1 clear, 2 name)"));
             return std::ptr::null_mut();
         }
     };
-    let sender_pub_bytes: Vec<u8> = match sender_identity.get_public_key() {
-        Ok(b) => b,
+    let post_name = match lxmf_rust::channel::post_name_from_state(state, &name_raw) {
+        Ok(post_name) => post_name,
         Err(e) => {
-            rns::set_error(format!("sender pubkey: {}", e));
+            rns::set_error(e);
             return std::ptr::null_mut();
         }
     };
-    if sender_pub_bytes.len() != 64 {
-        rns::set_error(format!("sender pubkey wrong length: {}", sender_pub_bytes.len()));
+    let Some(sender) = rns::get_handle::<Identity>(sender_handle as u64) else {
+        rns::set_error("invalid sender identity handle".into());
         return std::ptr::null_mut();
-    }
-
-    let mut channel_dest = match channel_destination(&n) {
-        Ok(d) => d,
-        Err(e) => {
-            rns::set_error(format!("channel dest: {}", e));
-            return std::ptr::null_mut();
-        }
     };
-    let sender_dest = match Destination::new_outbound(
-        Some(sender_identity),
-        DestinationType::Single,
-        LXMF_APP_NAME.to_string(),
-        vec![LXMF_DELIVERY_ASPECT.to_string()],
-    ) {
-        Ok(d) => d,
-        Err(e) => {
-            rns::set_error(format!("sender dest: {}", e));
-            return std::ptr::null_mut();
-        }
-    };
-
-    let mut msg = match LXMessage::new(
-        Some(channel_dest.clone()),
-        Some(sender_dest),
-        Some(content_v),
-        Some(title_v),
-        None,
-        Some(LXMessage::PROPAGATED),
-        None,
-        None,
-        None,
-        false,
-    ) {
-        Ok(m) => m,
-        Err(e) => {
-            rns::set_error(format!("LXMessage::new: {}", e));
-            return std::ptr::null_mut();
-        }
-    };
-    if let Err(e) = msg.pack(false) {
-        rns::set_error(format!("LXMessage::pack: {}", e));
-        return std::ptr::null_mut();
-    }
-    let packed = match msg.packed.as_ref() {
-        Some(p) => p,
-        None => {
-            rns::set_error("LXMessage missing packed".into());
-            return std::ptr::null_mut();
-        }
-    };
-    if packed.len() < LXMessage::DESTINATION_LENGTH {
-        rns::set_error("packed too short".into());
-        return std::ptr::null_mut();
-    }
-    let lxmf_tail = &packed[LXMessage::DESTINATION_LENGTH..];
-    let mut prelude_plus_tail = Vec::with_capacity(CHANNEL_IDENTITY_PRELUDE_LEN + lxmf_tail.len());
-    prelude_plus_tail.extend_from_slice(CHANNEL_IDENTITY_PRELUDE_MAGIC);
-    prelude_plus_tail.extend_from_slice(&sender_pub_bytes);
-    prelude_plus_tail.extend_from_slice(lxmf_tail);
-    let pn_enc = match channel_dest.encrypt(&prelude_plus_tail) {
-        Ok(d) => d,
-        Err(e) => {
-            rns::set_error(format!("channel encrypt: {}", e));
-            return std::ptr::null_mut();
-        }
-    };
-
-    let id_hash: Vec<u8> = match channel_identity(&n) {
-        Ok(id) => match id.hash.clone() {
-            Some(h) => h,
-            None => {
-                rns::set_error("channel identity has no hash".into());
-                return std::ptr::null_mut();
-            }
-        },
-        Err(e) => {
-            rns::set_error(format!("channel identity: {}", e));
-            return std::ptr::null_mut();
-        }
-    };
-    if id_hash.len() != LXMessage::DESTINATION_LENGTH {
-        rns::set_error("channel id hash wrong length".into());
-        return std::ptr::null_mut();
-    }
-
-    let mut wire = Vec::with_capacity(8 + LXMessage::DESTINATION_LENGTH + pn_enc.len());
-    let ts_ms: u64 = (msg.timestamp.unwrap_or(0.0) * 1000.0) as u64;
-    wire.extend_from_slice(&ts_ms.to_be_bytes());
-    wire.extend_from_slice(&id_hash);
-    wire.extend_from_slice(&pn_enc);
-    vec_to_jbytes(&env, &wire)
+    bytes_or_null(
+        &env,
+        lxmf_rust::channel::pack(&n, &sender, &content_v, &title_v, &post_name).map(|post| post.to_bridge_bytes()),
+    )
 }
 
 /// `RetichatBridge.nativeChannelLxmUnpack(name: String, lxmfData: ByteArray): ByteArray?`
+///
+/// A post whose embedded public key does not produce its claimed source
+/// hash is rejected (null; `nativeLastError` mentions "key binding") and no
+/// key is remembered (DISPLAY_NAMES.md §2.3).
 ///
 /// Returns the same flat parsed-message buffer iOS produces:
 ///   [0..16]   source_hash
@@ -1632,6 +1645,11 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeC
 ///   [26..28]  title_len_be (u16)
 ///   [28..32]  content_len_be (u32)
 ///   [32..]    title bytes, then content bytes
+///   then      name_state u8 (0=absent, 1=clear, 2=name — the post's Channel
+///             Display Name, reported only when the signature validated),
+///             name_len u16 BE, name bytes (cleaned UTF-8)
+/// The name trailer sits at the end, so decoders that read only the first
+/// 32+t+c bytes keep working.
 #[no_mangle]
 pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeChannelLxmUnpack(
     mut env: JNIEnv,
@@ -1640,108 +1658,8 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeC
     lxmf_data: JByteArray,
 ) -> jbyteArray {
     let n = jstring_to_string(&mut env, &name);
-    if n.is_empty() {
-        rns::set_error("channel name empty".into());
-        return std::ptr::null_mut();
-    }
     let data = jbytes_to_vec(&env, &lxmf_data);
-    if data.len() < LXMessage::DESTINATION_LENGTH + 32 {
-        rns::set_error("lxmf_data too short".into());
-        return std::ptr::null_mut();
-    }
-
-    let mut id = match channel_identity(&n) {
-        Ok(id) => id,
-        Err(e) => {
-            rns::set_error(format!("channel identity: {}", e));
-            return std::ptr::null_mut();
-        }
-    };
-    let encrypted = &data[LXMessage::DESTINATION_LENGTH..];
-    let decrypted = match id.decrypt(encrypted) {
-        Ok(p) => p,
-        Err(e) => {
-            rns::set_error(format!("channel decrypt: {}", e));
-            return std::ptr::null_mut();
-        }
-    };
-
-    if decrypted.len() < CHANNEL_IDENTITY_PRELUDE_LEN
-        || &decrypted[..4] != CHANNEL_IDENTITY_PRELUDE_MAGIC
-    {
-        rns::set_error("channel: missing SOURCE-IDENTITY PRELUDE".into());
-        return std::ptr::null_mut();
-    }
-    let identity_pub = &decrypted[4..CHANNEL_IDENTITY_PRELUDE_LEN];
-    let lxmf_tail = &decrypted[CHANNEL_IDENTITY_PRELUDE_LEN..];
-    if lxmf_tail.len() < LXMessage::DESTINATION_LENGTH {
-        rns::set_error("lxmf tail too short".into());
-        return std::ptr::null_mut();
-    }
-    let claimed_source_hash = &lxmf_tail[..LXMessage::DESTINATION_LENGTH];
-    if let Err(e) = Identity::remember_destination(claimed_source_hash, identity_pub, None) {
-        rns::set_error(format!("remember_destination: {}", e));
-        return std::ptr::null_mut();
-    }
-
-    let lxmf_dest = match channel_destination(&n) {
-        Ok(d) => d.hash.clone(),
-        Err(e) => {
-            rns::set_error(format!("channel destination: {}", e));
-            return std::ptr::null_mut();
-        }
-    };
-    if lxmf_dest.len() != LXMessage::DESTINATION_LENGTH {
-        rns::set_error("lxmf dest wrong length".into());
-        return std::ptr::null_mut();
-    }
-
-    let mut full = Vec::with_capacity(lxmf_dest.len() + lxmf_tail.len());
-    full.extend_from_slice(&lxmf_dest);
-    full.extend_from_slice(lxmf_tail);
-
-    let msg = match LXMessage::unpack_from_bytes(&full, Some(LXMessage::PROPAGATED)) {
-        Ok(m) => m,
-        Err(e) => {
-            rns::set_error(format!("LXMessage::unpack: {}", e));
-            return std::ptr::null_mut();
-        }
-    };
-
-    let source_hash = msg.source_hash.clone();
-    if source_hash.len() != LXMessage::DESTINATION_LENGTH {
-        rns::set_error("source_hash wrong length".into());
-        return std::ptr::null_mut();
-    }
-    let timestamp_ms: u64 = (msg.timestamp.unwrap_or(0.0) * 1000.0) as u64;
-    let sig_ok: u8 = if msg.signature_validated { 1 } else { 0 };
-    let reason: u8 = match msg.unverified_reason {
-        Some(LXMessage::SOURCE_UNKNOWN) => 1,
-        Some(LXMessage::SIGNATURE_INVALID) => 2,
-        Some(other) => other,
-        None => 0,
-    };
-    let title = msg.title.clone();
-    let content = msg.content.clone();
-    if title.len() > u16::MAX as usize {
-        rns::set_error("title too large".into());
-        return std::ptr::null_mut();
-    }
-    if content.len() > u32::MAX as usize {
-        rns::set_error("content too large".into());
-        return std::ptr::null_mut();
-    }
-
-    let mut out = Vec::with_capacity(32 + title.len() + content.len());
-    out.extend_from_slice(&source_hash);
-    out.extend_from_slice(&timestamp_ms.to_be_bytes());
-    out.push(sig_ok);
-    out.push(reason);
-    out.extend_from_slice(&(title.len() as u16).to_be_bytes());
-    out.extend_from_slice(&(content.len() as u32).to_be_bytes());
-    out.extend_from_slice(&title);
-    out.extend_from_slice(&content);
-    vec_to_jbytes(&env, &out)
+    bytes_or_null(&env, lxmf_rust::channel::unpack(&n, &data).and_then(|post| post.to_bridge_bytes()))
 }
 
 /// `RetichatBridge.nativeChannelHash16(name: String): ByteArray?`
@@ -2389,35 +2307,44 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeD
     bytes_or_null(&env, lxmf_rust::distro::list_payload(&distro))
 }
 
-/// `RetichatBridge.nativeDistroAnnouncePayload(distroHandle: Long, appData: ByteArray?): ByteArray?`
+/// `RetichatBridge.nativeDistroAnnouncePayload(distroHandle: Long, announceName: ByteArray?): ByteArray?`
 /// The pre-signed `lxmf.delivery` announce RFed replays on the distro's
 /// behalf: msgpack `[flags|announce_data, distro_pubkey, sig_distro(value)]`.
+///
+/// `announceName` is the raw UTF-8 Announce Display Name (DISPLAY_NAMES.md
+/// §2.2), null/empty for none: the app_data is `[name | nil, nil, [0xD0]]`,
+/// the name cleaned with the announce rules. (This argument used to be
+/// caller app_data; every caller passed null, which still means "no name".)
 #[no_mangle]
 pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeDistroAnnouncePayload(
     env: JNIEnv,
     _class: JClass,
     distro_handle: jlong,
-    app_data: JByteArray,
+    announce_name: JByteArray,
 ) -> jbyteArray {
     let Some(distro) = distro_identity(distro_handle, "distro") else { return std::ptr::null_mut() };
-    let app: Option<Vec<u8>> = if app_data.is_null() {
+    let name: Option<Vec<u8>> = if announce_name.is_null() {
         None
     } else {
-        let v = jbytes_to_vec(&env, &app_data);
+        let v = jbytes_to_vec(&env, &announce_name);
         if v.is_empty() { None } else { Some(v) }
     };
-    bytes_or_null(&env, lxmf_rust::distro::announce_payload(&distro, app.as_deref()))
+    bytes_or_null(&env, lxmf_rust::distro::announce_payload(&distro, name.as_deref()))
 }
 
 /// `RetichatBridge.nativeDistroUnwrap(distroHandle: Long, blob: ByteArray): String?`
 /// Decrypt a fan-out blob (`distro_lxmf_hash(16) | lxmf_blob`) with the
-/// distro identity. Returns a JSON object with the same keys iOS uses
-/// (`source_hash`, `timestamp`, `title`, `content`,
-/// `is_delivery_notification`, `ticket`, `distro_transfer_key`, `sent_to`,
-/// `sent_by`), an empty string when the blob is addressed to a different
-/// distro, or null on error. `sent_to`/`sent_by` are the RFed SPEC §17.11
-/// sent-message sync marker (null unless the message is a sync copy; a
-/// non-null `sent_by` with a null `sent_to` is a copy with a malformed 0xFC).
+/// distro identity. Returns the JSON `lxmf_rust::distro::DistroMessage::to_json`
+/// builds, the same object iOS returns (`source_hash`, `timestamp`, `title`,
+/// `content`, `is_delivery_notification`, `ticket`, `distro_transfer_key`,
+/// `sent_to`, `sent_by`, `display_name_state`, `display_name`,
+/// `signature_validated`, `unverified_reason`), an empty string when the
+/// blob is addressed to a different distro, or null on error. `sent_to` /
+/// `sent_by` are the RFed SPEC §17.11 sent-message sync marker (null unless
+/// the message is a sync copy; a non-null `sent_by` with a null `sent_to`
+/// is a copy with a malformed 0xFC). `display_name_state` is 0 absent,
+/// 1 clear, 2 name; whether to accept it depends on `signature_validated` /
+/// `unverified_reason` (0 ok, 1 source unknown, 2 invalid) — DISPLAY_NAMES.md §5.2.
 #[no_mangle]
 pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeDistroUnwrap(
     mut env: JNIEnv,
@@ -2429,22 +2356,7 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeD
     let data = jbytes_to_vec(&env, &blob);
     let json = match lxmf_rust::distro::unwrap_blob(&mut distro, &data) {
         Ok(None) => String::new(),
-        Ok(Some(msg)) => format!(
-            concat!(
-                r#"{{"source_hash":"{}","timestamp":{},"title":{},"content":{},"#,
-                r#""is_delivery_notification":{},"ticket":{},"distro_transfer_key":{},"#,
-                r#""sent_to":{},"sent_by":{}}}"#
-            ),
-            msg.source_hash.iter().map(|b| format!("{b:02x}")).collect::<String>(),
-            msg.timestamp,
-            json_string(&msg.title),
-            json_string(&msg.content),
-            msg.is_delivery_notification,
-            msg.ticket.as_deref().map(json_string).unwrap_or_else(|| "null".into()),
-            msg.distro_transfer_key.as_deref().map(json_string).unwrap_or_else(|| "null".into()),
-            msg.sent_to.as_deref().map(json_string).unwrap_or_else(|| "null".into()),
-            msg.sent_by.as_deref().map(json_string).unwrap_or_else(|| "null".into()),
-        ),
+        Ok(Some(msg)) => msg.to_json(),
         Err(e) => {
             rns::set_error(e);
             return std::ptr::null_mut();
@@ -2457,22 +2369,4 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeD
             std::ptr::null_mut()
         }
     }
-}
-
-fn json_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
 }
