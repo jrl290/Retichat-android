@@ -206,4 +206,27 @@ class ChannelNameFormTest {
         assertTrue(screen.contains("Only people you share the full name with can join."))
         assertTrue(!screen.contains("Private channel prefix:"))
     }
+
+    /**
+     * The channel key derives from the name's bytes, so every client must
+     * filter to the same bytes. Expected values are Retichat-js
+     * filterChannelChars (lib/channel_name.js) run under node, as UTF-8 hex.
+     */
+    @Test
+    fun theNameFilterMatchesTheWebClientByteForByte() {
+        fun hex(s: String) = s.toByteArray(Charsets.UTF_8).joinToString("") { "%02x".format(it) }
+        val vectors = listOf(
+            "Cafe\u0301" to "636166c3a9",          // decomposed accent composes (NFC)
+            "Caf\u00e9" to "636166c3a9",
+            "x\u00b2" to "78c2b2",                  // a number that is not a digit (\\p{N})
+            "A_B!" to "6162",
+            "public.Nametest-096499" to "7075626c69632e6e616d65746573742d303936343939",
+            "\u65e5\u672c\u8a9e" to "e697a5e69cace8aa9e",
+            "e\u0301\u0301" to "c3a9",             // a leftover combining mark is dropped
+        )
+        for ((input, expected) in vectors) {
+            assertEquals("filterName(${'$'}input)", expected, hex(ChannelNameForm.filterName(input)))
+        }
+        assertEquals("636166c3a9", hex(ChannelNameForm.filterRoot("Cafe\u0301.")))
+    }
 }

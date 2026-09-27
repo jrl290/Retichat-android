@@ -18,13 +18,24 @@ object ChannelNameForm {
     /** 16 hex characters = 64 bits from a CSPRNG. */
     const val PRIVATE_ROOT_HEX_CHARS = 16
 
-    /** The name part: lowercase letters, digits, "." and "-". */
+    /**
+     * The name part: lowercased, normalized to NFC, then only Unicode letters
+     * (\p{L}), numbers (\p{N}), "." and "-", per code point. Byte-for-byte the
+     * web client's filterChannelChars (Retichat-js lib/channel_name.js) and iOS
+     * ChannelNameRules: the channel key derives from these bytes, so a name
+     * typed on any client must name the same channel.
+     */
     fun filterName(raw: String): String =
-        raw.lowercase().filter { it.isLetterOrDigit() || it == '.' || it == '-' }
+        java.text.Normalizer.normalize(raw.lowercase(), java.text.Normalizer.Form.NFC)
+            .replace(NAME_REJECT, "")
+
+    private val NAME_REJECT = Regex("[^\\p{L}\\p{N}.-]")
+    private val ROOT_REJECT = Regex("[^\\p{L}\\p{N}-]")
 
     /** The root: the name rule without "." (a root is one segment). */
     fun filterRoot(raw: String): String =
-        raw.lowercase().filter { it.isLetterOrDigit() || it == '-' }
+        java.text.Normalizer.normalize(raw.lowercase(), java.text.Normalizer.Form.NFC)
+            .replace(ROOT_REJECT, "")
 
     data class Fields(val root: String, val name: String)
 
