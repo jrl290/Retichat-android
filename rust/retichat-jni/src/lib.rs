@@ -533,8 +533,12 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeD
 /// ```kotlin
 /// fun onMessage(hash: ByteArray, srcHash: ByteArray, destHash: ByteArray,
 ///               title: String, content: String, timestamp: Double,
-///               signatureValid: Boolean)
+///               signatureValid: Boolean, unverifiedReason: Int,
+///               fieldsRaw: ByteArray)
 /// ```
+/// `unverifiedReason`: 0 validated, 1 source unknown (no key yet), 2
+/// signature invalid. DISPLAY_NAMES.md §5.2 accepts a 0xD1 name differently
+/// for 1 and 2, so decide on it, never on `signatureValid` alone.
 #[no_mangle]
 pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeRouterSetDeliveryCallback(
     mut env: JNIEnv,
@@ -588,7 +592,7 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeR
             let call_result = env.call_method(
                 cb_ref.as_obj(),
                 "onMessage",
-                "([B[B[BLjava/lang/String;Ljava/lang/String;DZ[B)V",
+                "([B[B[BLjava/lang/String;Ljava/lang/String;DZI[B)V",
                 &[
                     JValue::Object(&j_hash),
                     JValue::Object(&j_src),
@@ -597,6 +601,9 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeR
                     JValue::Object(&JObject::from(j_content)),
                     JValue::Double(msg.timestamp),
                     JValue::Bool(msg.signature_validated as u8),
+                    // 0 validated, 1 source unknown, 2 signature invalid
+                    // (DISPLAY_NAMES.md §5.2 treats 1 and 2 differently).
+                    JValue::Int(msg.unverified_reason as i32),
                     JValue::Object(&j_fields),
                 ],
             );
@@ -760,8 +767,7 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeT
     refresh_secs: jni::sys::jdouble,
 ) -> jint {
     let h = jbytes_to_vec(&env, &dest_hash);
-    lxmf::publish_destination(&h, refresh_secs);
-    0
+    ok_or_neg(lxmf::publish_destination(&h, refresh_secs))
 }
 
 /// `RetichatBridge.nativeTransportUnpublishDestination(destHash: ByteArray): Int`
