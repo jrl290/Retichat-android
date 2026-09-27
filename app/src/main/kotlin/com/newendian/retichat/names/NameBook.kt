@@ -5,7 +5,7 @@ package com.newendian.retichat.names
  * the contacts' name slots, keyed by lowercase hash hex, read live from Room
  * by whoever shows names. Nothing stores what this returns.
  */
-class NameBook(
+data class NameBook(
     private val contacts: Map<String, ContactNames> = emptyMap(),
     /** This device's lxmf.delivery hash; its own rows read "You" where a list shows it. */
     private val selfHex: String = "",

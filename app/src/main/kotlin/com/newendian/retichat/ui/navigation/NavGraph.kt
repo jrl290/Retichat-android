@@ -93,7 +93,8 @@ fun RetichatNavHost(navController: NavHostController) {
             val scope = rememberCoroutineScope()
             // The contacts the user added or shares a group with (allowlisted,
             // as iOS lists them), each under its resolved name.
-            val allContacts by repository.contacts().collectAsState(initial = emptyList())
+            val contactsFlow = remember { repository.contacts() }
+            val allContacts by contactsFlow.collectAsState(initial = emptyList())
             val selfHex = remember { repository.selfDestHash.joinToString("") { "%02x".format(it) } }
             val contacts = remember(allContacts, selfHex) {
                 allContacts.filter { it.isAllowlisted && it.destHashHex != selfHex }
@@ -133,8 +134,10 @@ fun RetichatNavHost(navController: NavHostController) {
         composable(Routes.NEW_GROUP) {
             // Show everyone the user has a DM chat with as potential group
             // members, each under its resolved name (DISPLAY_NAMES.md §5.3).
-            val chatPreviews by repository.chatPreviews().collectAsState(initial = emptyList())
-            val names by repository.nameBook().collectAsState(initial = NameBook.EMPTY)
+            val previewsFlow = remember { repository.chatPreviews() }
+            val chatPreviews by previewsFlow.collectAsState(initial = emptyList())
+            val namesFlow = remember { repository.nameBook() }
+            val names by namesFlow.collectAsState(initial = NameBook.EMPTY)
             val dmContacts = remember(chatPreviews, names) {
                 chatPreviews
                     .filter { !it.isGroup }

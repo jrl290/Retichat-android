@@ -551,10 +551,13 @@ private fun ChannelConversationContent(
     val channelMessages by app.rfedChannelClient.messagesFlow(channelId)
         .collectAsState(initial = emptyList())
     // §5.3 channel labels: the poster's channel name here, else its contact name.
-    val names by app.repository.nameBook().collectAsState(initial = NameBook.EMPTY)
-    val channelNames by app.rfedChannelClient.sendersFlow(channelId)
-        .map { senders -> senders.associate { it.senderHex to it.channelName } }
-        .collectAsState(initial = emptyMap())
+    val namesFlow = remember { app.repository.nameBook() }
+    val names by namesFlow.collectAsState(initial = NameBook.EMPTY)
+    val channelNamesFlow = remember(channelId) {
+        app.rfedChannelClient.sendersFlow(channelId)
+            .map { senders -> senders.associate { it.senderHex to it.channelName } }
+    }
+    val channelNames by channelNamesFlow.collectAsState(initial = emptyMap())
     val canPullMoreMap by app.rfedChannelClient.canPullMore.collectAsState()
     val pullInFlight by app.rfedChannelClient.pullInFlight.collectAsState()
     val rfedLinkGeneration by app.rfedChannelClient.rfedLinkGeneration.collectAsState()
