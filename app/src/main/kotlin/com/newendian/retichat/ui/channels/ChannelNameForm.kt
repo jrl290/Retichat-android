@@ -31,28 +31,51 @@ object ChannelNameForm {
     /**
      * A new value typed or pasted into the NAME field.
      *
-     * Private: when the edit enters a "." into a name that had none (or
-     * replaces the start of the name with text containing one — a paste over
+     * [selectionStart]/[selectionEnd] are the name field's selection just
+     * before the edit (the range a paste replaces). The screen passes them so
+     * a select-all paste is always seen as a paste over the whole name, even
+     * when the pasted text happens to start or end like the old name. Without
+     * them the edited range is inferred from the text alone.
+     *
+     * Private: when the edit enters a "." into a name that had none, or
+     * replaces the start of the name with text containing one (a paste over
      * the old value), everything before the first "." becomes the root and the
      * rest stays as the name. So a shared "root.name" pastes in one go, while a
      * name that already holds dots (from pasting "root.team.ops") can still be
-     * edited without its first segment being pulled into the root.
+     * edited without its first segment being pulled into the root. A "." at
+     * the very start of the name has no root before it and never splits, so
+     * it cannot wipe the root.
      *
      * Public: a leading "public." is dropped (the root is already "public");
      * any other "x.y" stays in the name as typed.
      */
-    fun onNameInput(previousName: String, input: String, isPrivate: Boolean, root: String): Fields {
+    fun onNameInput(
+        previousName: String,
+        input: String,
+        isPrivate: Boolean,
+        root: String,
+        selectionStart: Int? = null,
+        selectionEnd: Int? = null,
+    ): Fields {
         val name = filterName(input)
         if (!isPrivate) {
             return Fields(root, name.removePrefix("$PUBLIC_ROOT."))
         }
         val dot = name.indexOf('.')
-        if (dot < 0) return Fields(root, name)
+        if (dot <= 0) return Fields(root, name)
 
-        val prefix = name.commonPrefixWith(previousName).length
-        val suffix = name.substring(prefix).commonSuffixWith(previousName.substring(prefix)).length
-        val inserted = name.substring(prefix, name.length - suffix)
-        val split = inserted.contains('.') && (!previousName.contains('.') || prefix == 0)
+        val selStart = selectionStart?.coerceIn(0, previousName.length)
+        val selEnd = selectionEnd?.coerceIn(selStart ?: 0, previousName.length)
+        // Where the edit starts: never after the old selection's start.
+        val start = minOf(name.commonPrefixWith(previousName).length, selStart ?: Int.MAX_VALUE)
+        // What the edit kept of the old tail: never any of the old selection.
+        val keptTailMax = previousName.length - maxOf(start, selEnd ?: start)
+        val suffix = minOf(
+            name.substring(start).commonSuffixWith(previousName.substring(start)).length,
+            keptTailMax,
+        )
+        val inserted = name.substring(start, name.length - suffix)
+        val split = inserted.contains('.') && (!previousName.contains('.') || start == 0)
         if (!split) return Fields(root, name)
         return Fields(filterRoot(name.substring(0, dot)), name.substring(dot + 1))
     }

@@ -20,7 +20,9 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import com.newendian.retichat.RetichatApp
 import com.newendian.retichat.service.RfedChannelClient
@@ -53,7 +55,10 @@ fun JoinChannelScreen(
     val rfedAddressConfigured = effectiveNode.length >= 32
 
     var privacy by remember { mutableStateOf(Privacy.Public) }
-    var subdomain by remember { mutableStateOf("") }
+    // The name field keeps its selection so a paste over the whole name is
+    // recognised as one (see ChannelNameForm.onNameInput).
+    var nameField by remember { mutableStateOf(TextFieldValue("")) }
+    val subdomain = nameField.text
     var privatePrefix by remember { mutableStateOf(ChannelNameForm.randomPrivateRoot()) }
     var isJoining by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
@@ -245,16 +250,25 @@ fun JoinChannelScreen(
                             )
                         }
                         BasicTextField(
-                            value = subdomain,
+                            value = nameField,
                             onValueChange = { v ->
                                 val fields = ChannelNameForm.onNameInput(
-                                    previousName = subdomain,
-                                    input = v,
+                                    previousName = nameField.text,
+                                    input = v.text,
                                     isPrivate = privacy == Privacy.Private,
                                     root = privatePrefix,
+                                    selectionStart = nameField.selection.min,
+                                    selectionEnd = nameField.selection.max,
                                 )
                                 privatePrefix = fields.root
-                                subdomain = fields.name
+                                nameField = if (fields.name == v.text) {
+                                    v
+                                } else {
+                                    // Filtered or split: move the cursor back
+                                    // by the characters that left the field.
+                                    val cursor = v.selection.max - (v.text.length - fields.name.length)
+                                    TextFieldValue(fields.name, TextRange(cursor.coerceIn(0, fields.name.length)))
+                                }
                             },
                             singleLine = true,
                             textStyle = MaterialTheme.typography.bodyLarge.copy(

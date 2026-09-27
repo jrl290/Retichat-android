@@ -97,6 +97,45 @@ class ChannelNameFormTest {
         assertEquals(Fields("xyz", "foo"), privateInput("team.ops", "xyz.foo", "abc"))
     }
 
+    private fun selectAllPaste(previous: String, pasted: String, r: String) =
+        ChannelNameForm.onNameInput(previous, pasted, isPrivate = true, root = r,
+            selectionStart = 0, selectionEnd = previous.length)
+
+    @Test
+    fun selectAllPasteSharingOnlyTheFirstCharacterReplacesTheRoot() {
+        // "tim.chat" over "team.ops" shares the leading "t"; the old text-only
+        // inference kept root "abc" and joined "abc.tim.chat".
+        assertEquals(Fields("tim", "chat"), selectAllPaste("team.ops", "tim.chat", "abc"))
+        assertEquals(Fields("d1e2f3a4b5c6d7e8", "x"), selectAllPaste("deploy.x", "d1e2f3a4b5c6d7e8.x", "abc"))
+    }
+
+    @Test
+    fun selectAllPasteSharingTheOldStartOrEndReplacesTheRoot() {
+        assertEquals(Fields("team", "bar"), selectAllPaste("team.ops", "team.bar", "abc"))
+        assertEquals(Fields("x", "ops"), selectAllPaste("team.ops", "x.ops", "abc"))
+    }
+
+    @Test
+    fun typingADotInsideADottedNameAtTheCursorDoesNotSplit() {
+        val f = ChannelNameForm.onNameInput("team.ops", "t.eam.ops", isPrivate = true, root = "abc",
+            selectionStart = 1, selectionEnd = 1)
+        assertEquals(Fields("abc", "t.eam.ops"), f)
+    }
+
+    @Test
+    fun leadingDotNeverWipesTheRoot() {
+        assertEquals(Fields("myteam", ".ops"), privateInput("ops", ".ops", "myteam"))
+        assertEquals(Fields("myteam", "."), privateInput("", ".", "myteam"))
+        assertEquals(Fields("myteam", ".x"), selectAllPaste("team.ops", ".x", "myteam"))
+    }
+
+    @Test
+    fun screenPassesTheNameSelectionSoPastesAreSeen() {
+        val screen = File("src/main/kotlin/com/newendian/retichat/ui/channels/JoinChannelScreen.kt").readText()
+        assertTrue(screen.contains("selectionStart = nameField.selection.min"))
+        assertTrue(screen.contains("selectionEnd = nameField.selection.max"))
+    }
+
     @Test
     fun privateNameWithoutDotLeavesRootAlone() {
         assertEquals(Fields(root, "general"), privateInput("genera", "general"))
