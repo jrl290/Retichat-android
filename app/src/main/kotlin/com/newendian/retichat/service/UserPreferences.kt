@@ -24,6 +24,7 @@ object UserPreferences {
     /** DISPLAY_NAMES.md §1: public, in the lxmf.delivery announces. Empty by default. */
     const val PREF_KEY_ANNOUNCE_DISPLAY_NAME = "announce_display_name"
     const val PREF_KEY_DEFAULT_TCP = "default_tcp_enabled"
+    const val PREF_KEY_RTNODE_BLUETOOTH = "rtnode_bluetooth_enabled"
     const val PREF_KEY_DROP_ANNOUNCES = "drop_announces"
 
     // ── New keys (iOS parity) ──────────────────────────────────────────
@@ -106,6 +107,18 @@ object UserPreferences {
 
     fun isDefaultTcpEnabled(context: Context): Boolean =
         prefs(context).getBoolean(PREF_KEY_DEFAULT_TCP, true)
+
+    /**
+     * When true (default), the app links over Bluetooth to any RTNode in
+     * range, with no other configuration (RTNodeBluetooth). Read at stack
+     * start; a change takes effect on Restart.
+     */
+    fun isRtnodeBluetoothEnabled(context: Context): Boolean =
+        prefs(context).getBoolean(PREF_KEY_RTNODE_BLUETOOTH, true)
+
+    fun setRtnodeBluetoothEnabled(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(PREF_KEY_RTNODE_BLUETOOTH, enabled).apply()
+    }
 
     fun setDefaultTcpEnabled(context: Context, enabled: Boolean) {
         prefs(context).edit().putBoolean(PREF_KEY_DEFAULT_TCP, enabled).apply()

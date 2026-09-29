@@ -92,6 +92,24 @@ interface AppLinkSendCallback {
 }
 
 /**
+ * The Bluetooth engine (Reticulum-rust `interfaces::prns_ble`) asking the
+ * radio for something: see [com.newendian.retichat.service.RTNodeBluetooth].
+ * Called on Rust and Binder threads; implementations hand the work to their
+ * own thread and return.
+ */
+@Keep
+interface PrnsBleCallback {
+    /** Start or stop scanning for the Prns service. */
+    fun onScan(on: Boolean)
+    /** Write [data] to characteristic 0 (control) or 1 (data), with response. */
+    fun onWrite(link: Long, characteristic: Int, data: ByteArray)
+    /** Cancel the connection or connection attempt; no linkClosed after. */
+    fun onDisconnect(link: Long)
+    /** 0 handshaking, 1 settled, 2 closed, 3 dialling. */
+    fun onLinkState(link: Long, state: Int, peer: ByteArray?, interfaceName: String?)
+}
+
+/**
  * JNI bridge to the Rust Reticulum + LXMF libraries.
  *
  * All `native*` methods map 1:1 to C-exported JNI functions in
@@ -917,6 +935,48 @@ object RetichatBridge {
      */
     fun channelHash16(name: String): ByteArray =
         com.newendian.retichat.crypto.ChannelHash.compute(name)
+
+    // ---- RTNode over Bluetooth (Reticulum-rust interfaces::prns_ble) ----
+
+    /**
+     * Start the Bluetooth engine once the stack runs and the delivery
+     * destination is published. [storageDir] keeps the phone's Bluetooth
+     * identity; returns it, or null (see [lastError]).
+     */
+    fun prnsBleStart(storageDir: String, callback: PrnsBleCallback): ByteArray? =
+        nativePrnsBleStart(storageDir, callback)
+
+    /** Close every link and remove the RTNodes' interfaces. Blocks briefly. */
+    fun prnsBleStop() {
+        nativePrnsBleStop()
+    }
+
+    /** An advertisement of the Prns service; the link to dial it on, or 0. */
+    fun prnsBleSighted(address: String, companyId: Int, data: ByteArray): Long =
+        nativePrnsBleSighted(address, companyId, data)
+
+    fun prnsBleLinkReady(link: Long, maxWriteLen: Int): Boolean =
+        nativePrnsBleLinkReady(link, maxWriteLen) == 0
+
+    fun prnsBleLinkReceived(link: Long, characteristic: Int, data: ByteArray) {
+        nativePrnsBleLinkReceived(link, characteristic, data)
+    }
+
+    fun prnsBleLinkWriteDone(link: Long, ok: Boolean) {
+        nativePrnsBleLinkWriteDone(link, ok)
+    }
+
+    fun prnsBleLinkClosed(link: Long) {
+        nativePrnsBleLinkClosed(link)
+    }
+
+    private external fun nativePrnsBleStart(storageDir: String, callback: PrnsBleCallback): ByteArray?
+    private external fun nativePrnsBleStop(): Int
+    private external fun nativePrnsBleSighted(address: String, companyId: Int, data: ByteArray): Long
+    private external fun nativePrnsBleLinkReady(link: Long, maxWriteLen: Int): Int
+    private external fun nativePrnsBleLinkReceived(link: Long, characteristic: Int, data: ByteArray): Int
+    private external fun nativePrnsBleLinkWriteDone(link: Long, ok: Boolean): Int
+    private external fun nativePrnsBleLinkClosed(link: Long): Int
 }
 
 /**

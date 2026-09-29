@@ -2425,3 +2425,205 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeD
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// RTNode over Bluetooth (Reticulum-rust interfaces::prns_ble, central only)
+// ---------------------------------------------------------------------------
+//
+// Kotlin (service/RTNodeBluetooth.kt) is the radio: it scans when asked,
+// reports each advertisement of the Prns service, connects when handed a
+// link, sets the GATT link up, performs the writes it is asked for and
+// reports every event. Rust decides what to dial and does the protocol.
+
+use reticulum_rust::interfaces::prns_ble;
+
+/// The Kotlin `PrnsBleCallback`. Called on the engine's threads and on the
+/// callers' (Binder threads, interface writers), so each call attaches.
+struct JniBleHost {
+    jvm: JavaVM,
+    callback: GlobalRef,
+}
+
+impl JniBleHost {
+    /// A Kotlin exception must not stay pending on a thread that calls back
+    /// into Java later.
+    fn clear_exception(env: &mut JNIEnv) {
+        if env.exception_check().unwrap_or(false) {
+            let _ = env.exception_describe();
+            let _ = env.exception_clear();
+        }
+    }
+}
+
+impl prns_ble::Host for JniBleHost {
+    fn scan(&self, on: bool) {
+        let Ok(mut env) = self.jvm.attach_current_thread() else { return };
+        let _ = env.call_method(self.callback.as_obj(), "onScan", "(Z)V", &[JValue::Bool(on as u8)]);
+        Self::clear_exception(&mut env);
+    }
+
+    fn write(&self, link: u64, characteristic: prns_ble::Characteristic, bytes: &[u8]) {
+        let Ok(mut env) = self.jvm.attach_current_thread() else { return };
+        let Ok(data) = env.byte_array_from_slice(bytes) else { return };
+        let _ = env.call_method(
+            self.callback.as_obj(),
+            "onWrite",
+            "(JI[B)V",
+            &[JValue::Long(link as i64), JValue::Int(characteristic as i32), JValue::Object(&data)],
+        );
+        Self::clear_exception(&mut env);
+    }
+
+    fn disconnect(&self, link: u64) {
+        let Ok(mut env) = self.jvm.attach_current_thread() else { return };
+        let _ = env.call_method(self.callback.as_obj(), "onDisconnect", "(J)V", &[JValue::Long(link as i64)]);
+        Self::clear_exception(&mut env);
+    }
+
+    fn link_state(&self, link: u64, state: prns_ble::LinkState, peer: Option<&[u8; 16]>, interface: Option<&str>) {
+        let Ok(mut env) = self.jvm.attach_current_thread() else { return };
+        let peer_obj: JObject = match peer.map(|p| env.byte_array_from_slice(p)) {
+            Some(Ok(array)) => array.into(),
+            _ => JObject::null(),
+        };
+        let name_obj: JObject = match interface.map(|n| env.new_string(n)) {
+            Some(Ok(name)) => name.into(),
+            _ => JObject::null(),
+        };
+        let _ = env.call_method(
+            self.callback.as_obj(),
+            "onLinkState",
+            "(JI[BLjava/lang/String;)V",
+            &[JValue::Long(link as i64), JValue::Int(state as i32), JValue::Object(&peer_obj), JValue::Object(&name_obj)],
+        );
+        Self::clear_exception(&mut env);
+    }
+}
+
+/// `RetichatBridge.nativePrnsBleStart(storageDir: String, callback: PrnsBleCallback): ByteArray?`
+/// The phone's 16-byte Bluetooth identity, or null (see lastError). Call
+/// once the stack runs and the delivery destination is published.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativePrnsBleStart(
+    mut env: JNIEnv,
+    _class: JClass,
+    storage_dir: JString,
+    callback: JObject,
+) -> jbyteArray {
+    let dir = jstring_to_string(&mut env, &storage_dir);
+    let jvm = match env.get_java_vm() {
+        Ok(vm) => vm,
+        Err(e) => {
+            rns::set_error(format!("Failed to get JavaVM: {e}"));
+            return std::ptr::null_mut();
+        }
+    };
+    let callback = match env.new_global_ref(&callback) {
+        Ok(r) => r,
+        Err(e) => {
+            rns::set_error(format!("Failed to create global ref: {e}"));
+            return std::ptr::null_mut();
+        }
+    };
+    let host = Arc::new(JniBleHost { jvm, callback });
+    match prns_ble::start(std::path::Path::new(&dir), prns_ble::Endpoint::ANDROID, host) {
+        Ok(identity) => vec_to_jbytes(&env, &identity),
+        Err(e) => {
+            rns::set_error(e);
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// `RetichatBridge.nativePrnsBleStop(): Int` — closes every link and removes
+/// the RTNodes' interfaces. Blocks briefly: never on the main thread, never
+/// from a PrnsBleCallback, and before the stack shuts down.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativePrnsBleStop(
+    _env: JNIEnv,
+    _class: JClass,
+) -> jint {
+    prns_ble::stop();
+    0
+}
+
+/// `RetichatBridge.nativePrnsBleSighted(address: String, companyId: Int, data: ByteArray?): Long`
+/// An advertisement of the Prns service: the device address and its
+/// manufacturer data for `companyId` (ScanRecord.getManufacturerSpecificData).
+/// The link to dial it on, or 0.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativePrnsBleSighted(
+    mut env: JNIEnv,
+    _class: JClass,
+    address: JString,
+    company_id: jint,
+    data: JByteArray,
+) -> jlong {
+    if data.is_null() {
+        return 0;
+    }
+    let address = jstring_to_string(&mut env, &address);
+    let data = jbytes_to_vec(&env, &data);
+    match prns_ble::sighted(&address, company_id as u16, &data) {
+        Ok(Some(link)) => link as jlong,
+        Ok(None) => 0,
+        Err(e) => {
+            rns::set_error(e);
+            0
+        }
+    }
+}
+
+/// `RetichatBridge.nativePrnsBleLinkReady(link: Long, maxWriteLen: Int): Int`
+/// Connected, services discovered, both characteristics subscribed.
+/// maxWriteLen: the negotiated ATT MTU - 3.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativePrnsBleLinkReady(
+    _env: JNIEnv,
+    _class: JClass,
+    link: jlong,
+    max_write_len: jint,
+) -> jint {
+    ok_or_neg(prns_ble::link_ready(link as u64, max_write_len.max(0) as usize))
+}
+
+/// `RetichatBridge.nativePrnsBleLinkReceived(link: Long, characteristic: Int, data: ByteArray): Int`
+/// A notification from characteristic 0 (control) or 1 (data).
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativePrnsBleLinkReceived(
+    env: JNIEnv,
+    _class: JClass,
+    link: jlong,
+    characteristic: jint,
+    data: JByteArray,
+) -> jint {
+    let Some(characteristic) = prns_ble::Characteristic::from_u8(characteristic as u8) else {
+        rns::set_error(format!("unknown characteristic {characteristic}"));
+        return -1;
+    };
+    let bytes = jbytes_to_vec(&env, &data);
+    ok_or_neg(prns_ble::link_received(link as u64, characteristic, &bytes))
+}
+
+/// `RetichatBridge.nativePrnsBleLinkWriteDone(link: Long, ok: Boolean): Int`
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativePrnsBleLinkWriteDone(
+    _env: JNIEnv,
+    _class: JClass,
+    link: jlong,
+    ok: jni::sys::jboolean,
+) -> jint {
+    ok_or_neg(prns_ble::link_write_done(link as u64, ok != 0))
+}
+
+/// `RetichatBridge.nativePrnsBleLinkClosed(link: Long): Int` — the
+/// connection or attempt is gone (disconnect, connect failure, or a failure
+/// setting the link up).
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativePrnsBleLinkClosed(
+    _env: JNIEnv,
+    _class: JClass,
+    link: jlong,
+) -> jint {
+    ok_or_neg(prns_ble::link_closed(link as u64))
+}

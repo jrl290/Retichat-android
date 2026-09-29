@@ -37,6 +37,8 @@ import com.newendian.retichat.data.db.entity.InterfaceConfigEntity
 import com.newendian.retichat.service.ConnectionStateManager
 import com.newendian.retichat.service.DefaultEndpointManager
 import com.newendian.retichat.service.DisplayNameSettings
+import com.newendian.retichat.service.RTNodeBluetooth
+import com.newendian.retichat.service.RTNodeBluetoothStatus
 import com.newendian.retichat.service.UserPreferences
 import org.json.JSONObject
 
@@ -117,6 +119,11 @@ fun SettingsScreen(
             // Default TCP endpoint (always shown)
             item {
                 DefaultTcpCard()
+            }
+
+            // Bluetooth to any RTNode in range (always shown)
+            item {
+                RTNodeBluetoothCard()
             }
 
             items(interfaces, key = { it.id }) { iface ->
@@ -648,6 +655,74 @@ private fun DefaultTcpCard() {
                 )
                 Text(
                     text = "Used only when no other interfaces are configured.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                )
+            }
+        }
+    }
+}
+
+// ---- Nearby RTNode (Bluetooth) card ----
+
+/**
+ * On/off for the Bluetooth link to any RTNode in range (RTNodeBluetooth);
+ * there is nothing to set up. Read at stack start, so a change takes effect
+ * on Restart, like the default endpoints. The last line is the live status.
+ */
+@Composable
+private fun RTNodeBluetoothCard() {
+    val context = LocalContext.current
+    var enabled by remember {
+        mutableStateOf(UserPreferences.isRtnodeBluetoothEnabled(context))
+    }
+    val status by RTNodeBluetooth.status.collectAsState()
+    val statusText = if (!enabled) "Off" else when (val s = status) {
+        RTNodeBluetoothStatus.Off -> "Not running"
+        RTNodeBluetoothStatus.Searching -> "Looking for an RTNode in range"
+        RTNodeBluetoothStatus.Connecting -> "Connecting…"
+        is RTNodeBluetoothStatus.Connected -> "Connected to RTNode ${s.node}"
+        is RTNodeBluetoothStatus.Unavailable -> s.reason
+    }
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (enabled)
+                MaterialTheme.colorScheme.surfaceContainerHigh
+            else
+                MaterialTheme.colorScheme.surfaceContainerLow,
+        ),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Switch(
+                checked = enabled,
+                onCheckedChange = { newValue ->
+                    enabled = newValue
+                    UserPreferences.setRtnodeBluetoothEnabled(context, newValue)
+                },
+            )
+            Spacer(Modifier.width(12.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Nearby RTNode",
+                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                )
+                Text(
+                    text = "Bluetooth",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Text(
+                    text = statusText,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
                 )

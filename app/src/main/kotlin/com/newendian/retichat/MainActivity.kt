@@ -18,6 +18,8 @@ import androidx.navigation.NavHostController
 import androidx.navigation.compose.rememberNavController
 import com.newendian.retichat.data.model.hexToBytes
 import com.newendian.retichat.service.MessageNotificationHelper
+import com.newendian.retichat.service.RTNodeBluetooth
+import com.newendian.retichat.service.UserPreferences
 import com.newendian.retichat.ui.navigation.RetichatNavHost
 import com.newendian.retichat.ui.navigation.Routes
 import com.newendian.retichat.ui.theme.RetichatTheme
@@ -34,19 +36,40 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.RequestPermission()
     ) { granted ->
         Log.i(TAG, "POST_NOTIFICATIONS permission granted=$granted")
+        requestBluetoothIfWanted()
+    }
+
+    /** Bluetooth to nearby RTNodes (RTNodeBluetooth), asked after notifications. */
+    private val bluetoothPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
+        val granted = results.values.all { it }
+        Log.i(TAG, "Bluetooth permissions granted=$granted")
+        if (granted) {
+            val app = applicationContext
+            CoroutineScope(Dispatchers.IO).launch { RTNodeBluetooth.onPermissionsGranted(app) }
+        }
+    }
+
+    private fun requestBluetoothIfWanted() {
+        if (UserPreferences.isRtnodeBluetoothEnabled(this) && !RTNodeBluetooth.hasPermissions(this)) {
+            bluetoothPermissionLauncher.launch(RTNodeBluetooth.PERMISSIONS)
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        // Request notification permission on Android 13+
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
-                != PackageManager.PERMISSION_GRANTED
-            ) {
-                notifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-            }
+        // Request notification permission on Android 13+, then Bluetooth
+        // (one permission request at a time).
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            notifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            requestBluetoothIfWanted()
         }
 
         // The stack is held while the app is on screen by RetichatApp's

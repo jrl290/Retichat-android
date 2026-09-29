@@ -363,6 +363,15 @@ object StackRuntime {
         runCatching { RfedDistroClient.registerIfNeeded(app) }
             .onFailure { Log.e(TAG, "RfedDistroClient.registerIfNeeded failed", it) }
 
+        // Bluetooth to any RTNode in range, after the delivery destination is
+        // published and ConnectionStateManager registered: an RTNode's
+        // interface comes up the moment its link settles, and that up-edge is
+        // when Transport announces the published destination on it and
+        // app-links re-attempts its held links (DESIGN_PRINCIPLES §5).
+        if (UserPreferences.isRtnodeBluetoothEnabled(app)) {
+            RTNodeBluetooth.start(app, configDir.absolutePath)
+        }
+
         Log.i(TAG, "StackRuntime ready — dest=$hashHex, ${interfaces.size} interface(s)")
         return true
     }
@@ -375,6 +384,10 @@ object StackRuntime {
         RfedDistroClient.onStackStopped()
 
         ConnectionStateManager.unregister()
+
+        // Bluetooth first among the stack's parts: its RTNode interfaces
+        // leave Transport before the stack shuts down (no-op if never started).
+        RTNodeBluetooth.stop()
 
         app.repository.configure(ByteArray(0), 0L, 0L)
 
