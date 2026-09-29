@@ -405,15 +405,16 @@ object RTNodeBluetooth {
             fail(node, "cannot subscribe to ${characteristic.uuid}")
             return
         }
-        val queued = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            gatt.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) == BluetoothStatusCodes.SUCCESS
+        // The status code says why a request was refused (e.g. 201, busy).
+        val code = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            gatt.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
         } else {
             @Suppress("DEPRECATION")
             descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
             @Suppress("DEPRECATION")
-            gatt.writeDescriptor(descriptor)
+            if (gatt.writeDescriptor(descriptor)) BluetoothStatusCodes.SUCCESS else -1
         }
-        if (!queued) fail(node, "subscription to ${characteristic.uuid} refused")
+        if (code != BluetoothStatusCodes.SUCCESS) fail(node, "subscription to ${characteristic.uuid} refused (status $code)")
     }
 
     private fun write(link: Long, characteristic: Int, data: ByteArray) {
@@ -427,19 +428,18 @@ object RTNodeBluetooth {
         }
         // With response: RTNode's characteristics are write-with-response,
         // and the response is what paces the next fragment.
-        val queued = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            gatt.writeCharacteristic(target, data, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) ==
-                BluetoothStatusCodes.SUCCESS
+        val code = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            gatt.writeCharacteristic(target, data, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
         } else {
             @Suppress("DEPRECATION")
             target.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
             @Suppress("DEPRECATION")
             target.value = data
             @Suppress("DEPRECATION")
-            gatt.writeCharacteristic(target)
+            if (gatt.writeCharacteristic(target)) BluetoothStatusCodes.SUCCESS else -1
         }
-        if (!queued) {
-            Log.w(TAG, "link $link: write refused")
+        if (code != BluetoothStatusCodes.SUCCESS) {
+            Log.w(TAG, "link $link: write refused (status $code)")
             RetichatBridge.prnsBleLinkWriteDone(link, false)
         }
     }
