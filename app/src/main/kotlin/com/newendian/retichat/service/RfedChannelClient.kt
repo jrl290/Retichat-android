@@ -66,20 +66,20 @@ class RfedChannelClient(
     companion object {
         private const val TAG = "RfedChannel"
 
-        /** Derive the 16-byte channel hash from a channel name. */
+        /**
+         * Derive the 16-byte channel hash from a channel name: the channel
+         * IDENTITY hash (RFed-rust SPEC.md §1), the wire prefix of every
+         * post and RFed's key for subscribe, pull, fan-out and notify. Not
+         * the channel's lxmf.delivery destination hash.
+         */
         fun channelHash(name: String): ByteArray {
-            // Mirrors Rust ChannelKeypair::hash:
+            // Mirrors Rust ChannelKeypair::hash / lxmf_rust::channel::channel_id_hash:
             //   seed         = sha256(utf8 name)
             //   x25519Pub    = X25519::scalarmult_base(seed)
             //   ed25519Pub   = Ed25519::expand(seed).public_key()
             //   final hash   = sha256(x25519Pub || ed25519Pub)[0..16]
-            //
-            // We don't have raw x25519/ed25519 keygen in stdlib, so go
-            // through the Rust JNI: that's exactly what
-            // `nativeChannelEncrypt` derives internally. We expose it via
-            // a small helper if added later. For now we MUST compute it
-            // identically here — see iOS impl. This implementation calls
-            // the Rust helper transparently:
+            // Computed in Kotlin (crypto/ChannelHash.compute, BouncyCastle),
+            // not through JNI.
             return RetichatBridge.channelHash16(name)
         }
 

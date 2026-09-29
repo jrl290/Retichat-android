@@ -1719,10 +1719,19 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeC
 
 /// `RetichatBridge.nativeChannelHash16(name: String): ByteArray?`
 ///
-/// Returns the 16-byte channel-identity hash derived from `name` — the
-/// same value used as the lxmf_data prefix and as the routing key for
-/// rfed channel subscribe/pull.  Mirrors `ChannelKeypair::hash` in the
-/// Rust core (and `channelHash(name:)` in the iOS Swift client).
+/// Returns the 16-byte `lxmf.delivery` DESTINATION hash of the channel
+/// identity derived from `name`: the hash the inner LXMF message is
+/// addressed to and signed over. It is NOT the channel hash. The channel
+/// hash (the wire prefix of every post, and RFed's key for subscribe, pull,
+/// fan-out and notify) is the channel IDENTITY hash,
+/// `lxmf_rust::channel::channel_id_hash` (RFed-rust SPEC.md §1).
+///
+/// Nothing calls this: `RetichatBridge.kt` declares no `external fun
+/// nativeChannelHash16`. The app's channel hash is
+/// `RetichatBridge.channelHash16`, computed in Kotlin by
+/// `crypto/ChannelHash.compute` (the identity hash), and posts get their
+/// prefix from `lxmf_rust::channel::pack`. Do not wire this in as the
+/// channel hash.
 #[no_mangle]
 pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeChannelHash16(
     mut env: JNIEnv,
