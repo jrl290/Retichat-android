@@ -159,12 +159,22 @@ class LxmfFields private constructor(
         /**
          * Decode a msgpack-encoded fields map from raw bytes.
          * Returns [EMPTY] on null/empty input or parse failure.
+         *
+         * The bytes are the sender's (a distro message's map as packed, a
+         * direct message's re-encoded by rmpv, which keeps ext values), so no
+         * header is trusted: ext values are stepped over whole, every length
+         * and count is checked against the bytes left before anything is
+         * read or allocated, and nesting stops at [MAX_DEPTH]. Malformed
+         * bytes throw an Exception, caught here. An Error (OutOfMemoryError,
+         * StackOverflowError) is not, and would kill the app with the
+         * message unsaved: a stranger's distro message did exactly that
+         * until 2026-09-29.
          */
         fun decode(raw: ByteArray?): LxmfFields {
             if (raw == null || raw.isEmpty()) return EMPTY
             return try {
                 val buf = ByteBuffer.wrap(raw)
-                val map = readMap(buf) ?: return EMPTY
+                val map = readMap(buf, 1) ?: return EMPTY
                 LxmfFields(map)
             } catch (e: Exception) {
                 EMPTY
@@ -173,7 +183,23 @@ class LxmfFields private constructor(
 
         // ---- Minimal msgpack reader (supports the types LXMF uses) ----
 
-        private fun readMap(buf: ByteBuffer): Map<Int, Any?>? {
+        /**
+         * Containers nested deeper than this (the fields map is 1) make the
+         * map malformed. LXMF's own fields nest 3 deep (map, 0x05 array,
+         * [name, data]); the reader recurses once per level.
+         */
+        private const val MAX_DEPTH = 64
+
+        /** [n] more bytes are there. A 32-bit length read signed can be negative. */
+        private fun need(buf: ByteBuffer, n: Long) {
+            if (n < 0 || n > buf.remaining()) throw IllegalArgumentException("$n bytes wanted, ${buf.remaining()} left")
+        }
+
+        private fun enter(depth: Int) {
+            if (depth > MAX_DEPTH) throw IllegalArgumentException("nested deeper than $MAX_DEPTH")
+        }
+
+        private fun readMap(buf: ByteBuffer, depth: Int): Map<Int, Any?>? {
             if (!buf.hasRemaining()) return null
             val b = buf.get().toInt() and 0xFF
             val count = when {
@@ -182,10 +208,12 @@ class LxmfFields private constructor(
                 b == 0xDF -> buf.int                       // map 32
                 else -> return null
             }
-            val result = LinkedHashMap<Int, Any?>(count)
+            enter(depth)
+            need(buf, 2L * count)  // a key and a value of a byte at least
+            val result = LinkedHashMap<Int, Any?>()
             repeat(count) {
-                val key = readValue(buf)
-                val value = readValue(buf)
+                val key = readValue(buf, depth + 1)
+                val value = readValue(buf, depth + 1)
                 // Integer keys of any width holding 0..Int.MAX_VALUE. A
                 // negative or larger key (a uint64 above 2^63 reads as
                 // negative) matches nothing, rather than wrapping onto a
@@ -199,7 +227,7 @@ class LxmfFields private constructor(
             return result
         }
 
-        private fun readValue(buf: ByteBuffer): Any? {
+        private fun readValue(buf: ByteBuffer, depth: Int): Any? {
             if (!buf.hasRemaining()) return null
             val b = buf.get().toInt() and 0xFF
             return when {
@@ -212,10 +240,10 @@ class LxmfFields private constructor(
                 // fixmap (0x80..0x8F) — put byte back and recurse
                 b in 0x80..0x8F -> {
                     buf.position(buf.position() - 1)
-                    readMap(buf)
+                    readMap(buf, depth)
                 }
                 // fixarray (0x90..0x9F)
-                b in 0x90..0x9F -> readArray(buf, b and 0x0F)
+                b in 0x90..0x9F -> readArray(buf, b and 0x0F, depth)
                 // nil
                 b == 0xC0 -> null
                 // false
@@ -228,6 +256,14 @@ class LxmfFields private constructor(
                 b == 0xC5 -> readBinBytes(buf, buf.short.toInt() and 0xFFFF)
                 // bin 32
                 b == 0xC6 -> readBinBytes(buf, buf.int)
+                // ext 8, 16, 32: a length, a type byte and the data. None is
+                // an LXMF field of ours; step over it whole, so the next
+                // value is read from its own first byte.
+                b == 0xC7 -> skipExt(buf, (buf.get().toInt() and 0xFF).toLong())
+                b == 0xC8 -> skipExt(buf, (buf.short.toInt() and 0xFFFF).toLong())
+                b == 0xC9 -> skipExt(buf, buf.int.toLong() and 0xFFFFFFFFL)
+                // fixext 1, 2, 4, 8, 16
+                b in 0xD4..0xD8 -> skipExt(buf, 1L shl (b - 0xD4))
                 // float 32
                 b == 0xCA -> buf.float.toDouble()
                 // float 64
@@ -255,41 +291,52 @@ class LxmfFields private constructor(
                 // str 32
                 b == 0xDB -> readStringBytes(buf, buf.int)
                 // array 16
-                b == 0xDC -> readArray(buf, buf.short.toInt() and 0xFFFF)
+                b == 0xDC -> readArray(buf, buf.short.toInt() and 0xFFFF, depth)
                 // array 32
-                b == 0xDD -> readArray(buf, buf.int)
+                b == 0xDD -> readArray(buf, buf.int, depth)
                 // map 16
                 b == 0xDE -> {
                     buf.position(buf.position() - 1)
-                    readMap(buf)
+                    readMap(buf, depth)
                 }
                 // map 32
                 b == 0xDF -> {
                     buf.position(buf.position() - 1)
-                    readMap(buf)
+                    readMap(buf, depth)
                 }
                 else -> {
-                    // Unknown type — skip
+                    // 0xC1, never used: its one byte, as the iOS decoder steps it
                     null
                 }
             }
         }
 
+        /** Step over an ext value's type byte and [len] data bytes. */
+        private fun skipExt(buf: ByteBuffer, len: Long): Any? {
+            need(buf, 1 + len)
+            buf.position(buf.position() + 1 + len.toInt())
+            return null
+        }
+
         private fun readStringBytes(buf: ByteBuffer, len: Int): String {
+            need(buf, len.toLong())
             val bytes = ByteArray(len)
             buf.get(bytes)
             return String(bytes, StandardCharsets.UTF_8)
         }
 
         private fun readBinBytes(buf: ByteBuffer, len: Int): ByteArray {
+            need(buf, len.toLong())
             val bytes = ByteArray(len)
             buf.get(bytes)
             return bytes
         }
 
-        private fun readArray(buf: ByteBuffer, count: Int): List<Any?> {
-            val result = ArrayList<Any?>(count)
-            repeat(count) { result.add(readValue(buf)) }
+        private fun readArray(buf: ByteBuffer, count: Int, depth: Int): List<Any?> {
+            enter(depth)
+            need(buf, count.toLong())  // a byte per element at least
+            val result = ArrayList<Any?>()
+            repeat(count) { result.add(readValue(buf, depth + 1)) }
             return result
         }
     }
