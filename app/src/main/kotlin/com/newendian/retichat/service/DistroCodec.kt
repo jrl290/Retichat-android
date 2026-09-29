@@ -83,6 +83,30 @@ object DistroCodec {
         return pairs to more
     }
 
+    /**
+     * The unwrap JSON's `fields` value (lxmf_rust::distro::DistroMessage::to_json,
+     * read with org.json `opt("fields")`) as the msgpack bytes of the
+     * message's LXMF fields map: the input [com.newendian.retichat.bridge.LxmfFields.decode]
+     * takes for a direct message's `fieldsRaw`, attachments (0x05) included.
+     * The Rust side writes the map exactly as the sender packed it, in
+     * standard padded base64 (RFC 4648 §4), or JSON null when the payload
+     * had no map.
+     *
+     * Null when [value] is absent, JSON null (org.json's `JSONObject.NULL`),
+     * not a string, or not base64. It never throws: a message whose fields
+     * cannot be read is still delivered, without its attachments.
+     * java.util.Base64, not android.util.Base64: it runs in JVM tests and
+     * rejects anything outside the standard alphabet.
+     */
+    fun fieldsBytes(value: Any?): ByteArray? {
+        val text = value as? String ?: return null
+        return try {
+            java.util.Base64.getDecoder().decode(text)
+        } catch (_: IllegalArgumentException) {
+            null
+        }
+    }
+
     /** Dedupe key for a fanned-out copy: the same message arrives more than once. */
     fun seenKey(sourceHashHex: String, timestamp: Double): String = "$sourceHashHex:$timestamp"
 

@@ -590,10 +590,12 @@ object RetichatBridge {
      * Decrypt a fan-out blob with the distro identity. Returns JSON
      * (source_hash, timestamp, title, content, is_delivery_notification,
      * ticket, distro_transfer_key, sent_to, sent_by, display_name_state
-     * 0/1/2, display_name, signature_validated, unverified_reason 0/1/2),
-     * "" when the blob belongs to another distro, or null on error (see
-     * lastError()). Whether to accept the name depends on the signature
-     * fields (DISPLAY_NAMES.md §5.2).
+     * 0/1/2, display_name, signature_validated, unverified_reason 0/1/2,
+     * fields: the LXMF fields map as base64 msgpack, or null), "" when the
+     * blob belongs to another distro, or null on error (see lastError()).
+     * Whether to accept the name depends on the signature fields
+     * (DISPLAY_NAMES.md §5.2); `fields` goes through DistroCodec.fieldsBytes
+     * to LxmfFields.decode, as a direct message's fields do.
      */
     fun distroUnwrap(distroHandle: Long, blob: ByteArray): String? = nativeDistroUnwrap(distroHandle, blob)
 

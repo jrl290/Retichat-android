@@ -2402,13 +2402,16 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeD
 /// builds, the same object iOS returns (`source_hash`, `timestamp`, `title`,
 /// `content`, `is_delivery_notification`, `ticket`, `distro_transfer_key`,
 /// `sent_to`, `sent_by`, `display_name_state`, `display_name`,
-/// `signature_validated`, `unverified_reason`), an empty string when the
+/// `signature_validated`, `unverified_reason`, `fields`), an empty string when the
 /// blob is addressed to a different distro, or null on error. `sent_to` /
 /// `sent_by` are the RFed SPEC §17.11 sent-message sync marker (null unless
 /// the message is a sync copy; a non-null `sent_by` with a null `sent_to`
 /// is a copy with a malformed 0xFC). `display_name_state` is 0 absent,
 /// 1 clear, 2 name; whether to accept it depends on `signature_validated` /
 /// `unverified_reason` (0 ok, 1 source unknown, 2 invalid) — DISPLAY_NAMES.md §5.2.
+/// `fields` is the message's LXMF fields map (attachments included) as the
+/// sender packed it, in standard padded base64, or null when it had none;
+/// RfedDistroClient decodes it with DistroCodec.fieldsBytes.
 #[no_mangle]
 pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeDistroUnwrap(
     mut env: JNIEnv,

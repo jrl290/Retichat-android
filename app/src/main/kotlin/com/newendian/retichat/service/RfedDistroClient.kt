@@ -211,6 +211,14 @@ object RfedDistroClient {
             o.optBoolean("signature_validated", false),
             if (o.isNull("unverified_reason")) null else o.optInt("unverified_reason", Signature.INVALID),
         )
+        // The message's LXMF fields map (attachments and all), base64 msgpack
+        // or null. opt, not optString: optString turns JSON null into "null".
+        // Unreadable fields cost the attachments, never the message.
+        val fieldsValue = o.opt("fields")
+        val fieldsRaw = DistroCodec.fieldsBytes(fieldsValue)
+        if (fieldsRaw == null && fieldsValue != null && fieldsValue != JSONObject.NULL) {
+            Log.w(TAG, "unreadable fields from ${srcHex.take(8)} — delivering without attachments")
+        }
 
         val key = DistroCodec.seenKey(srcHex, timestamp)
         if (!UserPreferences.markDistroSeen(context, key)) {
@@ -249,7 +257,7 @@ object RfedDistroClient {
             }
         }
         val srcHash = DistroCodec.hexToBytes(srcHex) ?: return
-        app.repository.onDistroMessageReceived(srcHash, title, content, timestamp, nameField, unverifiedReason)
+        app.repository.onDistroMessageReceived(srcHash, title, content, timestamp, fieldsRaw, nameField, unverifiedReason)
     }
 
     /** Another device offered us a distro key (field 0x0D or a distro blob). */

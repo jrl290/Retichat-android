@@ -1413,24 +1413,32 @@ class ChatRepository(
      * with the distro key by RfedDistroClient). The fan-out never hands over
      * the LXMF hash, so the id is derived from source, timestamp and content;
      * RfedDistroClient has already deduplicated on source+timestamp.
+     * [fieldsRaw] is the message's LXMF fields map as msgpack (the unwrap
+     * JSON's `fields`, DistroCodec.fieldsBytes), null when it had none or it
+     * was unreadable; it is decoded as [onMessageReceived] decodes a direct
+     * message's, so the attachments are saved the same way. Required, with
+     * no default: until 2026-09-29 this path passed no fields and every
+     * attachment sent to a distro address was dropped.
      */
     fun onDistroMessageReceived(
         srcHash: ByteArray,
         title: String,
         content: String,
         timestamp: Double,
+        fieldsRaw: ByteArray?,
         nameField: NameField = NameField.Absent,
         unverifiedReason: Int = Signature.INVALID,
     ) {
         val srcHex = srcHash.toHex()
         val msgId = DistroCodec.messageId(srcHex, timestamp, content)
-        Log.i(TAG, "onDistroMessageReceived: src=${srcHex.take(16)} via=distro content='${content.take(40)}'")
+        val fields = LxmfFields.decode(fieldsRaw)
+        Log.i(TAG, "onDistroMessageReceived: src=${srcHex.take(16)} via=distro content='${content.take(40)}' fields=${fieldsRaw?.let { "${it.size}B" } ?: "none"} attachments=${fields.getFileAttachments().size}")
         // No privacy filter: mail to the distro is mail to this person (iOS
         // storeIncomingDirect via distro fan-out does not filter either).
         scope.launch(Dispatchers.IO) {
             ensureContact(srcHex)
             acceptMessageName(srcHex, nameField, unverifiedReason, timestamp)
-            handleDirectMessage(msgId, srcHash, srcHex, content, timestamp, LxmfFields.decode(ByteArray(0)))
+            handleDirectMessage(msgId, srcHash, srcHex, content, timestamp, fields)
         }
     }
 
