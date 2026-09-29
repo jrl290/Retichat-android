@@ -109,12 +109,16 @@ object UserPreferences {
         prefs(context).getBoolean(PREF_KEY_DEFAULT_TCP, true)
 
     /**
-     * When true (default), the app links over Bluetooth to any RTNode in
-     * range, with no other configuration (RTNodeBluetooth). Read at stack
-     * start; a change takes effect on Restart.
+     * When true, the app links over Bluetooth to any RTNode in range, with
+     * no other configuration (RTNodeBluetooth). Off by default: a user who
+     * never turns it on in Settings is never asked for the Bluetooth
+     * (Nearby devices) permission and nothing scans. Settings writes true
+     * only once the permission is granted, and applies the change at once
+     * (StackRuntime.applyRtnodeBluetoothSetting); bootstrap reads it at
+     * stack start.
      */
     fun isRtnodeBluetoothEnabled(context: Context): Boolean =
-        prefs(context).getBoolean(PREF_KEY_RTNODE_BLUETOOTH, true)
+        prefs(context).getBoolean(PREF_KEY_RTNODE_BLUETOOTH, false)
 
     fun setRtnodeBluetoothEnabled(context: Context, enabled: Boolean) {
         prefs(context).edit().putBoolean(PREF_KEY_RTNODE_BLUETOOTH, enabled).apply()

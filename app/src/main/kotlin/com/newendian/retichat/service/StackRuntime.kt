@@ -14,6 +14,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -367,9 +368,12 @@ object StackRuntime {
         // published and ConnectionStateManager registered: an RTNode's
         // interface comes up the moment its link settles, and that up-edge is
         // when Transport announces the published destination on it and
-        // app-links re-attempts its held links (DESIGN_PRINCIPLES §5).
+        // app-links re-attempts its held links (DESIGN_PRINCIPLES §5). Off
+        // unless the user turned it on in Settings, which is where the
+        // Bluetooth permission is asked for.
         if (UserPreferences.isRtnodeBluetoothEnabled(app)) {
-            RTNodeBluetooth.start(app, configDir.absolutePath)
+            runCatching { RTNodeBluetooth.start(app, configDir.absolutePath) }
+                .onFailure { Log.e(TAG, "RTNodeBluetooth.start failed", it) }
         }
 
         Log.i(TAG, "StackRuntime ready — dest=$hashHex, ${interfaces.size} interface(s)")
@@ -427,5 +431,44 @@ object StackRuntime {
         val app = context.applicationContext as RetichatApp
         initLock.withLock { shutdownNow(app) }
         return startIfNeeded(app)
+    }
+
+    /**
+     * Settings' Nearby RTNode switch changed: bring Bluetooth in line with
+     * the preference now, with no Restart. Always off the main thread: start
+     * reads and writes the Bluetooth identity and starts the engine over JNI,
+     * and stop blocks until the engine lets go of its interfaces.
+     *
+     * On (Settings writes it only once the permissions are granted) starts
+     * it exactly as bootstrap does, and only on a ready stack: isReady is set
+     * after bootstrap has published the delivery destination and registered
+     * ConnectionStateManager, so the RTNode interface's up-edge still finds
+     * the destination to announce and the held links to re-attempt
+     * (DESIGN_PRINCIPLES §5). With the stack not ready there is nothing to
+     * start here: the bootstrap that will make it ready reads the preference,
+     * now true, and starts it. RTNodeBluetooth.start is called directly: with
+     * the switch off at stack start it never ran, so nothing is waiting on
+     * the grant. Off stops it.
+     *
+     * Serialised with bootstrap, shutdown and restart by initLock, and the
+     * preference is read under the lock, so quick on/off taps end in the
+     * last tap's state.
+     */
+    suspend fun applyRtnodeBluetoothSetting(context: Context) {
+        val app = context.applicationContext as RetichatApp
+        withContext(Dispatchers.IO) {
+            initLock.withLock {
+                if (!UserPreferences.isRtnodeBluetoothEnabled(app)) {
+                    runCatching { RTNodeBluetooth.stop() }
+                        .onFailure { Log.e(TAG, "RTNodeBluetooth.stop failed", it) }
+                } else if (isReady) {
+                    val configDir = File(app.filesDir, "reticulum")
+                    runCatching { RTNodeBluetooth.start(app, configDir.absolutePath) }
+                        .onFailure { Log.e(TAG, "RTNodeBluetooth.start failed", it) }
+                } else {
+                    Log.i(TAG, "Nearby RTNode on; the stack is not up: its next bootstrap starts Bluetooth")
+                }
+            }
+        }
     }
 }

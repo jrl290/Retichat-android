@@ -65,8 +65,12 @@ sealed class RTNodeBluetoothStatus {
  * writes it is asked for and reports every event. It keeps no timers and
  * never re-dials on its own: the engine decides.
  *
- * Started by StackRuntime's bootstrap after the delivery destination is
- * published; stopped by shutdownNow before the stack shuts down.
+ * Off by default (UserPreferences.isRtnodeBluetoothEnabled): nothing asks
+ * for the permissions or scans until the user turns the Settings switch on.
+ * Then started by StackRuntime's bootstrap after the delivery destination is
+ * published, or at once on the running stack when the switch is turned on
+ * (StackRuntime.applyRtnodeBluetoothSetting); stopped when it is turned off
+ * and by shutdownNow before the stack shuts down.
  */
 @SuppressLint("MissingPermission") // every path starts from start(), which checks the permissions
 object RTNodeBluetooth {
@@ -112,8 +116,6 @@ object RTNodeBluetooth {
     // Touched only by start/stop, which StackRuntime serialises (initLock).
     @Volatile private var engineRunning = false
     @Volatile private var receiverRegistered = false
-    /** Where start() would have put the engine had the permissions been granted. */
-    @Volatile private var pendingStorageDir: String? = null
 
     fun hasPermissions(context: Context): Boolean = PERMISSIONS.all {
         ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
@@ -123,19 +125,19 @@ object RTNodeBluetooth {
 
     /**
      * [storageDir] keeps the phone's Bluetooth identity (`ble_identity`).
-     * Without the Bluetooth permissions it stays down and remembers the
-     * directory until [onPermissionsGranted].
+     * Only called with the Settings switch on, which is where the
+     * permissions are asked for. Without them (revoked since) it stays down
+     * and says so; the Settings card offers to ask again, and a grant there
+     * starts it through StackRuntime.applyRtnodeBluetoothSetting.
      */
     @Synchronized
     fun start(context: Context, storageDir: String) {
         if (engineRunning) return
         val app = context.applicationContext
         if (!hasPermissions(app)) {
-            pendingStorageDir = storageDir
             publish(RTNodeBluetoothStatus.Unavailable("Bluetooth permission not granted"))
             return
         }
-        pendingStorageDir = null
         if (adapter(app) == null) {
             publish(RTNodeBluetoothStatus.Unavailable("This device has no Bluetooth"))
             return
@@ -164,20 +166,12 @@ object RTNodeBluetooth {
         }
     }
 
-    /** The user granted the Bluetooth permissions: start if the stack wanted to. */
-    @Synchronized
-    fun onPermissionsGranted(context: Context) {
-        val dir = pendingStorageDir ?: return
-        start(context, dir)
-    }
-
     /**
      * Closes the link and removes the RTNode's interface. Blocks until the
      * engine has let go of it, so the stack can shut down after.
      */
     @Synchronized
     fun stop() {
-        pendingStorageDir = null
         onHandler {
             running = false
             applyScan()

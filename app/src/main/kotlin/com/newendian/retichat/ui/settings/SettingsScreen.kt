@@ -1,5 +1,16 @@
 package com.newendian.retichat.ui.settings
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.Intent
+import android.net.Uri
+import android.util.Log
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.app.ActivityCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -17,6 +28,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -39,6 +51,7 @@ import com.newendian.retichat.service.DefaultEndpointManager
 import com.newendian.retichat.service.DisplayNameSettings
 import com.newendian.retichat.service.RTNodeBluetooth
 import com.newendian.retichat.service.RTNodeBluetoothStatus
+import com.newendian.retichat.service.StackRuntime
 import com.newendian.retichat.service.UserPreferences
 import org.json.JSONObject
 
@@ -667,17 +680,108 @@ private fun DefaultTcpCard() {
 
 /**
  * On/off for the Bluetooth link to any RTNode in range (RTNodeBluetooth);
- * there is nothing to set up. Read at stack start, so a change takes effect
- * on Restart, like the default endpoints. The last line is the live status.
+ * there is nothing to set up. Off by default, and turning it on is the only
+ * place the app asks for the Bluetooth (Nearby devices) permission. Granted,
+ * the switch turns on and Bluetooth starts on the running stack straight
+ * away, with no Restart (StackRuntime.applyRtnodeBluetoothSetting). Denied,
+ * it stays off and says why; when Android may not show the request again,
+ * the card offers Retichat's system settings, and a grant made there turns
+ * it on when the user comes back. Turning it off stops it at once, also with
+ * no Restart. The last line is the live status.
  */
 @Composable
 private fun RTNodeBluetoothCard() {
     val context = LocalContext.current
+    val app = context.applicationContext as com.newendian.retichat.RetichatApp
     var enabled by remember {
         mutableStateOf(UserPreferences.isRtnodeBluetoothEnabled(context))
     }
+    // Saveable: the permission dialog and the system settings are other
+    // activities, and this one can be recreated while they are in front.
+    var permitted by rememberSaveable { mutableStateOf(RTNodeBluetooth.hasPermissions(context)) }
+    // Why the last permission request left it off; null when none did.
+    var refusal by rememberSaveable { mutableStateOf<String?>(null) }
+    // Android may not show the permission request again: only Retichat's
+    // system settings can grant it for certain.
+    var blocked by rememberSaveable { mutableStateOf(false) }
+    // Android would have explained the request before it was made: the user
+    // had denied it once, and a second denial is final.
+    var rationaleBefore by rememberSaveable { mutableStateOf(false) }
+    // Sent to the system settings from here: on when the user comes back
+    // with the permission granted.
+    var awaitingSystemSettings by rememberSaveable { mutableStateOf(false) }
     val status by RTNodeBluetooth.status.collectAsState()
-    val statusText = if (!enabled) "Off" else when (val s = status) {
+
+    // Start or stop it on the running stack now. StackRuntime does it off
+    // the main thread (start reads and writes the Bluetooth identity and
+    // starts the engine over JNI; stop blocks until the engine lets go), on
+    // the app's scope so it outlives this screen.
+    fun applySetting() {
+        app.applicationScope.launch { StackRuntime.applyRtnodeBluetoothSetting(app) }
+    }
+
+    // Only ever called with the permissions granted.
+    fun turnOn() {
+        refusal = null
+        blocked = false
+        UserPreferences.setRtnodeBluetoothEnabled(context, true)
+        enabled = true
+        applySetting()
+    }
+
+    fun turnOff() {
+        UserPreferences.setRtnodeBluetoothEnabled(context, false)
+        enabled = false
+        applySetting()
+    }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { _ ->
+        permitted = RTNodeBluetooth.hasPermissions(context)
+        if (permitted) {
+            turnOn()
+            return@rememberLauncherForActivityResult
+        }
+        // Denied. With a rationale Android will ask again next time. Without
+        // one it will not, unless this was the first request and the user
+        // dismissed it; the two look the same from here, so the card offers
+        // the system settings either way and says only what is certain.
+        val rationaleAfter = context.bluetoothPermissionRationale()
+        blocked = !rationaleAfter
+        refusal = when {
+            rationaleAfter ->
+                "Off: Retichat needs the Nearby devices permission to find an " +
+                    "RTNode and connect to it over Bluetooth."
+            rationaleBefore ->
+                "Off: Android will not ask for the Nearby devices permission " +
+                    "again. Allow it in Retichat's system settings to use Bluetooth."
+            else ->
+                "Off: Retichat does not have the Nearby devices permission. If " +
+                    "Android does not ask for it when you turn this on, allow it " +
+                    "in Retichat's system settings."
+        }
+        if (enabled) turnOff()
+    }
+
+    fun askForPermission() {
+        rationaleBefore = context.bluetoothPermissionRationale()
+        permissionLauncher.launch(RTNodeBluetooth.PERMISSIONS)
+    }
+
+    // Back from the system settings (or the permission dialog): a grant
+    // made there turns it on; one withdrawn there shows here.
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        val now = RTNodeBluetooth.hasPermissions(context)
+        val grantedSince = now && !permitted
+        permitted = now
+        if (grantedSince && (enabled || awaitingSystemSettings)) turnOn()
+        awaitingSystemSettings = false
+    }
+
+    val statusText = refusal ?: if (!enabled) "Off" else if (!permitted) {
+        "Bluetooth permission not granted"
+    } else when (val s = status) {
         RTNodeBluetoothStatus.Off -> "Not running"
         RTNodeBluetoothStatus.Searching -> "Looking for an RTNode in range"
         RTNodeBluetoothStatus.Connecting -> "Connecting…"
@@ -705,8 +809,18 @@ private fun RTNodeBluetoothCard() {
             Switch(
                 checked = enabled,
                 onCheckedChange = { newValue ->
-                    enabled = newValue
-                    UserPreferences.setRtnodeBluetoothEnabled(context, newValue)
+                    when {
+                        !newValue -> {
+                            refusal = null
+                            turnOff()
+                        }
+                        RTNodeBluetooth.hasPermissions(context) -> {
+                            permitted = true
+                            turnOn()
+                        }
+                        // Stays off until the request comes back granted.
+                        else -> askForPermission()
+                    }
                 },
             )
             Spacer(Modifier.width(12.dp))
@@ -726,9 +840,63 @@ private fun RTNodeBluetoothCard() {
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
                 )
+                if (blocked) {
+                    TextButton(
+                        onClick = {
+                            awaitingSystemSettings = context.openAppSystemSettings()
+                            if (!awaitingSystemSettings) {
+                                refusal = "Off: Retichat's system settings did not open. Allow " +
+                                    "Nearby devices for Retichat in Android's Settings, under Apps."
+                            }
+                        },
+                        contentPadding = PaddingValues(0.dp),
+                    ) { Text("Open settings") }
+                } else if (enabled && !permitted) {
+                    // Withdrawn since it was turned on.
+                    TextButton(
+                        onClick = { askForPermission() },
+                        contentPadding = PaddingValues(0.dp),
+                    ) { Text("Allow Bluetooth") }
+                }
             }
         }
     }
+}
+
+/** Android would explain the Bluetooth request: it was denied once, and will be asked again. */
+private fun Context.bluetoothPermissionRationale(): Boolean {
+    val activity = findActivity() ?: return false
+    return RTNodeBluetooth.PERMISSIONS.any {
+        ActivityCompat.shouldShowRequestPermissionRationale(activity, it)
+    }
+}
+
+private fun Context.findActivity(): Activity? {
+    var c: Context? = this
+    while (c is ContextWrapper) {
+        if (c is Activity) return c
+        c = c.baseContext
+    }
+    return null
+}
+
+/**
+ * Retichat's page in the system settings, where a permission can be granted.
+ * False, logged, if the device has no such page to open.
+ */
+private fun Context.openAppSystemSettings(): Boolean {
+    val intent = Intent(
+        android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+        Uri.fromParts("package", packageName, null),
+    )
+    val activity = findActivity()
+    return runCatching {
+        if (activity != null) {
+            activity.startActivity(intent)
+        } else {
+            startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        }
+    }.onFailure { Log.e("SettingsScreen", "App system settings did not open", it) }.isSuccess
 }
 
 // ---- Drop Announces card ----
