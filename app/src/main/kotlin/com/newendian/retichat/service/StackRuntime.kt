@@ -391,7 +391,8 @@ object StackRuntime {
 
         // Bluetooth first among the stack's parts: its RTNode interfaces
         // leave Transport before the stack shuts down (no-op if never started).
-        RTNodeBluetooth.stop()
+        runCatching { RTNodeBluetooth.stop() }
+            .onFailure { Log.e(TAG, "RTNodeBluetooth.stop failed", it) }
 
         app.repository.configure(ByteArray(0), 0L, 0L)
 

@@ -35,6 +35,23 @@ class RTNodeBluetoothContractTest {
         return source.substring(start, next?.range?.first ?: source.length)
     }
 
+    /** The body, between its braces, of the card's local fun [name]. */
+    private fun localBody(source: String, name: String): String {
+        val header = "fun $name() {"
+        val start = source.indexOf(header)
+        assertTrue("fun $name not found", start >= 0)
+        assertEquals("one fun $name", start, source.lastIndexOf(header))
+        val open = start + header.length - 1
+        var depth = 0
+        for (i in open until source.length) {
+            when (source[i]) {
+                '{' -> depth++
+                '}' -> if (--depth == 0) return source.substring(open + 1, i)
+            }
+        }
+        throw AssertionError("fun $name is not closed")
+    }
+
     /** The Settings card, a top-level composable. */
     private val card: String by lazy {
         val start = settings.indexOf("private fun RTNodeBluetoothCard()")
@@ -179,6 +196,29 @@ class RTNodeBluetoothContractTest {
         assertFalse("no Restart needed", card.contains("Restart") || card.contains("restart"))
     }
 
+    /** Asking changes nothing: the switch stays off, no preference is
+     *  written and nothing starts until the request's answer is a grant
+     *  (theSwitchAsksBeforeItTurnsOn). Pinned statement by statement: a
+     *  turnOn() added before the launch left every other test here green. */
+    @Test
+    fun askingForThePermissionTurnsNothingOn() {
+        val ask = localBody(card, "askForPermission")
+        for (effect in listOf(
+            "turnOn(", "turnOff(", "applySetting(", "setRtnodeBluetoothEnabled(",
+            "enabled = ", "StackRuntime", "RTNodeBluetooth.start(",
+        )) {
+            assertFalse("askForPermission: no $effect", ask.contains(effect))
+        }
+        assertEquals(
+            "askForPermission only notes the rationale and makes the request",
+            listOf(
+                "rationaleBefore = context.bluetoothPermissionRationale()",
+                "permissionLauncher.launch(RTNodeBluetooth.PERMISSIONS)",
+            ),
+            ask.lines().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("//") },
+        )
+    }
+
     /** Denied: it stays off and says why; if Android may no longer show the
      *  request, the card offers the app's system settings. */
     @Test
@@ -186,6 +226,8 @@ class RTNodeBluetoothContractTest {
         assertInOrder(card, "fun askForPermission() {", "rationaleBefore = context.bluetoothPermissionRationale()", "permissionLauncher.launch(")
         assertInOrder(answer, "val rationaleAfter = context.bluetoothPermissionRationale()", "blocked = !rationaleAfter", "refusal = when {")
         assertTrue("left off", answer.contains("if (enabled) turnOff()"))
+        // A first denial says what to do: Android will ask again.
+        assertInOrder(answer, "rationaleAfter ->", "Turn this on again", "to be asked again.", "rationaleBefore ->")
         assertTrue(
             settings.substringAfter("private fun Context.bluetoothPermissionRationale()").substringBefore("\n}\n")
                 .contains("shouldShowRequestPermissionRationale("),
@@ -199,10 +241,10 @@ class RTNodeBluetoothContractTest {
 
     // ---- StackRuntime ----
 
-    /** A Throwable from Bluetooth must not fail the stack's bootstrap or the
-     *  switch's apply. */
+    /** A Throwable from Bluetooth must not fail the stack's bootstrap, its
+     *  shutdown, or the switch's apply. */
     @Test
-    fun everyStartAndStopFromSettingsIsCaught() {
+    fun everyStartAndStopIsCaught() {
         val starts = Regex("RTNodeBluetooth\\.start\\(").findAll(stackRuntime).count()
         val caught = Regex(
             "runCatching \\{ RTNodeBluetooth\\.start\\(app, configDir\\.absolutePath\\) \\}\\s*" +
@@ -210,12 +252,15 @@ class RTNodeBluetoothContractTest {
         ).findAll(stackRuntime).count()
         assertEquals("bootstrap and the Settings switch", 2, starts)
         assertEquals("each in runCatching, logged", starts, caught)
-        assertTrue(
-            Regex(
-                "runCatching \\{ RTNodeBluetooth\\.stop\\(\\) \\}\\s*" +
-                    "\\.onFailure \\{ Log\\.e\\(TAG, \"RTNodeBluetooth\\.stop failed\", it\\) \\}"
-            ).containsMatchIn(body(stackRuntime, "applyRtnodeBluetoothSetting"))
+        val stop = Regex(
+            "runCatching \\{ RTNodeBluetooth\\.stop\\(\\) \\}\\s*" +
+                "\\.onFailure \\{ Log\\.e\\(TAG, \"RTNodeBluetooth\\.stop failed\", it\\) \\}"
         )
+        val stops = Regex("RTNodeBluetooth\\.stop\\(").findAll(stackRuntime).count()
+        assertEquals("shutdown and the Settings switch", 2, stops)
+        assertEquals("each in runCatching, logged", stops, stop.findAll(stackRuntime).count())
+        assertTrue(stop.containsMatchIn(body(stackRuntime, "shutdownNow")))
+        assertTrue(stop.containsMatchIn(body(stackRuntime, "applyRtnodeBluetoothSetting")))
     }
 
     /** The switch applies the preference under initLock, read there, so it

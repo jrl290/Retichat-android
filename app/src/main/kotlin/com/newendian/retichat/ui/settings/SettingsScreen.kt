@@ -752,7 +752,8 @@ private fun RTNodeBluetoothCard() {
         refusal = when {
             rationaleAfter ->
                 "Off: Retichat needs the Nearby devices permission to find an " +
-                    "RTNode and connect to it over Bluetooth."
+                    "RTNode and connect to it over Bluetooth. Turn this on again " +
+                    "to be asked again."
             rationaleBefore ->
                 "Off: Android will not ask for the Nearby devices permission " +
                     "again. Allow it in Retichat's system settings to use Bluetooth."
