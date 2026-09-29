@@ -38,12 +38,23 @@ class DistroAttachmentsTest {
     private val captionlessWithTicket = """{"source_hash":"a47157bd61e038c5a7d32104377877c5","timestamp":1790000000.5,"title":"","content":"","is_delivery_notification":false,"ticket":"[1790600000, [9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9]]","distro_transfer_key":null,"sent_to":null,"sent_by":null,"display_name_state":0,"display_name":null,"signature_validated":false,"unverified_reason":1,"fields":"gwWRkrFwaXhlbC1waG90by0xLmpwZ8QS/9j/4AAQSkZJRgD7/P3+/z4/BpKjanBnxBL/2P/gABBKRklGAPv8/f7/Pj8MkstB2q6Y0AAAAMQQCQkJCQkJCQkJCQkJCQkJCQ=="}"""
     private val emptyMap = """{"source_hash":"a47157bd61e038c5a7d32104377877c5","timestamp":1790000000.5,"title":"","content":"hi","is_delivery_notification":false,"ticket":null,"distro_transfer_key":null,"sent_to":null,"sent_by":null,"display_name_state":0,"display_name":null,"signature_validated":false,"unverified_reason":1,"fields":"gA=="}"""
     private val noMap = """{"source_hash":"a47157bd61e038c5a7d32104377877c5","timestamp":1790000000.5,"title":"","content":"no map","is_delivery_notification":false,"ticket":null,"distro_transfer_key":null,"sent_to":null,"sent_by":null,"display_name_state":0,"display_name":null,"signature_validated":false,"unverified_reason":1,"fields":null}"""
+    /**
+     * Real unwrap output too, for a map any stranger can send, valid msgpack
+     * that rmpv and LXMF-rust 06c40e1 accept, with the text
+     * "hello, keep this text":
+     * {0x01: ext(0, dd 7f ff ff ff), 0x02: 3, 0x04: 5}. Read without stepping
+     * over the ext, its data is an array32 header of 2^31-1 elements; the
+     * allocation threw OutOfMemoryError out of handleBlob after the copy was
+     * marked seen, so the text was lost for good and a /rfed/pull page
+     * stopped there (review of d455ba9, 2026-09-29).
+     */
+    private val hostileExt = """{"source_hash":"d8939c64bc3b5589e5119035addb7486","timestamp":1790000000.5,"title":"","content":"hello, keep this text","is_delivery_notification":false,"ticket":null,"distro_transfer_key":null,"sent_to":null,"sent_by":null,"display_name_state":0,"display_name":null,"signature_validated":false,"unverified_reason":1,"fields":"gwHHBQDdf////wIDBAU="}"""
 
     @Suppress("UNCHECKED_CAST")
     private fun obj(json: String) = MiniJson.parse(json) as Map<String, Any?>
 
-    /** RfedDistroClient.handleBlob's read: `o.opt("fields")` → fieldsBytes → LxmfFields.decode. */
-    private fun fieldsOf(json: String): LxmfFields = LxmfFields.decode(DistroCodec.fieldsBytes(obj(json)["fields"]))
+    /** RfedDistroClient.handleBlob's read: `o.opt("fields")` → fieldsBytes → the repository's LxmfFields.decodeOrEmpty. */
+    private fun fieldsOf(json: String): LxmfFields = LxmfFields.decodeOrEmpty(DistroCodec.fieldsBytes(obj(json)["fields"]))
 
     @Test
     fun aPhotoSentToTheDistroKeepsItsAttachment() {
@@ -112,11 +123,56 @@ class DistroAttachmentsTest {
         )) {
             // Never throws: RfedDistroClient still hands the message on.
             val raw = DistroCodec.fieldsBytes(bad)
-            assertTrue("'${bad.take(24)}' must give no attachments", LxmfFields.decode(raw).getFileAttachments().isEmpty())
+            assertTrue("'${bad.take(24)}' must give no attachments", LxmfFields.decodeOrEmpty(raw).getFileAttachments().isEmpty())
         }
         // Not base64 at all is null, which the client logs as unreadable.
         assertNull(DistroCodec.fieldsBytes("not base64!"))
         assertNull(DistroCodec.fieldsBytes("gA="))
+    }
+
+    @Test
+    fun aHostileMsgpackMapCostsNothingAndTheTextIsKept() {
+        val o = obj(hostileExt)
+        assertEquals("hello, keep this text", o["content"])
+        val raw = DistroCodec.fieldsBytes(o["fields"])!!
+        assertEquals("8301c70500dd7fffffff02030405", raw.toHex())
+        // The decoder returns: nothing is left for the backstop to catch ...
+        val fields = try {
+            LxmfFields.decode(raw)
+        } catch (t: Throwable) {
+            throw AssertionError("decode threw ${t::class.java.name}", t)
+        }
+        // ... and reads in step past the ext: all three keys, the ext as no value.
+        assertEquals(3, fields.size)
+        assertTrue(fields.has(0x01))
+        assertEquals(3L, fields.getInt(0x02))
+        assertEquals(5L, fields.getInt(0x04))
+        assertTrue(fields.getFileAttachments().isEmpty())
+        // The repository's path gives the same.
+        assertEquals(3, fieldsOf(hostileExt).size)
+    }
+
+    @Test
+    fun anErrorFromTheDecoderIsNoFieldsNeverALostMessage() {
+        // The backstop behind the reader's checks: an Error is not an Exception,
+        // and whatever escapes here escapes handleBlob after markDistroSeen.
+        val raw = DistroCodec.fieldsBytes(obj(captioned)["fields"])
+        for (error in listOf<Throwable>(
+            OutOfMemoryError("Requested array size exceeds VM limit"),
+            StackOverflowError(),
+            IllegalStateException("malformed"),
+        )) {
+            var reported: Throwable? = null
+            val fields = LxmfFields.decodeOrEmpty(raw, decoder = { throw error }, onFailure = { reported = it })
+            assertEquals(error.toString(), 0, fields.size)
+            assertTrue(fields.getFileAttachments().isEmpty())
+            // Said, not swallowed: the repository logs it.
+            assertEquals(error, reported)
+        }
+        // With the real decoder it is decode, and nothing is reported.
+        var reported: Throwable? = null
+        assertEquals(1, LxmfFields.decodeOrEmpty(raw, onFailure = { reported = it }).getFileAttachments().size)
+        assertNull(reported)
     }
 
     // ---- Wiring that needs the native library, Room and a Context to run,
@@ -156,12 +212,17 @@ class DistroAttachmentsTest {
         val received = body(repo, "fun onDistroMessageReceived(")
         // Required, no default: a caller can not forget the fields again.
         assertTrue(Regex("timestamp: Double,\\s*fieldsRaw: ByteArray\\?,\\s*nameField").containsMatchIn(received))
-        assertTrue(received.contains("val fields = LxmfFields.decode(fieldsRaw)"))
+        // Through the backstop: an Error from the decoder costs the attachments, not the message.
+        assertTrue(received.contains("val fields = LxmfFields.decodeOrEmpty(fieldsRaw, onFailure = {"))
         assertTrue(received.contains("handleDirectMessage(msgId, srcHash, srcHex, content, timestamp, fields)"))
         assertFalse(received.contains("ByteArray(0)"))
         assertFalse(received.contains("LxmfFields.EMPTY"))
         // ... where the attachments are saved, as for any direct message.
         assertTrue(body(repo, "private suspend fun handleDirectMessage(").contains("saveInboundAttachments(msgId, fields)"))
+        // The direct path decodes the same sender-controlled map through the
+        // same backstop, and nothing in the repository calls the bare decoder.
+        assertTrue(body(repo, "fun onMessageReceived(").contains("val fields = LxmfFields.decodeOrEmpty(fieldsRaw, onFailure = {"))
+        assertFalse(repo.contains("LxmfFields.decode("))
         // The sent copy stays text only.
         assertTrue(repo.contains("fun onDistroSentCopy(recipientHex: String, title: String, content: String, timestamp: Double)"))
     }

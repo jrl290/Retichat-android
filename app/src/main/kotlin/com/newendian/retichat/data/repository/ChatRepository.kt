@@ -1359,7 +1359,9 @@ class ChatRepository(
         unverifiedReason: Int,
         fieldsRaw: ByteArray = ByteArray(0),
     ) {
-        val fields = LxmfFields.decode(fieldsRaw)
+        val fields = LxmfFields.decodeOrEmpty(fieldsRaw, onFailure = {
+            Log.w(TAG, "onMessageReceived: fields from ${srcHash.toHex().take(8)} unreadable (${it::class.java.simpleName}) — storing the message without them")
+        })
         // Field 0xD1, decoded by the one Rust decoder (bin or str; §3).
         val nameField = NameField.fromTrailer(RetichatBridge.displayNameDecode(fieldsRaw))
         val groupId = fields.group(GroupEntry.ID)
@@ -1431,7 +1433,9 @@ class ChatRepository(
     ) {
         val srcHex = srcHash.toHex()
         val msgId = DistroCodec.messageId(srcHex, timestamp, content)
-        val fields = LxmfFields.decode(fieldsRaw)
+        val fields = LxmfFields.decodeOrEmpty(fieldsRaw, onFailure = {
+            Log.w(TAG, "onDistroMessageReceived: fields from ${srcHex.take(8)} unreadable (${it::class.java.simpleName}) — storing the message without its attachments")
+        })
         Log.i(TAG, "onDistroMessageReceived: src=${srcHex.take(16)} via=distro content='${content.take(40)}' fields=${fieldsRaw?.let { "${it.size}B" } ?: "none"} attachments=${fields.getFileAttachments().size}")
         // No privacy filter: mail to the distro is mail to this person (iOS
         // storeIncomingDirect via distro fan-out does not filter either).

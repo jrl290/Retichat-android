@@ -168,7 +168,8 @@ class LxmfFields private constructor(
          * bytes throw an Exception, caught here. An Error (OutOfMemoryError,
          * StackOverflowError) is not, and would kill the app with the
          * message unsaved: a stranger's distro message did exactly that
-         * until 2026-09-29.
+         * until 2026-09-29. Receive paths call [decodeOrEmpty], which
+         * catches that too.
          */
         fun decode(raw: ByteArray?): LxmfFields {
             if (raw == null || raw.isEmpty()) return EMPTY
@@ -179,6 +180,28 @@ class LxmfFields private constructor(
             } catch (e: Exception) {
                 EMPTY
             }
+        }
+
+        /**
+         * [decode] as a receive path calls it (ChatRepository's direct and
+         * distro paths): the backstop behind the reader's own checks. Anything
+         * the decoder throws, an Error included, is no fields, reported to
+         * [onFailure]: the message is still stored, without its attachments.
+         * Before 2026-09-29 a stranger's map made decode throw
+         * OutOfMemoryError out of RfedDistroClient.handleBlob after the copy
+         * was marked seen, so the text was never stored and a /rfed/pull page
+         * stopped there. [decoder] is [decode]; it is a parameter so a test
+         * can make it throw.
+         */
+        fun decodeOrEmpty(
+            raw: ByteArray?,
+            decoder: (ByteArray?) -> LxmfFields = { decode(it) },
+            onFailure: (Throwable) -> Unit = {},
+        ): LxmfFields = try {
+            decoder(raw)
+        } catch (t: Throwable) {
+            onFailure(t)
+            EMPTY
         }
 
         // ---- Minimal msgpack reader (supports the types LXMF uses) ----
