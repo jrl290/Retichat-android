@@ -7,12 +7,15 @@ import com.newendian.retichat.bridge.RetichatBridge.MessageState
  * on its DIRECT send, as on iOS (ChatRepository.swift handleMessageState).
  *
  * The router asks for the copy with PROP_FALLBACK_REQUESTED (0x10): AppLinks
- * Timer P, 5 s without a proof, or at once when the link status is
- * DISCONNECTED. The DIRECT send keeps running beside the copy. A DIRECT send
- * that fails (FAILED, REJECTED, CANCELLED) before any 0x10 starts the copy
- * then. One copy per message, whichever report comes first. Until 2026-09-24
- * Android ran its own 5 s timer instead and skipped the copy when the message
- * had already failed, so a DIRECT send that failed early was never propagated.
+ * Timer P, 5 s without a proof and without transfer activity, or at once when
+ * the link status is DISCONNECTED. A Resource that keeps moving gets no copy
+ * (since 2026-09-29, app-links 07bea51; it used to get one 5 s in, a second
+ * upload of the whole attachment). The DIRECT send keeps running beside the
+ * copy. A DIRECT send that fails (FAILED, REJECTED, CANCELLED) before any 0x10
+ * starts the copy then. One copy per message, whichever report comes first.
+ * Until 2026-09-24 Android ran its own 5 s timer instead and skipped the copy
+ * when the message had already failed, so a DIRECT send that failed early was
+ * never propagated.
  *
  * The router can report 0x10 before the send's hash is known here (at once,
  * when the link is down), so a report for a hash not tracked yet is held and

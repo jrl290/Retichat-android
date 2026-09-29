@@ -122,7 +122,7 @@ class SendOrderingContractTest {
         val copy = body(repo, "sendPropagatedCopy")
         assertTrue(
             "the copy's poll is given the DIRECT handle",
-            Regex("pollMessageState\\(\\s*localId, propHandle, initialDeadlineMs = 600_000L,\\s*directHandle = directHandle,")
+            Regex("pollMessageState\\(\\s*localId, propHandle, quietMs = SendPollDeadline.PROPAGATED_QUIET_MS,\\s*directHandle = directHandle,")
                 .containsMatchIn(copy),
         )
         val poll = body(repo, "pollMessageState")

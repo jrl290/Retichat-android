@@ -783,12 +783,15 @@ class ChatRepository(
      * Poll the native message handle until it reaches a terminal state.
      * Uses exponential back-off: 200ms, 300ms, 450ms, … capped at 5s.
      *
-     * [initialDeadlineMs] controls how long to wait before giving up:
-     *   - 60s (default) for DIRECT sends that should succeed in <5s
-     *   - 600s for PROPAGATED fallback sends that can legitimately be slow
-     * For large transfers (resource-based) the deadline extends to 10 min
-     * and is reset whenever transfer progress advances, so that active
-     * transfers are never prematurely killed.
+     * The poll marks the send FAILED only once it has gone [quietMs] without
+     * its progress rising ([SendPollDeadline]): every rise starts the window
+     * again, so a transfer that keeps moving is never failed here however
+     * long it takes. [quietMs] is [SendPollDeadline.DIRECT_QUIET_MS] (60 s)
+     * for a DIRECT send and [SendPollDeadline.PROPAGATED_QUIET_MS] (600 s)
+     * for a PROPAGATED one, until the payload moves; then
+     * [SendPollDeadline.TRANSFER_QUIET_MS] (600 s). Until 2026-09-29 the 60 s
+     * ran from the poll's start unless progress passed 0.05, which the core
+     * never reported on the AppLinks path.
      *
      * [directHashHex] is set when [msgHandle] is a DIRECT send with the
      * propagated fallback behind it. Its failure starts the propagated copy,
@@ -804,17 +807,16 @@ class ChatRepository(
     private suspend fun pollMessageState(
         localId: String,
         msgHandle: Long,
-        initialDeadlineMs: Long = 60_000L,
+        quietMs: Long = SendPollDeadline.DIRECT_QUIET_MS,
         directHashHex: String? = null,
         directHandle: Long = 0L,
     ) {
         var interval = 200L          // start at 200ms for snappy LAN feedback
         val maxInterval = 5_000L     // cap at 5s
-        val longDeadline = 600_000L  // 10 min max for large transfers
-        var deadline = System.currentTimeMillis() + initialDeadlineMs
-        var lastProgress = 0f
+        // Counts only time without progress (see SendPollDeadline).
+        val deadline = SendPollDeadline(quietMs, startMs = System.currentTimeMillis())
 
-        while (System.currentTimeMillis() < deadline) {
+        while (!deadline.expired(System.currentTimeMillis())) {
             delay(interval)
 
             // If sendPropagatedCopy has taken over this message
@@ -830,16 +832,9 @@ class ChatRepository(
             val newState = RetichatBridge.messageGetState(msgHandle)
             val progress = RetichatBridge.messageGetProgress(msgHandle)
 
-            // If the message is actively transferring (SENDING state with
-            // increasing progress), switch to the long deadline and reset
-            // the timer whenever progress advances.
-            if (progress > lastProgress) {
-                if (progress > 0.05f) {
-                    // Resource transfer in progress — extend deadline
-                    deadline = System.currentTimeMillis() + longDeadline
-                }
-                lastProgress = progress
-            }
+            // A rise in progress starts the quiet window again: a transfer
+            // that is moving is not stuck.
+            deadline.onProgress(progress, System.currentTimeMillis())
 
             Log.d(TAG, "pollState: id=$localId handle=$msgHandle state=$newState progress=$progress")
 
@@ -895,10 +890,11 @@ class ChatRepository(
             // Gentle backoff: ×1.5 keeps checks frequent for the first few seconds
             interval = (interval * 3 / 2).coerceAtMost(maxInterval)
         }
-        // Timed out — mark failed so the user isn't left in limbo, unless
-        // the row succeeded meanwhile by another report.
+        // The send went its whole quiet window without progress — mark it
+        // failed so the user isn't left in limbo, unless the row succeeded
+        // meanwhile by another report.
         if (isSuccessState(messageDao.findById(localId)?.state ?: 0)) return
-        Log.w(TAG, "pollState: timed out for $localId, marking FAILED")
+        Log.w(TAG, "pollState: $localId made no progress for ${deadline.windowMs() / 1000} s, marking FAILED")
         messageDao.updateState(localId, RetichatBridge.MessageState.FAILED)
     }
 
@@ -1024,7 +1020,7 @@ class ChatRepository(
                         // so the poll doesn't mark FAILED before Rust delivers it.
                         // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1
                         pollMessageState(
-                            localId, propHandle, initialDeadlineMs = 600_000L,
+                            localId, propHandle, quietMs = SendPollDeadline.PROPAGATED_QUIET_MS,
                             directHandle = directHandle,
                         )
                     } catch (e: Exception) {
