@@ -10,7 +10,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -41,6 +41,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import androidx.lifecycle.Lifecycle
@@ -61,10 +62,13 @@ import com.newendian.retichat.service.ConnectionStateManager
 import com.newendian.retichat.ui.theme.BubbleIncoming
 import com.newendian.retichat.ui.theme.BubbleIncomingDark
 import com.newendian.retichat.ui.theme.BubbleOutgoing
+import com.newendian.retichat.ui.theme.RetichatTheme
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import java.io.File
 import java.text.SimpleDateFormat
+import java.time.LocalDate
+import java.time.ZoneId
 import java.util.*
 
 // Sender-name colour palette for group chats
@@ -145,6 +149,7 @@ private fun DmConversationContent(
     val chatEntity = viewModel?.chat?.collectAsState()?.value
     var draft by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
+    val dayMarkers = rememberDayMarkerText()
     val isGroup = chatEntity?.isGroup == true
     val isPendingInvite = viewModel?.isPendingInvite?.collectAsState()?.value ?: false
 
@@ -284,13 +289,19 @@ private fun DmConversationContent(
                     items(count = lazyItems.itemCount) { index ->
                         val msg = lazyItems[index]
                         if (msg != null) {
-                            MessageRow(
-                                msg = msg,
-                                showSender = isGroup || !msg.isOutbound,
-                                senderLabel = ChannelLabel(names.contact(msg.senderHashHex), null),
-                                text = SystemText.render(msg.systemKind, msg.content, msg.senderHashHex, names),
-                                viewModel = viewModel,
-                            )
+                            val marker = dayMarkers.aboveNewestFirst(index, lazyItems.itemCount) {
+                                lazyItems.peek(it)?.timestamp
+                            }
+                            WithDayMarker(marker) {
+                                MessageRow(
+                                    msg = msg,
+                                    showSender = isGroup || !msg.isOutbound,
+                                    senderLabel = ChannelLabel(names.contact(msg.senderHashHex), null),
+                                    text = SystemText.render(msg.systemKind, msg.content, msg.senderHashHex, names),
+                                    viewModel = viewModel,
+                                    zone = dayMarkers.zone,
+                                )
+                            }
                         }
                     }
                     // "Load earlier messages" indicator at top of list
@@ -574,6 +585,7 @@ private fun ChannelConversationContent(
     var draft by remember { mutableStateOf("") }
     var showInfo by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
+    val dayMarkers = rememberDayMarkerText()
 
     DisposableEffect(channelId) {
         app.rfedChannelClient.retainRfedLinkMonitor()
@@ -707,14 +719,21 @@ private fun ChannelConversationContent(
                 verticalArrangement = Arrangement.spacedBy(4.dp),
                 contentPadding = PaddingValues(vertical = 8.dp),
             ) {
-                items(items = displayMessages.asReversed(), key = { it.id }) { msg ->
-                    MessageRow(
-                        msg = msg,
-                        showSender = !msg.isOutbound,
-                        senderLabel = names.channelPost(msg.senderHashHex, channelNames[msg.senderHashHex.lowercase()]),
-                        text = msg.content,
-                        viewModel = null,
-                    )
+                val newestFirst = displayMessages.asReversed()
+                itemsIndexed(items = newestFirst, key = { _, msg -> msg.id }) { index, msg ->
+                    val marker = dayMarkers.aboveNewestFirst(index, newestFirst.size) {
+                        newestFirst.getOrNull(it)?.timestamp
+                    }
+                    WithDayMarker(marker) {
+                        MessageRow(
+                            msg = msg,
+                            showSender = !msg.isOutbound,
+                            senderLabel = names.channelPost(msg.senderHashHex, channelNames[msg.senderHashHex.lowercase()]),
+                            text = msg.content,
+                            viewModel = null,
+                            zone = dayMarkers.zone,
+                        )
+                    }
                 }
                 // "Load earlier messages" — visible until the server explicitly
                 // reports `more_pending = false` for this channel.
@@ -840,6 +859,7 @@ private fun MessageRow(
     senderLabel: ChannelLabel,
     text: String,
     viewModel: ConversationViewModel?,
+    zone: ZoneId,
 ) {
     val isOut = msg.isOutbound
     val alignment = if (isOut) Alignment.End else Alignment.Start
@@ -1024,7 +1044,7 @@ private fun MessageRow(
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        text = formatMessageTime(msg.timestamp),
+                        text = formatMessageTime(msg.timestamp, zone),
                         style = MaterialTheme.typography.bodySmall,
                         color = contentColor.copy(alpha = 0.6f),
                     )
@@ -1054,8 +1074,9 @@ private fun senderColor(hash: String): Color {
 
 private val msgTimeFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
 
-private fun formatMessageTime(millis: Long): String =
-    msgTimeFormat.format(Date(millis))
+/** A bubble's time, in [zone]: the date markers' zone, so a time never sits under another day. */
+private fun formatMessageTime(millis: Long, zone: ZoneId): String =
+    msgTimeFormat.apply { timeZone = TimeZone.getTimeZone(zone) }.format(Date(millis))
 
 private fun stateIcon(state: Int): String = when (state) {
     RetichatBridge.MessageState.GENERATING -> "\u23F3"  // hourglass
@@ -1113,6 +1134,54 @@ private fun linkifyText(
     // Remaining plain text
     if (cursor < text.length) {
         append(text.substring(cursor))
+    }
+}
+
+// ---- Previews ----
+
+/**
+ * Date markers in a conversation on 30 September 2026 in London, top to
+ * bottom as the list shows them: 31 December 2025 with its year, 1 January
+ * and 27 September without, then "Yesterday" and "Today".
+ */
+@Preview(showBackground = true, widthDp = 360)
+@Composable
+private fun DayMarkersPreview() {
+    val zone = ZoneId.of("Europe/London")
+    val today = LocalDate.of(2026, 9, 30)
+    fun at(date: LocalDate, hour: Int, minute: Int) =
+        date.atTime(hour, minute).atZone(zone).toInstant().toEpochMilli()
+    val alice = "aabbccdd"
+    val messages = listOf(
+        MessageEntity("p1", "preview", alice, "Happy new year!", at(LocalDate.of(2025, 12, 31), 23, 58), false),
+        MessageEntity("p2", "preview", "me", "And to you", at(LocalDate.of(2026, 1, 1), 0, 2), true, RetichatBridge.MessageState.DELIVERED),
+        MessageEntity("p3", "preview", alice, "The roof relay is up", at(today.minusDays(3), 18, 20), false),
+        MessageEntity("p4", "preview", "me", "Seeing it from here", at(today.minusDays(1), 21, 10), true, RetichatBridge.MessageState.DELIVERED),
+        MessageEntity("p5", "preview", alice, "Morning!", at(today, 8, 5), false),
+        MessageEntity("p6", "preview", "me", "Morning", at(today, 8, 7), true, RetichatBridge.MessageState.SENT),
+    )
+    val labels = IcuDayLabels(Locale.UK, zone, today)
+    val dayMarkers = DayMarkerText(DayMarkers(today, zone, labels::sameYear), labels)
+    RetichatTheme(dynamicColor = false) {
+        Surface {
+            Column(
+                modifier = Modifier.padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                messages.forEachIndexed { index, msg ->
+                    WithDayMarker(dayMarkers.above(msg.timestamp, messages.getOrNull(index - 1)?.timestamp)) {
+                        MessageRow(
+                            msg = msg,
+                            showSender = !msg.isOutbound,
+                            senderLabel = ChannelLabel("Alice", null),
+                            text = msg.content,
+                            viewModel = null,
+                            zone = zone,
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 
