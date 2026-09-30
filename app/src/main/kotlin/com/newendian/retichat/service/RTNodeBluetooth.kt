@@ -302,10 +302,25 @@ object RTNodeBluetooth {
                     return@post
                 }
                 when (newState) {
-                    BluetoothProfile.STATE_CONNECTED ->
+                    BluetoothProfile.STATE_CONNECTED -> {
+                        // The fastest link the phone and node will run: the
+                        // shortest connection interval (11.25-15 ms) and the
+                        // 2M PHY (a phone or node without it stays on 1M).
+                        // Asked for now, before the setup below, so both are
+                        // settled before the Hello, when RTNode asks for its
+                        // own; two updates at once collide and both fail.
+                        // Neither is a GATT operation, so neither holds up
+                        // the MTU exchange; the outcome is RTNode's to log.
+                        gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
+                        gatt.setPreferredPhy(
+                            BluetoothDevice.PHY_LE_2M_MASK,
+                            BluetoothDevice.PHY_LE_2M_MASK,
+                            BluetoothDevice.PHY_OPTION_NO_PREFERRED,
+                        )
                         // MTU first, as Prns Android dialers do; the rest
                         // follows each completion, one operation at a time.
                         if (!gatt.requestMtu(REQUESTED_MTU)) fail(node, "requestMtu refused")
+                    }
                     BluetoothProfile.STATE_DISCONNECTED -> {
                         gatt.close()
                         closed(node, "disconnected (status $status)")
@@ -348,11 +363,15 @@ object RTNodeBluetooth {
                 }
                 when (descriptor.characteristic.uuid) {
                     CONTROL -> node.data?.let { subscribe(node, it) }
-                    // One ATT PDU's worth per write (MTU - 3): a longer
-                    // with-response write would become an ATT long write,
-                    // which Prns peers do not handle.
-                    DATA -> if (!RetichatBridge.prnsBleLinkReady(node.link, node.mtu - 3)) {
-                        fail(node, "link_ready: ${RetichatBridge.lastError()}")
+                    DATA -> {
+                        val fast = writesWithoutResponse(descriptor.characteristic)
+                        Log.i(TAG, "link ${node.link}: data writes ${if (fast) "without" else "with"} response, up to ${node.mtu - 3} bytes")
+                        // One ATT PDU's worth per write (MTU - 3): a longer
+                        // with-response write would become an ATT long write,
+                        // which Prns peers do not handle.
+                        if (!RetichatBridge.prnsBleLinkReady(node.link, node.mtu - 3)) {
+                            fail(node, "link_ready: ${RetichatBridge.lastError()}")
+                        }
                     }
                 }
             }
@@ -420,13 +439,22 @@ object RTNodeBluetooth {
             RetichatBridge.prnsBleLinkWriteDone(link, false)
             return
         }
-        // With response: RTNode's characteristics are write-with-response,
-        // and the response is what paces the next fragment.
+        // Data without response where the node allows it (RTNode does from
+        // its fast-link firmware): no ATT response per fragment, so several
+        // go in one connection event. onCharacteristicWrite still reports
+        // each one once the stack has taken it, and that paces the next.
+        // The Hello, and data to a node without the property, go with
+        // response.
+        val type = if (characteristic == 1 && writesWithoutResponse(target)) {
+            BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+        } else {
+            BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+        }
         val code = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            gatt.writeCharacteristic(target, data, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
+            gatt.writeCharacteristic(target, data, type)
         } else {
             @Suppress("DEPRECATION")
-            target.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+            target.writeType = type
             @Suppress("DEPRECATION")
             target.value = data
             @Suppress("DEPRECATION")
@@ -437,6 +465,9 @@ object RTNodeBluetooth {
             RetichatBridge.prnsBleLinkWriteDone(link, false)
         }
     }
+
+    private fun writesWithoutResponse(characteristic: BluetoothGattCharacteristic): Boolean =
+        characteristic.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE != 0
 
     /** The connection or the attempt is gone: tell the engine. */
     private fun closed(node: Node, why: String) {
