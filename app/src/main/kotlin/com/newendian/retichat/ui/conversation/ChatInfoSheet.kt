@@ -356,8 +356,17 @@ fun ChatInfoSheet(
     if (showDeleteConfirm) {
         AlertDialog(
             onDismissRequest = { showDeleteConfirm = false },
-            title = { Text("Delete this conversation?") },
-            text = { Text("All messages will be permanently deleted. This cannot be undone.") },
+            title = { Text(if (isGroup) "Delete and leave this group?" else "Delete this conversation?") },
+            text = {
+                Text(
+                    if (isGroup) {
+                        "Deleting a group conversation leaves the group: the members are told you left, " +
+                            "and you won't be able to rejoin it. All messages will be permanently deleted."
+                    } else {
+                        "All messages will be permanently deleted. This cannot be undone."
+                    }
+                )
+            },
             confirmButton = {
                 TextButton(
                     onClick = {
@@ -384,7 +393,12 @@ fun ChatInfoSheet(
         AlertDialog(
             onDismissRequest = { showLeaveConfirm = false },
             title = { Text("Leave this group?") },
-            text = { Text("You won't receive future messages, and you won't be able to rejoin this group.") },
+            text = {
+                Text(
+                    "The members are told you left, and this conversation is deleted. You won't receive " +
+                        "future messages, and you won't be able to rejoin this group."
+                )
+            },
             confirmButton = {
                 TextButton(
                     onClick = {

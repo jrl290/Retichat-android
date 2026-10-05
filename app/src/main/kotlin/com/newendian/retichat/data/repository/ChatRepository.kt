@@ -357,8 +357,17 @@ class ChatRepository(
         chatDao.archiveChat(chatId)
     }
 
+    /**
+     * Delete a conversation. A group's is the user's leave (James,
+     * 2026-10-05: deleting a group conversation means leaving it): the leave
+     * goes to the members and the group is closed for good, as
+     * [leaveGroupChat] does ([quitGroup]). Until 2026-10-05 a group's chat
+     * was dropped here alone: its members went on counting the user, and a
+     * later invite brought it back.
+     */
     suspend fun deleteChat(chatId: String) {
         val chat = chatDao.findById(chatId) ?: return
+        if (chat.isGroup) return quitGroup(chatId, "deleted")
         deleteChatLocal(chat)
     }
 

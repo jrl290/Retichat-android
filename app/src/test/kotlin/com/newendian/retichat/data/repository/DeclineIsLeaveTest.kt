@@ -74,4 +74,18 @@ class DeclineIsLeaveTest {
         val sheet = File("src/main/kotlin/com/newendian/retichat/ui/conversation/ChatInfoSheet.kt").readText()
         assertTrue(sheet.contains("you won't be able to rejoin this group."))
     }
+
+    /** James, 2026-10-05: deleting a group conversation means leaving it. */
+    @Test
+    fun deletingAGroupConversationIsLeavingIt() {
+        val delete = body(repo, "deleteChat")
+        val leave = delete.indexOf("if (chat.isGroup) return quitGroup(chatId, \"deleted\")")
+        assertTrue(leave >= 0)
+        assertTrue("a group never reaches the local-only delete", leave < delete.indexOf("deleteChatLocal(chat)"))
+        val sheet = File("src/main/kotlin/com/newendian/retichat/ui/conversation/ChatInfoSheet.kt").readText()
+        assertTrue(sheet.contains("if (isGroup) \"Delete and leave this group?\" else \"Delete this conversation?\""))
+        assertTrue(sheet.contains("\"Deleting a group conversation leaves the group: the members are told you left, \""))
+        // Leaving says the conversation goes too.
+        assertTrue(sheet.contains("\"The members are told you left, and this conversation is deleted."))
+    }
 }
