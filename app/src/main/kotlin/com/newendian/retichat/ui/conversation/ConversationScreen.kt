@@ -158,6 +158,7 @@ private fun DmConversationContent(
     var pendingAttachmentData by remember { mutableStateOf<ByteArray?>(null) }
 
     var showChatInfo by remember { mutableStateOf(false) }
+    var showDeclineConfirm by remember { mutableStateOf(false) }
     val groupMembers = viewModel?.groupMembers?.collectAsState()?.value ?: emptyList()
 
     // File picker launcher
@@ -357,7 +358,7 @@ private fun DmConversationContent(
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             OutlinedButton(
-                                onClick = { viewModel?.declineInvite(); onBack() },
+                                onClick = { showDeclineConfirm = true },
                                 modifier = Modifier.weight(1f).height(48.dp),
                                 shape = RoundedCornerShape(10.dp),
                             ) { Text("Decline") }
@@ -494,6 +495,29 @@ private fun DmConversationContent(
             }
             } // end else (isPendingInvite)
         }
+    }
+
+    // A decline is the user's leave, and final (James, 2026-10-01: "Once the
+    // group is rejected/left, that person cannot rejoin").
+    if (showDeclineConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDeclineConfirm = false },
+            title = { Text("Decline this group invite?") },
+            text = { Text("You won't be able to join this group later.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showDeclineConfirm = false
+                        viewModel?.declineInvite()
+                        onBack()
+                    },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                ) { Text("Decline") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeclineConfirm = false }) { Text("Cancel") }
+            },
+        )
     }
 
     if (showChatInfo) {

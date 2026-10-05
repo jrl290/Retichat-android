@@ -135,14 +135,23 @@ class GroupChatManager(
     // ---- Leave ----------------------------------------------------------
 
     /**
-     * Notify all currently-accepted members that this user is leaving.
+     * The user's leave of [groupId], sent when the user leaves a group and
+     * when the user declines an invite (James, 2026-10-02: "Make the decline
+     * message the same as the leave message"): GROUP_ID, GROUP_ACTION
+     * `leave` and GROUP_SENDER this user, no content, as the web and iOS send
+     * it (DISPLAY_NAMES.md §7). [members] are the targets the caller chose
+     * (GroupMemberStatuses.leaveTargets: every listed member that has not
+     * left). Each copy goes like any group control message: DIRECT, with the
+     * propagated fallback. Until 2026-10-05 nothing called this: a leave was
+     * a plain post "left the group" with no action (audit L5), and a decline
+     * sent nothing.
      */
     fun sendLeave(
         groupId: String,
-        acceptedMembers: List<String>,
+        members: List<String>,
     ) {
-        acceptedMembers.filter { it != selfHex }.forEach { target ->
-            send(target, "left the group") { handle ->
+        members.filter { it != selfHex }.forEach { target ->
+            send(target, "") { handle ->
                 GroupFields.set(handle, GroupEntry.ID,     groupId)
                 GroupFields.set(handle, GroupEntry.ACTION, Action.LEAVE)
                 GroupFields.set(handle, GroupEntry.SENDER, selfHex)

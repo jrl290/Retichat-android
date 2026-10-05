@@ -1838,16 +1838,13 @@ class ChatRepository(
     }
 
     /**
-     * Decline a pending group invite: silently delete the local chat,
-     * messages, and member records. (No LEAVE is sent because nobody
-     * has confirmed us as a member yet.)
+     * Decline a pending group invite: the user's leave (James, 2026-10-02:
+     * "Make the decline message the same as the leave message"), through the
+     * one path leaving takes ([quitGroup]), so every member records the user
+     * as a member who left, for good. Until 2026-10-05 a decline sent nothing
+     * and only this device knew.
      */
-    suspend fun declineGroupInvite(chatId: String) {
-        val chat = chatDao.findById(chatId) ?: return
-        if (!chat.isGroup) return
-        Log.i(TAG, "declineGroupInvite: removing ${chat.id}")
-        deleteChatLocal(chat)
-    }
+    suspend fun declineGroupInvite(chatId: String) = quitGroup(chatId, "declined")
 
     private suspend fun handleDirectMessage(
         msgId: String,
@@ -1938,52 +1935,33 @@ class ChatRepository(
         }
     }
 
+    /** Leave a group: the user's leave to its members, and for good ([quitGroup]). */
+    suspend fun leaveGroupChat(chatId: String) = quitGroup(chatId, "left")
+
     /**
-     * Leave a group chat — broadcast a leave message to accepted members,
-     * then delete the local chat state.
+     * A decline or a leave ([how], for the log) of group [chatId], one path
+     * for both: the user's leave goes to every listed member that has not
+     * left ([GroupMemberStatuses.leaveTargets]: a still-invited member too),
+     * as GROUP_ACTION `leave` ([GroupChatManager.sendLeave]); the group is
+     * recorded as closed (James, 2026-10-01: "Once the group is
+     * rejected/left, that person cannot rejoin": a later invite to it is
+     * ignored, so nothing offers it again); then its chat goes. The sends
+     * neither wait for nor undo the close. Until 2026-10-05 a leave was a
+     * plain post "left the group" with no action (audit L5), sent to the
+     * accepted members only, and nothing was recorded.
      */
-    suspend fun leaveGroupChat(chatId: String) {
+    private suspend fun quitGroup(chatId: String, how: String) {
         val chat = chatDao.findById(chatId) ?: return
         if (!chat.isGroup) return
-        val groupIdHex = chat.groupIdHex ?: return
-        val selfHex = selfDestHash.toHex()
-
-        val otherMembers = GroupMemberStatuses.acceptedMemberHexes(
-            members = messageDao.groupMembersList(chatId),
-            selfHex = selfHex,
-        )
-
-        if (groupChatManager == null) {
-            deleteChatLocal(chat)
-            return
+        val groupIdHex = chat.groupIdHex
+        val targets = GroupMemberStatuses.leaveTargets(messageDao.groupMembersList(chatId), selfHex())
+        if (groupIdHex != null) {
+            UserPreferences.closeGroup(appContext, groupIdHex)
+            groupChatManager?.sendLeave(groupIdHex, targets)
+                ?: Log.w(TAG, "quitGroup: stack offline, the leave of ${chat.id} is not sent")
         }
-
-        // Broadcast leave to all members
-        otherMembers.forEach { memberHex ->
-            scope.launch(Dispatchers.IO) {
-                val destHash = memberHex.hexToBytes()
-                // Register the AppLinks spec synchronously before send.
-                RetichatBridge.appLinkOpen(routerHandle, destHash, "lxmf", "delivery")
-
-                val handle = RetichatBridge.messageCreate(
-                    destHash = destHash,
-                    srcHash = selfDestHash,
-                    content = "left the group",
-                    method = RetichatBridge.DeliveryMethod.DIRECT,
-                    identityHandle = identityHandle,
-                )
-                if (handle != 0L) {
-                    GroupFields.set(handle, GroupEntry.ID, groupIdHex)
-                    GroupFields.set(handle, GroupEntry.SENDER, selfHex)
-                    // A leave is signalled by having GROUP_ID + GROUP_SENDER + content="left the group"
-                    // but no GROUP_MEMBERS (which distinguishes it from a create message)
-                    RetichatBridge.messageSendViaAppLinks(handle)
-                }
-            }
-        }
-
         deleteChatLocal(chat)
-        Log.i(TAG, "Left group $chatId")
+        Log.i(TAG, "Group ${chat.id} $how (leave to ${targets.size} member(s))")
     }
 
     private fun selfHex(): String = selfDestHash.toHex()

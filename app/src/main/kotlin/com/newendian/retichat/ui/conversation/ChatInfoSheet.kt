@@ -384,7 +384,7 @@ fun ChatInfoSheet(
         AlertDialog(
             onDismissRequest = { showLeaveConfirm = false },
             title = { Text("Leave this group?") },
-            text = { Text("You will stop receiving messages from this group.") },
+            text = { Text("You won't receive future messages, and you won't be able to rejoin this group.") },
             confirmButton = {
                 TextButton(
                     onClick = {

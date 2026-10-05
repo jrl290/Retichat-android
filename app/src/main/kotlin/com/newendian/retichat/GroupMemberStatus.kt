@@ -73,6 +73,16 @@ object GroupMemberStatuses {
         if (!DeliveryPolicy.isCurrent(current)) return null
         return if (current == next) null else next
     }
+
+    /**
+     * Who the user's leave goes to, a decline's included: every member on the
+     * list but the user and the members that left. A member still invited is
+     * sent it too: it may have accepted already, or accept later, and must
+     * not go on counting the user as a member.
+     */
+    fun leaveTargets(members: List<GroupMemberEntity>, selfHex: String): List<String> =
+        members.map { it.destHashHex }.distinct()
+            .filter { it != selfHex && DeliveryPolicy.isCurrent(statusOf(members, it)) }
 }
 
 /**
