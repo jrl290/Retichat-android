@@ -101,7 +101,8 @@ class NamesMigrationTest {
         val impl = File("build/generated/ksp/debug/java/com/newendian/retichat/data/db/RetichatDatabase_Impl.java")
         Assume.assumeTrue(impl.exists())
         val generated = impl.readText()
-        for ((table, sql) in version11) {
+        // contacts changed again in 12 (isContact): ContactsMigrationTest.
+        for ((table, sql) in version11 - "contacts") {
             val room = Regex("CREATE TABLE IF NOT EXISTS `$table` \\([^\"]*").find(generated)?.value
             assertEquals(table, sql, room?.replace("IF NOT EXISTS ", ""))
         }

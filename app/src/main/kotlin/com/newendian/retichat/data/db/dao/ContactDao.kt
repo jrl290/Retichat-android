@@ -1,19 +1,27 @@
 package com.newendian.retichat.data.db.dao
 
 import androidx.room.*
+import com.newendian.retichat.data.db.ContactSql
 import com.newendian.retichat.data.db.NameSql
 import com.newendian.retichat.data.db.entity.ContactEntity
 import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface ContactDao {
-    /** Every contact; order by the resolved name where it is shown (NameBook). */
+    /** Every row, hidden ones included: the names the resolver reads (NameBook). */
     @Query("SELECT * FROM contacts")
     fun allContacts(): Flow<List<ContactEntity>>
 
-    /** One-shot (non-Flow) snapshot of all contacts. */
+    /** The contacts the user added ([ContactSql.LISTED]); order by the resolved name where shown. */
+    @Query(ContactSql.LISTED)
+    fun listedContacts(): Flow<List<ContactEntity>>
+
+    /** One-shot (non-Flow) snapshot of every row, hidden ones included. */
     @Query("SELECT * FROM contacts")
     suspend fun allContactsSnapshot(): List<ContactEntity>
+
+    @Query(ContactSql.SET_CONTACT)
+    suspend fun setContact(hex: String)
 
     @Query("SELECT * FROM contacts WHERE destHashHex = :hex")
     suspend fun findByHash(hex: String): ContactEntity?

@@ -19,9 +19,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
 import com.newendian.retichat.RetichatApp
 import com.newendian.retichat.bridge.RetichatBridge
-import com.newendian.retichat.data.model.Contact
 import com.newendian.retichat.data.model.hexToBytes
-import com.newendian.retichat.names.NameBook
 import com.newendian.retichat.ui.chatlist.ChatListScreen
 import com.newendian.retichat.ui.chatlist.ChatListViewModel
 import com.newendian.retichat.ui.contacts.QrCodeScreen
@@ -31,6 +29,7 @@ import com.newendian.retichat.ui.conversation.ConversationViewModel
 import com.newendian.retichat.ui.channels.JoinChannelScreen
 import com.newendian.retichat.ui.newchat.NewChatScreen
 import com.newendian.retichat.ui.newchat.NewGroupScreen
+import com.newendian.retichat.ui.newchat.pickableContacts
 import com.newendian.retichat.ui.settings.SettingsScreen
 import com.newendian.retichat.ui.settings.SettingsViewModel
 import kotlinx.coroutines.launch
@@ -105,14 +104,12 @@ fun RetichatNavHost(navController: NavHostController) {
 
         composable(Routes.NEW_CHAT) { entry ->
             val scope = rememberCoroutineScope()
-            // The contacts the user added or shares a group with (allowlisted,
-            // as iOS lists them), each under its resolved name.
+            // The contacts the user added, each under its resolved name: never
+            // a group member or a stranger's conversation (ContactSql).
             val contactsFlow = remember { repository.contacts() }
             val allContacts by contactsFlow.collectAsState(initial = emptyList())
             val selfHex = remember { repository.selfDestHash.joinToString("") { "%02x".format(it) } }
-            val contacts = remember(allContacts, selfHex) {
-                allContacts.filter { it.isAllowlisted && it.destHashHex != selfHex }
-            }
+            val contacts = remember(allContacts, selfHex) { pickableContacts(allContacts, selfHex) }
             NewChatScreen(
                 onChatCreated = { chatId ->
                     if (entry.isCurrent()) navController.navigate(Routes.conversation(chatId)) {
@@ -146,22 +143,14 @@ fun RetichatNavHost(navController: NavHostController) {
         }
 
         composable(Routes.NEW_GROUP) { entry ->
-            // Show everyone the user has a DM chat with as potential group
-            // members, each under its resolved name (DISPLAY_NAMES.md §5.3).
-            val previewsFlow = remember { repository.chatPreviews() }
-            val chatPreviews by previewsFlow.collectAsState(initial = emptyList())
-            val namesFlow = remember { repository.nameBook() }
-            val names by namesFlow.collectAsState(initial = NameBook.EMPTY)
-            val dmContacts = remember(chatPreviews, names) {
-                chatPreviews
-                    .filter { !it.isGroup }
-                    .map { preview ->
-                        Contact(
-                            destHash = preview.memberHashes.hexToBytes(),
-                            displayName = names.contact(preview.memberHashes),
-                        )
-                    }
-            }
+            // The members a group can start with: the user's contacts, the
+            // same list New Chat offers, each under its resolved name
+            // (DISPLAY_NAMES.md §5.3). Not any chat: until 2026-10-05 every DM
+            // conversation was offered, a stranger's included.
+            val contactsFlow = remember { repository.contacts() }
+            val allContacts by contactsFlow.collectAsState(initial = emptyList())
+            val selfHex = remember { repository.selfDestHash.joinToString("") { "%02x".format(it) } }
+            val dmContacts = remember(allContacts, selfHex) { pickableContacts(allContacts, selfHex) }
             NewGroupScreen(
                 onGroupCreated = { chatId ->
                     if (entry.isCurrent()) navController.navigate(Routes.conversation(chatId)) {

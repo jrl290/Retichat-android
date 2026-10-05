@@ -192,11 +192,21 @@ class ChatRepository(
 
     // ---- Contacts ----
 
-    /** Every contact, each with its resolved name, sorted by it. */
+    /**
+     * The contacts the user added (Add Contact, New Conversation, QR code,
+     * lxma:// link), each with its resolved name, sorted by it. Never a
+     * hidden row: group members and channel posters are accepted by
+     * association, and a stranger's or a distro sender's chat is a
+     * conversation, not a contact ([com.newendian.retichat.data.db.ContactSql]).
+     */
     fun contacts(): Flow<List<Contact>> =
-        contactDao.allContacts().map { list ->
+        contactDao.listedContacts().map { list ->
             list.map { it.toDomain() }.sortedBy { it.displayName.lowercase() }
         }
+
+    /** Every peer this app holds a row for, hidden ones included (a conversation's own name slot). */
+    fun peers(): Flow<List<Contact>> =
+        contactDao.allContacts().map { list -> list.map { it.toDomain() } }
 
     /**
      * The resolver every surface reads names through (DISPLAY_NAMES.md §5.3),
@@ -214,14 +224,17 @@ class ChatRepository(
 
     /**
      * The user added [destHash] (QR code, link, hash entry, New Chat): an
-     * allowlisted contact. An existing contact keeps its names and key
-     * (until 2026-09-27 an upsert here reset them, and group invite
-     * acceptance lost the key); a [publicKey] given here is stored.
+     * allowlisted contact, listed from now on (a hidden row becomes a
+     * contact). The one place a row becomes a contact. An existing row keeps
+     * its names and key (until 2026-09-27 an upsert here reset them, and
+     * group invite acceptance lost the key); a [publicKey] given here is
+     * stored.
      */
     suspend fun addContact(destHash: ByteArray, publicKey: ByteArray? = null) {
         val hex = destHash.toHex()
-        contactDao.insertIfAbsent(ContactEntity(destHashHex = hex, isAllowlisted = true))
+        contactDao.insertIfAbsent(ContactEntity(destHashHex = hex, isAllowlisted = true, isContact = true))
         contactDao.setAllowlisted(hex)
+        contactDao.setContact(hex)
         publicKey?.let { contactDao.setPublicKey(hex, it.toHex()) }
         watchAnnounces(hex)
     }
@@ -267,16 +280,17 @@ class ChatRepository(
     }
 
     /**
-     * A contact row for [hex] (not allowlisted) so a received name has a
-     * place to go. An existing row is left as it is.
+     * A hidden row for [hex] (not allowlisted, no contact) so a received name
+     * or key has a place to go. An existing row is left as it is.
      */
     private suspend fun ensureContact(hex: String) {
         if (contactDao.insertIfAbsent(ContactEntity(destHashHex = hex)) != -1L) watchAnnounces(hex)
     }
 
     /**
-     * iOS `ensureAllowlistedContact`: [hex] passes the privacy filter from now
-     * on (the user started a chat, a group co-member, an inviter).
+     * [hex] passes the privacy filter from now on: a member of a group the
+     * user created or accepted, accepted by association. A new row is hidden
+     * (no contact); an existing one keeps whether it is a contact.
      */
     private suspend fun ensureAllowlistedContact(hex: String) {
         contactDao.insertIfAbsent(ContactEntity(destHashHex = hex, isAllowlisted = true))
@@ -1394,7 +1408,8 @@ class ChatRepository(
             }
 
             // 0xD1 always names the LXMF source, group messages and relayed
-            // copies included (there it names the relayer).
+            // copies included (there it names the relayer). A hidden row:
+            // nobody becomes a contact by sending (ContactSql).
             ensureContact(srcHex)
             acceptMessageName(srcHex, nameField, unverifiedReason, timestamp)
 

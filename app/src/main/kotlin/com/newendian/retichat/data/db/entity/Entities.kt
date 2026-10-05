@@ -1,5 +1,6 @@
 package com.newendian.retichat.data.db.entity
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.PrimaryKey
 import com.newendian.retichat.MemberStatus
@@ -23,8 +24,16 @@ import com.newendian.retichat.names.ContactNames
  * [isAllowlisted] is iOS's `ContactEntity.isAllowlisted`: the privacy filter
  * keeps direct messages and group invites only from allowlisted contacts
  * ([com.newendian.retichat.data.repository.DeliveryPolicy]). Contacts the
- * user adds, group co-members and inviters are allowlisted; a contact row
- * created for a message that got through with the filter off is not.
+ * user adds and the members of a group the user created or accepted are
+ * allowlisted; a row created for a message that got through with the filter
+ * off, or for a member of a group still pending, is not.
+ *
+ * [isContact]: the user added this peer (Add Contact, New Conversation, a QR
+ * code or lxma:// link), so it is listed as a contact. Every other row is
+ * hidden ([com.newendian.retichat.data.db.ContactSql]): a group member is
+ * accepted by association, a stranger's or a distro sender's conversation is
+ * a conversation, and none of them is listed. The SQL default 1 is for the
+ * rows that existed before the column (database 12): they stay contacts.
  */
 @Entity(tableName = "contacts")
 data class ContactEntity(
@@ -37,6 +46,7 @@ data class ContactEntity(
     val publicKeyHex: String? = null,
     val addedAt: Long = System.currentTimeMillis(),
     val isAllowlisted: Boolean = false,
+    @ColumnInfo(defaultValue = "1") val isContact: Boolean = false,
 )
 
 /** The name slots the resolver reads (§5.3). */

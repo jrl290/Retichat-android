@@ -27,7 +27,7 @@ import com.newendian.retichat.data.db.entity.*
         ChannelSenderEntity::class,
         ChannelNameStateEntity::class,
     ],
-    version = NamesMigration.TO,
+    version = ContactsMigration.TO,
     exportSchema = false,
 )
 abstract class RetichatDatabase : RoomDatabase() {
@@ -56,6 +56,13 @@ abstract class RetichatDatabase : RoomDatabase() {
             }
         }
 
+        /** Migration 11 → 12: explicit contacts and the §5.4 names pass ([ContactsMigration]). */
+        private val MIGRATION_11_12 = object : Migration(ContactsMigration.FROM, ContactsMigration.TO) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                ContactsMigration.STATEMENTS.forEach(db::execSQL)
+            }
+        }
+
         fun getInstance(context: Context): RetichatDatabase =
             INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -63,7 +70,7 @@ abstract class RetichatDatabase : RoomDatabase() {
                     RetichatDatabase::class.java,
                     "retichat.db"
                 )
-                    .addMigrations(MIGRATION_9_10, MIGRATION_10_11)
+                    .addMigrations(MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12)
                     .fallbackToDestructiveMigration()
                     .build().also { INSTANCE = it }
             }

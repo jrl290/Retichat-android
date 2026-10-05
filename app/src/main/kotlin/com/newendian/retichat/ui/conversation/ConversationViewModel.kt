@@ -42,9 +42,13 @@ class ConversationViewModel(
         repository.nameBook()
             .stateIn(viewModelScope, SharingStarted.Eagerly, NameBook.EMPTY)
 
-    /** Every contact (resolved names), for the DM peer's own name slot. */
+    /**
+     * Every peer with a row, hidden ones included (resolved names), for the DM
+     * peer's own name slot: a stranger's conversation is no contact, and the
+     * user can still name it.
+     */
     val contacts: StateFlow<List<Contact>> =
-        repository.contacts()
+        repository.peers()
             .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     /** Chat entity for this conversation (a group's name; a DM's title is resolved from the contact). */
