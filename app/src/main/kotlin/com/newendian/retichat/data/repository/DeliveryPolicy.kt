@@ -1,6 +1,7 @@
 package com.newendian.retichat.data.repository
 
 import com.newendian.retichat.MemberStatus
+import com.newendian.retichat.bridge.LxmfFields
 import com.newendian.retichat.names.Signature
 import com.newendian.retichat.service.GroupChatManager
 
@@ -125,4 +126,15 @@ object DeliveryPolicy {
         val trusted = held == Held.JOINED && isCurrent(sourceStatus) && signature == Signature.VALIDATED
         return if (trusted && senderListed) named else srcHex
     }
+
+    /**
+     * RFed SPEC §17.11: a distro sent copy is addressed to the distro and
+     * reaches a device only through the distro fan-out (RfedDistroClient),
+     * never on the device's own address. One that arrives there is forged or
+     * misrouted, and kept it would show the user's own message as someone's
+     * incoming one. It is dropped first, whoever sent it, filter on or off,
+     * as iOS and the web drop it.
+     */
+    fun isDistroSentCopy(fields: LxmfFields): Boolean =
+        fields.getString(LxmfFields.FIELD_CUSTOM_TYPE) == LxmfFields.DISTRO_SENT_TYPE
 }

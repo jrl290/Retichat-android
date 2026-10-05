@@ -1385,6 +1385,15 @@ class ChatRepository(
                 return
             }
         }
+        // RFed SPEC §17.11: a distro sent copy reaches this device only through
+        // the distro fan-out (RfedDistroClient), never on its own address.
+        // Dropped first, whoever sent it and filter on or off, as iOS and the
+        // web drop it: kept, it would show the user's own message as someone's
+        // incoming one. Until 2026-10-05 it went on as a DM from the distro.
+        if (DeliveryPolicy.isDistroSentCopy(fields)) {
+            Log.i(TAG, "onMessageReceived: DROPPED distro sent-copy marker outside fan-out src=${srcHash.toHex().take(8)}")
+            return
+        }
         val signature = Signature.reason(signatureValid, unverifiedReason)
         scope.launch(Dispatchers.IO) {
             val srcHex = srcHash.toHex()
