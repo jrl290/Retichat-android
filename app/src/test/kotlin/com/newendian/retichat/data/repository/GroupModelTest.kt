@@ -65,6 +65,10 @@ class GroupModelTest {
                 // Naming someone else (GROUP_SENDER not the source's own).
                 assertFalse(rule(action, held = held, namesOther = true))
                 assertFalse(rule(action, held = held, signature = Signature.INVALID))
+                // No key for the source here yet: counted, as v0.1.8 counts it
+                // (James, 2026-10-05). An unverifiable leave is final; the next
+                // release carries the member's key in each accept and leave.
+                assertTrue(rule(action, held = held, signature = Signature.SOURCE_UNKNOWN))
             }
             assertFalse(rule(action, held = Held.NONE, sourceStatus = null))
         }
@@ -190,20 +194,29 @@ class GroupModelTest {
         assertTrue(body(repo, "handleGroupMessage").contains("messageDao.setGroupMemberStatus(chat.id, srcHex, next)"))
     }
 
+    /**
+     * James chose v0.1.8's filter behaviour for this release (2026-10-05): an
+     * invite the filter let through allowlists its listed members (each once
+     * its key checks out) and its inviter as it is processed, and a member's
+     * own accept allowlists it, in a pending group too. The next release adds
+     * the creator answering an accept with the current member statuses and
+     * the member's key carried in each accept and leave.
+     */
     @Test
-    fun anInviteAllowsNobodyAndAHeldGroupKeepsItsList() {
+    fun anInviteAllowlistsItsListedMembersAsV018DoesAndAHeldGroupKeepsItsList() {
         val invite = body(repo, "handleGroupInvite")
-        assertFalse(invite.contains("ensureAllowlistedContact("))
-        assertFalse(invite.contains("setAllowlisted("))
-        assertTrue(invite.contains("ensureContact(memberHash)"))
-        val held = invite.indexOf("if (standing.chat != null)")
+        assertTrue(invite.contains("ensureAllowlistedContact(memberHash)"))
+        assertTrue(invite.contains("if (srcHex in members && srcHex != self) ensureAllowlistedContact(srcHex)"))
+        // The keys loop runs only over the held list, or the new group's own.
+        assertTrue(invite.contains("if (memberHash !in members || memberHash == self) return@forEach"))
+        val held = invite.indexOf("if (standing.chat != null) {\n")
         val create = invite.indexOf("chatDao.upsert(")
         assertTrue("a held group returns before anything is created", held in 0 until create)
-        // The user's accept (and the creation) allows the members.
         assertTrue(body(repo, "acceptGroupInvite").contains("ensureAllowlistedContact(it)"))
         assertTrue(body(repo, "createGroupChat").contains("ensureAllowlistedContact(hexHash)"))
-        // A member's own accept allows it only in a joined group.
-        assertTrue(body(repo, "handleGroupMessage")
-            .contains("if (accepted && standing.held == DeliveryPolicy.Held.JOINED && srcHex != selfHex())"))
+        // A member's own accept, pending group or joined.
+        val group = body(repo, "handleGroupMessage")
+        assertTrue(group.contains("if (accepted && srcHex != selfHex()) {"))
+        assertFalse(group.contains("Held.JOINED && srcHex"))
     }
 }

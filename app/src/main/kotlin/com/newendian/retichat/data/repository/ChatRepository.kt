@@ -288,9 +288,10 @@ class ChatRepository(
     }
 
     /**
-     * [hex] passes the privacy filter from now on: a member of a group the
-     * user created or accepted, accepted by association. A new row is hidden
-     * (no contact); an existing one keeps whether it is a contact.
+     * [hex] passes the privacy filter from now on: a listed member of a group
+     * held here (an invite the filter let through, the user's creation or
+     * accept, the member's own accept), accepted by association. A new row is
+     * hidden (no contact); an existing one keeps whether it is a contact.
      */
     private suspend fun ensureAllowlistedContact(hex: String) {
         contactDao.insertIfAbsent(ContactEntity(destHashHex = hex, isAllowlisted = true))
@@ -1600,10 +1601,10 @@ class ChatRepository(
                 messageDao.setGroupMemberStatus(chat.id, srcHex, next)
                 val accepted = groupAction == GroupChatManager.Action.ACCEPT
                 Log.i(TAG, "${srcHex.take(8)} ${if (accepted) "accepted" else "left"} group ${chat.id}")
-                // In a group the user joined, a member's accept passes the
-                // privacy filter, as the user's own accept made every member.
-                // A pending group allows nobody.
-                if (accepted && standing.held == DeliveryPolicy.Held.JOINED && srcHex != selfHex()) {
+                // A member's own accept passes the privacy filter, in a pending
+                // group too: v0.1.8's filter behaviour, which James chose for
+                // this release (see handleGroupInvite).
+                if (accepted && srcHex != selfHex()) {
                     ensureAllowlistedContact(srcHex)
                 }
                 // A system line about the member (name resolved when shown).
@@ -1696,15 +1697,17 @@ class ChatRepository(
 
     /**
      * An invite from [srcHex] the rule kept (a source the privacy filter
-     * allows, for a group the user never rejected or left). Each member key
-     * that checks out is kept, on a hidden row (the user's accept needs every
-     * one), and nobody is allowed by it: the user's accept allows the members
-     * (James, 2026-10-01: "If the invite is accepted, the other group members
-     * are considered allowed"). A group held here keeps the list its creation
-     * or first invite gave it ("There are no membership changes for a
-     * group"): another invite brings keys only. Until 2026-10-05 the inviter
-     * and every co-member whose key checked out were allowlisted as the invite
-     * arrived, and a later invite marked its sender accepted, adding it.
+     * allows, for a group the user never rejected or left). Each listed
+     * member whose key checks out is kept (the user's accept needs every key)
+     * and, with the inviter, allowlisted as the invite is processed, as
+     * v0.1.8 does: James chose v0.1.8's filter behaviour for this release
+     * (2026-10-05); the next release adds the creator answering an accept
+     * with the current member statuses and the member's key carried in each
+     * accept and leave. The rows stay hidden (no contact). A group held here
+     * keeps the list its creation or first invite gave it (James, 2026-10-01:
+     * "There are no membership changes for a group"): another invite brings
+     * keys only, and allowlists only members on that list. Until 2026-10-05 a
+     * later invite marked its sender accepted, adding it.
      */
     private suspend fun handleGroupInvite(
         srcHex: String,
@@ -1714,6 +1717,10 @@ class ChatRepository(
         standing: GroupStanding,
     ) {
         val self = selfHex()
+        if (standing.chat == null && fields.group(GroupEntry.MEMBERS) == null) {
+            Log.w(TAG, "invite for ${groupId.take(8)} from ${srcHex.take(8)} lists no members: ignored")
+            return
+        }
         val listed = DeliveryPolicy.members(fields.group(GroupEntry.MEMBERS))
         // Whose keys this invite may bring: the held list, or for a new group
         // the list it gives (with its inviter).
@@ -1731,16 +1738,16 @@ class ChatRepository(
                 Log.w(TAG, "Ignored mismatched group member key for ${memberHash.take(8)}")
                 return@forEach
             }
-            ensureContact(memberHash)
+            // v0.1.8's filter behaviour (above): a listed member passes the
+            // privacy filter once its key checks out.
+            ensureAllowlistedContact(memberHash)
             contactDao.setPublicKey(memberHash, publicKey.toHex())
         }
+        // The inviter too, when it is on the list (v0.1.8: so the user can talk back).
+        if (srcHex in members && srcHex != self) ensureAllowlistedContact(srcHex)
 
         if (standing.chat != null) {
             Log.i(TAG, "invite for held group ${standing.chat.id} from ${srcHex.take(8)}: member keys only")
-            return
-        }
-        if (fields.group(GroupEntry.MEMBERS) == null) {
-            Log.w(TAG, "invite for ${groupId.take(8)} from ${srcHex.take(8)} lists no members: ignored")
             return
         }
 

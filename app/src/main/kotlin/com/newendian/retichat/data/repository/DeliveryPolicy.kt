@@ -38,7 +38,7 @@ object DeliveryPolicy {
     enum class Held {
         /** No such group here. */
         NONE,
-        /** Invited, not accepted yet: the group allows nobody and relays for nobody. */
+        /** Invited, not accepted yet: the group relays for nobody, and its chat asks nothing of the members. */
         PENDING,
         /** Created or accepted by the user. */
         JOINED,
@@ -101,6 +101,11 @@ object DeliveryPolicy {
         return when (action) {
             GroupChatManager.Action.RELAY_REQUEST ->
                 held == Held.JOINED && sourceStatus == MemberStatus.ACCEPTED && proven
+            // A source whose key is not here yet (SOURCE_UNKNOWN) is counted
+            // as v0.1.8 counts it. The risk: anyone who knows the group id can
+            // forge a listed member's leave, and a leave is final. The next
+            // release closes it by carrying the member's key in each accept
+            // and leave.
             GroupChatManager.Action.ACCEPT, GroupChatManager.Action.LEAVE ->
                 isCurrent(sourceStatus) && !namesOther && !forged
             else -> held == Held.JOINED && isCurrent(sourceStatus) && proven

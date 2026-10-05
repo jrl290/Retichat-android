@@ -67,14 +67,17 @@ class DeliveryPolicyTest {
     }
 
     @Test
-    fun theUserAllowlistsWhomItChatsWithAndTheMembersOfGroupsItJoins() {
+    fun theUserAllowlistsWhomItChatsWithAndTheMembersOfItsGroups() {
         assertTrue(body(repo, "getOrCreateDirectChat").contains("addContact(destHash)"))
         assertTrue(body(repo, "createGroupChat").contains("ensureAllowlistedContact("))
         assertTrue(body(repo, "acceptGroupInvite").contains("ensureAllowlistedContact("))
-        // An invite allows nobody (James, 2026-10-01): only a member's own
-        // accept in a joined group. Until 2026-10-05 the invite's members whose
-        // key checked out and its inviter were allowlisted as it arrived.
+        // James chose v0.1.8's filter behaviour for this release (2026-10-05):
+        // an invite allowlists its listed members whose key checks out and its
+        // inviter as it is processed, and a member's own accept allowlists it.
+        // The next release adds the creator answering an accept with the
+        // current member statuses and the member's key carried in each accept
+        // and leave.
         assertEquals(1, Regex("ensureAllowlistedContact\\(").findAll(body(repo, "handleGroupMessage")).count())
-        assertEquals(0, Regex("ensureAllowlistedContact\\(").findAll(body(repo, "handleGroupInvite")).count())
+        assertEquals(2, Regex("ensureAllowlistedContact\\(").findAll(body(repo, "handleGroupInvite")).count())
     }
 }

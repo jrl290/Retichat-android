@@ -24,9 +24,9 @@ import com.newendian.retichat.names.ContactNames
  * [isAllowlisted] is iOS's `ContactEntity.isAllowlisted`: the privacy filter
  * keeps direct messages and group invites only from allowlisted contacts
  * ([com.newendian.retichat.data.repository.DeliveryPolicy]). Contacts the
- * user adds and the members of a group the user created or accepted are
- * allowlisted; a row created for a message that got through with the filter
- * off, or for a member of a group still pending, is not.
+ * user adds and the listed members of a group held here (from an invite the
+ * filter let through, as v0.1.8 does) are allowlisted; a row created for a
+ * message that got through with the filter off is not.
  *
  * [isContact]: the user added this peer (Add Contact, New Conversation, a QR
  * code or lxma:// link), so it is listed as a contact. Every other row is
