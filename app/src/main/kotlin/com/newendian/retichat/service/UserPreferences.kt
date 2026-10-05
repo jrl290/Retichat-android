@@ -2,6 +2,7 @@ package com.newendian.retichat.service
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.newendian.retichat.ClosedGroups
 import com.newendian.retichat.names.DisplayNames
 
 /**
@@ -253,6 +254,24 @@ object UserPreferences {
         if (isDistro) current.add(destHashHex.lowercase()) else current.remove(destHashHex.lowercase())
         putCsvSet(context, PREF_KEY_DISTRO_CONTACTS, current)
     }
+
+    // ── Groups the user rejected or left ──────────────────────────────
+
+    /** Oldest-first group ids the user declined or left ([ClosedGroups]), one per line. */
+    const val PREF_KEY_CLOSED_GROUPS = "closed_groups"
+
+    private fun closedGroups(context: Context): List<String> =
+        prefs(context).getString(PREF_KEY_CLOSED_GROUPS, "").orEmpty().split('\n').filter { it.isNotEmpty() }
+
+    /** The user declined or left group [groupId]: for good (a later invite to it is ignored). */
+    @Synchronized
+    fun closeGroup(context: Context, groupId: String) {
+        val next = ClosedGroups.record(closedGroups(context), groupId.lowercase())
+        prefs(context).edit().putString(PREF_KEY_CLOSED_GROUPS, next.joinToString("\n")).apply()
+    }
+
+    fun isGroupClosed(context: Context, groupId: String): Boolean =
+        groupId.lowercase() in closedGroups(context)
 
     fun getMutedChatIds(context: Context): Set<String> =
         getCsvSet(context, PREF_KEY_MUTED_CHAT_IDS)

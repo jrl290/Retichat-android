@@ -1,6 +1,5 @@
 package com.newendian.retichat.data.repository
 
-import com.newendian.retichat.service.GroupChatManager
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -26,18 +25,7 @@ class DeliveryPolicyTest {
         assertTrue(DeliveryPolicy.allowlisted(filterStrangers = false, contactExists = true, allowlisted = false))
     }
 
-    /** iOS `groupMessagePolicy`: an invite by its source, the rest by the group. */
-    @Test
-    fun groupMessagesFollowTheIosPolicy() {
-        val invite = GroupChatManager.Action.INVITE
-        assertTrue(DeliveryPolicy.groupMessage(invite, inviterAllowed = true, groupExists = false))
-        assertFalse(DeliveryPolicy.groupMessage(invite, inviterAllowed = false, groupExists = true))
-        for (action in listOf(null, GroupChatManager.Action.ACCEPT, GroupChatManager.Action.LEAVE,
-            GroupChatManager.Action.RELAY_REQUEST, GroupChatManager.Action.RELAY_DONE)) {
-            assertTrue(DeliveryPolicy.groupMessage(action, inviterAllowed = false, groupExists = true))
-            assertFalse(DeliveryPolicy.groupMessage(action, inviterAllowed = true, groupExists = false))
-        }
-    }
+    // The group rule (James's group model) is pinned in GroupModelTest.
 
     // ── Wiring (needs the native library to run, so checked in the source) ──
 
@@ -79,12 +67,14 @@ class DeliveryPolicyTest {
     }
 
     @Test
-    fun theContactsIosAllowlistsAreAllowlistedHereToo() {
+    fun theUserAllowlistsWhomItChatsWithAndTheMembersOfGroupsItJoins() {
         assertTrue(body(repo, "getOrCreateDirectChat").contains("addContact(destHash)"))
         assertTrue(body(repo, "createGroupChat").contains("ensureAllowlistedContact("))
         assertTrue(body(repo, "acceptGroupInvite").contains("ensureAllowlistedContact("))
-        val group = body(repo, "handleGroupMessage")
-        // Invite member keys that checked out, the inviter, and an accepting member.
-        assertEquals(3, Regex("ensureAllowlistedContact\\(").findAll(group).count())
+        // An invite allows nobody (James, 2026-10-01): only a member's own
+        // accept in a joined group. Until 2026-10-05 the invite's members whose
+        // key checked out and its inviter were allowlisted as it arrived.
+        assertEquals(1, Regex("ensureAllowlistedContact\\(").findAll(body(repo, "handleGroupMessage")).count())
+        assertEquals(0, Regex("ensureAllowlistedContact\\(").findAll(body(repo, "handleGroupInvite")).count())
     }
 }

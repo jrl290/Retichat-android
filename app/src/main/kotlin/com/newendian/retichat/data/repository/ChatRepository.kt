@@ -1385,21 +1385,29 @@ class ChatRepository(
                 return
             }
         }
+        val signature = Signature.reason(signatureValid, unverifiedReason)
         scope.launch(Dispatchers.IO) {
             val srcHex = srcHash.toHex()
             val msgId = hash.toHex()
 
-            // The privacy filter, exactly as iOS applies it (DeliveryPolicy),
-            // before any write, so a stranger leaves nothing behind.
+            // The privacy filter and the group rule (DeliveryPolicy), before
+            // any write, so a stranger leaves nothing behind. The source is
+            // the packet's own, never GROUP_SENDER.
+            var standing: GroupStanding? = null
             if (groupId != null) {
                 val action = fields.group(GroupEntry.ACTION)
+                val here = groupStanding(groupId, srcHex).also { standing = it }
                 val allowed = DeliveryPolicy.groupMessage(
                     action = action,
-                    inviterAllowed = allowlisted(srcHex),
-                    groupExists = chatDao.findByGroupId(groupId)?.isGroup == true,
+                    sourceAllowed = action == GroupChatManager.Action.INVITE && allowlisted(srcHex),
+                    held = here.held,
+                    sourceStatus = here.sourceStatus,
+                    namesOther = DeliveryPolicy.namesOther(fields.group(GroupEntry.SENDER), srcHex),
+                    closed = here.closed,
+                    signature = signature,
                 )
                 if (!allowed) {
-                    Log.i(TAG, "onMessageReceived: DROPPED group ${if (action == null) "message" else action} for unknown group or from a non-allowlisted source ${srcHex.take(8)}")
+                    Log.i(TAG, "onMessageReceived: DROPPED group ${action ?: "message"} for ${groupId.take(8)} from ${srcHex.take(8)} (group ${here.held}, source ${here.sourceStatus ?: "not listed"}, closed=${here.closed}, signature=$signature)")
                     return@launch
                 }
             } else if (!allowlisted(srcHex)) {
@@ -1413,8 +1421,9 @@ class ChatRepository(
             ensureContact(srcHex)
             acceptMessageName(srcHex, nameField, unverifiedReason, timestamp)
 
-            if (groupId != null) {
-                handleGroupMessage(msgId, srcHex, content, timestamp, fields)
+            val group = standing
+            if (groupId != null && group != null) {
+                handleGroupMessage(msgId, srcHex, content, timestamp, fields, group, signature)
             } else {
                 handleDirectMessage(msgId, srcHash, srcHex, content, timestamp, fields)
             }
@@ -1517,175 +1526,84 @@ class ChatRepository(
 
     // ---- Group message handling ----
 
+    /**
+     * What the group rule asks about a message naming group [groupId] from
+     * the packet source [srcHex]: the group as held here ([chat], its
+     * [members]), where the user stands in it, the source's status on its
+     * list, and whether the user rejected or left it.
+     */
+    private data class GroupStanding(
+        val chat: ChatEntity?,
+        val members: List<GroupMemberEntity>,
+        val held: DeliveryPolicy.Held,
+        val sourceStatus: String?,
+        val closed: Boolean,
+    )
+
+    private suspend fun groupStanding(groupId: String, srcHex: String): GroupStanding {
+        val chat = chatDao.findByGroupId(groupId)?.takeIf { it.isGroup }
+        val members = chat?.let { messageDao.groupMembersList(it.id) } ?: emptyList()
+        return GroupStanding(
+            chat = chat,
+            members = members,
+            held = GroupMemberStatuses.held(chat != null, members, selfHex()),
+            sourceStatus = GroupMemberStatuses.statusOf(members, srcHex),
+            closed = UserPreferences.isGroupClosed(appContext, groupId),
+        )
+    }
+
+    /**
+     * A group message the rule kept ([DeliveryPolicy.groupMessage], applied
+     * in [onMessageReceived] with [standing]). James's group model: the
+     * members are the creator's list, fixed; an accept or a leave is the
+     * packet source's own; a leave (a decline's included) is final; a pending
+     * group allows nobody and relays for nobody.
+     */
     private suspend fun handleGroupMessage(
         msgId: String,
         srcHex: String,
         content: String,
         timestamp: Double,
         fields: LxmfFields,
+        standing: GroupStanding,
+        signature: Int,
     ) {
-        val groupId = fields.group(GroupEntry.ID)
-        val groupMembers = fields.group(GroupEntry.MEMBERS)
-        val groupName = fields.group(GroupEntry.NAME)
-        val groupSender = fields.group(GroupEntry.SENDER)
+        val groupId = fields.group(GroupEntry.ID) ?: return
         val groupAction = fields.group(GroupEntry.ACTION)
-        val groupRelayFor = fields.group(GroupEntry.RELAY_FOR)
-        val groupRelaySeen = fields.group(GroupEntry.RELAY_SEEN)
-        val groupMemberKeys = fields.group(GroupEntry.MEMBER_KEYS)
 
-        // Determine the actual sender (may be relayed on behalf of another member)
-        val actualSenderHex = groupSender ?: srcHex
-
-        // The privacy filter ran in onMessageReceived (DeliveryPolicy): an
-        // invite reaches here only from an allowed source, anything else
-        // only for a group that exists here.
-
-        // Look up existing group chat by groupId
-        var chat = chatDao.findByGroupId(groupId!!)
-
-        if (groupAction == GroupChatManager.Action.INVITE && groupMembers != null && groupMemberKeys != null) {
-            val invitedMembers = (groupMembers.split(",") + srcHex).toSet()
-            groupMemberKeys.split(",").forEach { entry ->
-                val parts = entry.split(":", limit = 2)
-                if (parts.size != 2) return@forEach
-                val memberHash = parts[0].lowercase()
-                val encodedPublicKey = parts[1]
-                if (memberHash !in invitedMembers || memberHash.length != 32) return@forEach
-                val hashBytes = memberHash.hexToBytes() ?: return@forEach
-                val publicKey = runCatching { Base64.decode(encodedPublicKey, Base64.DEFAULT) }.getOrNull()
-                    ?.takeIf { it.size == 64 } ?: return@forEach
-                val publicKeyHex = publicKey.toHex()
-                if (!RetichatBridge.identityRememberLxmfDelivery(hashBytes, publicKey)) {
-                    Log.w(TAG, "Ignored mismatched group member key for ${memberHash.take(8)}")
-                    return@forEach
-                }
-                // A co-member whose key checked out passes the privacy
-                // filter (iOS handleGroupInvite). Its names are kept.
-                if (memberHash != selfHex()) {
-                    ensureAllowlistedContact(memberHash)
-                    contactDao.setPublicKey(memberHash, publicKeyHex)
-                }
-            }
-        }
-
-        if (chat == null && groupMembers != null && groupAction == GroupChatManager.Action.INVITE) {
-            // Incoming invite — create the local group record in PENDING state
-            // (self inviteStatus = invited; user must Accept/Decline via the UI)
-            val name = groupName ?: "Group"
-            val chatId = "group_${groupId.take(16)}"
-
-            chatDao.upsert(
-                ChatEntity(
-                    id = chatId,
-                    isGroup = true,
-                    name = name,
-                    memberHashes = groupMembers,
-                    groupIdHex = groupId,
-                )
-            )
-
-            (groupMembers.split(",") + srcHex).filter { it.isNotEmpty() }.distinct().forEach { memberHex ->
-                messageDao.upsertGroupMember(
-                    GroupMemberEntity(
-                        chatId = chatId,
-                        destHashHex = memberHex,
-                        inviteStatus = if (memberHex == srcHex) {
-                            MemberStatus.ACCEPTED
-                        } else {
-                            MemberStatus.INVITED
-                        },
-                    )
-                )
-            }
-
-            chat = chatDao.findById(chatId)
-            Log.i(TAG, "Created PENDING group from invite: chatId=$chatId, groupId=$groupId")
-        }
-
-        if (chat == null) {
-            Log.w(TAG, "handleGroupMessage: unknown groupId=$groupId, ignoring")
+        if (groupAction == GroupChatManager.Action.INVITE) {
+            handleGroupInvite(srcHex, groupId, timestamp, fields, standing)
             return
         }
+        val chat = standing.chat ?: return
 
         when (groupAction) {
-            GroupChatManager.Action.INVITE -> {
-                // The inviter passes the privacy filter from now on, so we can
-                // talk back (iOS handleGroupInvite).
-                ensureAllowlistedContact(srcHex)
-                // The authenticated invite source implicitly accepted when it
-                // created and sent the invitation. Apply this on duplicate
-                // pending invites as well.
-                val inviter = messageDao.groupMembersList(chat.id)
-                    .firstOrNull { it.destHashHex == srcHex }
-                if (inviter == null) {
-                    messageDao.upsertGroupMember(
-                        GroupMemberEntity(
-                            chatId = chat.id,
-                            destHashHex = srcHex,
-                            inviteStatus = MemberStatus.ACCEPTED,
-                        )
-                    )
-                } else {
-                    messageDao.setGroupMemberStatus(chat.id, srcHex, MemberStatus.ACCEPTED)
+            GroupChatManager.Action.ACCEPT, GroupChatManager.Action.LEAVE -> {
+                // The source's own accept or leave (the rule took it only from
+                // a current member naming nobody else). A member that left
+                // stays left; an accept from one already accepted is nothing
+                // new; a decline arrives as a leave from a member still invited.
+                val next = GroupMemberStatuses.statusChange(standing.sourceStatus, groupAction)
+                if (next == null) {
+                    Log.i(TAG, "group ${chat.id}: $groupAction from ${srcHex.take(8)} changes nothing (was ${standing.sourceStatus})")
+                    return
                 }
-                // Insert a system invite message (idempotent on inviteMsgId).
-                // It keeps the inviter's hash; the name is resolved when shown.
-                val inviteMsgId = "inv_${groupId.take(16)}"
-                val firstInviteChunk = messageDao.findById(inviteMsgId) == null
-                messageDao.upsert(
-                    MessageEntity(
-                        id = inviteMsgId,
-                        chatId = chat.id,
-                        senderHashHex = actualSenderHex,
-                        content = "invited you to \"${chat.name}\" — tap Accept or Decline below",
-                        timestamp = (timestamp * 1000).toLong(),
-                        isOutbound = false,
-                        state = RetichatBridge.MessageState.DELIVERED,
-                        systemKind = SystemText.MEMBER,
-                    )
-                )
-                if (firstInviteChunk && RetichatApp.activeChatId != chat.id) {
-                    MessageNotificationHelper.notify(
-                        appContext,
-                        "Group invite",
-                        "${resolvedName(actualSenderHex)} invited you to \"${chat.name}\"",
-                        chat.id,
-                    )
+                messageDao.setGroupMemberStatus(chat.id, srcHex, next)
+                val accepted = groupAction == GroupChatManager.Action.ACCEPT
+                Log.i(TAG, "${srcHex.take(8)} ${if (accepted) "accepted" else "left"} group ${chat.id}")
+                // In a group the user joined, a member's accept passes the
+                // privacy filter, as the user's own accept made every member.
+                // A pending group allows nobody.
+                if (accepted && standing.held == DeliveryPolicy.Held.JOINED && srcHex != selfHex()) {
+                    ensureAllowlistedContact(srcHex)
                 }
-            }
-
-            GroupChatManager.Action.ACCEPT -> {
-                Log.i(TAG, "${actualSenderHex.take(8)} accepted group ${chat.id}")
-                messageDao.setGroupMemberStatus(chat.id, actualSenderHex, MemberStatus.ACCEPTED)
-                // A confirmed member passes the privacy filter (iOS handleGroupAccept).
-                if (actualSenderHex != selfHex()) ensureAllowlistedContact(actualSenderHex)
-
-                // Insert a system "X joined the group" message (idempotent);
-                // the name is resolved when shown.
-                val sysId = "acc_${actualSenderHex.take(8)}_${groupId.take(8)}"
+                // A system line about the member (name resolved when shown).
                 messageDao.upsert(
                     MessageEntity(
-                        id = sysId,
+                        id = if (accepted) "acc_${srcHex.take(8)}_${groupId.take(8)}" else msgId,
                         chatId = chat.id,
-                        senderHashHex = actualSenderHex,
-                        content = "joined the group",
-                        timestamp = (timestamp * 1000).toLong(),
-                        isOutbound = false,
-                        state = RetichatBridge.MessageState.DELIVERED,
-                        systemKind = SystemText.MEMBER,
-                    )
-                )
-            }
-
-            GroupChatManager.Action.LEAVE -> {
-                Log.i(TAG, "${actualSenderHex.take(8)} left group ${chat.id}")
-                messageDao.setGroupMemberStatus(chat.id, actualSenderHex, MemberStatus.LEFT)
-                messageDao.upsert(
-                    MessageEntity(
-                        id = msgId,
-                        chatId = chat.id,
-                        senderHashHex = actualSenderHex,
-                        content = "left the group",
+                        senderHashHex = srcHex,
+                        content = if (accepted) "joined the group" else "left the group",
                         timestamp = (timestamp * 1000).toLong(),
                         isOutbound = false,
                         state = RetichatBridge.MessageState.DELIVERED,
@@ -1695,17 +1613,19 @@ class ChatRepository(
             }
 
             GroupChatManager.Action.RELAY_REQUEST -> {
-                val alreadySeen = groupRelaySeen
-                    ?.split(",")?.filter { it.isNotEmpty() } ?: emptyList()
+                // The rule took it only from a member that accepted a group the
+                // user joined, signed by it.
+                val alreadySeen = fields.group(GroupEntry.RELAY_SEEN)
+                    ?.split(",")?.mapNotNull { DeliveryPolicy.hash(it) } ?: emptyList()
                 val acceptedMembers = GroupMemberStatuses.acceptedMemberHexes(
-                    members = messageDao.groupMembersList(chat.id),
+                    members = standing.members,
                     selfHex = selfHex(),
                 )
                 groupChatManager?.performRelay(
                     groupId   = groupId,
                     groupName = chat.name,
                     content   = content,
-                    originalSender         = actualSenderHex,
+                    originalSender         = groupAuthor(fields, srcHex, standing, signature),
                     alreadySeen            = alreadySeen,
                     requesterHex           = srcHex,
                     allAcceptedMembers     = acceptedMembers,
@@ -1714,18 +1634,21 @@ class ChatRepository(
 
             GroupChatManager.Action.RELAY_DONE -> {
                 Log.i(TAG, "Relay done confirmed for group ${chat.id} by ${srcHex.take(8)}")
-                // Future: update per-member tracking for the relayed message
             }
 
             null -> {
-                // Regular group content message — display it
+                // A plain post, kept for a group held here whoever sent it. It
+                // is shown as its GROUP_SENDER's only when a current member of
+                // a joined group relays a listed member's post; anyone else's
+                // is its own (a stranger's never takes a member's name).
+                val author = groupAuthor(fields, srcHex, standing, signature)
                 val attachments = fields.getFileAttachments()
                 if (content.isNotBlank() || attachments.isNotEmpty()) {
                     messageDao.upsert(
                         MessageEntity(
                             id = msgId,
                             chatId = chat.id,
-                            senderHashHex = actualSenderHex,
+                            senderHashHex = author,
                             content = content,
                             timestamp = (timestamp * 1000).toLong(),
                             isOutbound = false,
@@ -1736,9 +1659,9 @@ class ChatRepository(
 
                     if (RetichatApp.activeChatId != chat.id) {
                         val notifText = if (content.isNotBlank()) content
-                                        else "\uD83D\uDCCE ${attachments.size} attachment(s)"
+                                        else "📎 ${attachments.size} attachment(s)"
                         MessageNotificationHelper.notify(
-                            appContext, resolvedName(actualSenderHex), notifText, chat.id,
+                            appContext, resolvedName(author), notifText, chat.id,
                             conversationTitle = chat.name,
                         )
                     }
@@ -1746,6 +1669,117 @@ class ChatRepository(
             }
 
             else -> Log.w(TAG, "handleGroupMessage: unrecognised action=$groupAction")
+        }
+    }
+
+    /** [DeliveryPolicy.groupAuthor] for a message of the group in [standing]. */
+    private fun groupAuthor(fields: LxmfFields, srcHex: String, standing: GroupStanding, signature: Int): String {
+        val named = DeliveryPolicy.hash(fields.group(GroupEntry.SENDER))
+        return DeliveryPolicy.groupAuthor(
+            groupSender = named,
+            srcHex = srcHex,
+            held = standing.held,
+            sourceStatus = standing.sourceStatus,
+            senderListed = named != null && GroupMemberStatuses.statusOf(standing.members, named) != null,
+            signature = signature,
+        )
+    }
+
+    /**
+     * An invite from [srcHex] the rule kept (a source the privacy filter
+     * allows, for a group the user never rejected or left). Each member key
+     * that checks out is kept, on a hidden row (the user's accept needs every
+     * one), and nobody is allowed by it: the user's accept allows the members
+     * (James, 2026-10-01: "If the invite is accepted, the other group members
+     * are considered allowed"). A group held here keeps the list its creation
+     * or first invite gave it ("There are no membership changes for a
+     * group"): another invite brings keys only. Until 2026-10-05 the inviter
+     * and every co-member whose key checked out were allowlisted as the invite
+     * arrived, and a later invite marked its sender accepted, adding it.
+     */
+    private suspend fun handleGroupInvite(
+        srcHex: String,
+        groupId: String,
+        timestamp: Double,
+        fields: LxmfFields,
+        standing: GroupStanding,
+    ) {
+        val self = selfHex()
+        val listed = DeliveryPolicy.members(fields.group(GroupEntry.MEMBERS))
+        // Whose keys this invite may bring: the held list, or for a new group
+        // the list it gives (with its inviter).
+        val members = if (standing.chat != null) standing.members.map { it.destHashHex }.distinct()
+                      else (listed + srcHex).distinct()
+        fields.group(GroupEntry.MEMBER_KEYS)?.split(",")?.forEach { entry ->
+            val parts = entry.split(":", limit = 2)
+            if (parts.size != 2) return@forEach
+            val memberHash = DeliveryPolicy.hash(parts[0]) ?: return@forEach
+            if (memberHash !in members || memberHash == self) return@forEach
+            val hashBytes = memberHash.hexToBytes() ?: return@forEach
+            val publicKey = runCatching { Base64.decode(parts[1], Base64.DEFAULT) }.getOrNull()
+                ?.takeIf { it.size == 64 } ?: return@forEach
+            if (!RetichatBridge.identityRememberLxmfDelivery(hashBytes, publicKey)) {
+                Log.w(TAG, "Ignored mismatched group member key for ${memberHash.take(8)}")
+                return@forEach
+            }
+            ensureContact(memberHash)
+            contactDao.setPublicKey(memberHash, publicKey.toHex())
+        }
+
+        if (standing.chat != null) {
+            Log.i(TAG, "invite for held group ${standing.chat.id} from ${srcHex.take(8)}: member keys only")
+            return
+        }
+        if (fields.group(GroupEntry.MEMBERS) == null) {
+            Log.w(TAG, "invite for ${groupId.take(8)} from ${srcHex.take(8)} lists no members: ignored")
+            return
+        }
+
+        // A new group, PENDING (the user's own row invited) until the user
+        // accepts or declines it. The inviter started it, so it is accepted.
+        val name = fields.group(GroupEntry.NAME) ?: "Group"
+        val chatId = "group_${groupId.take(16)}"
+        val all = (listed + srcHex + self).distinct()
+        chatDao.upsert(
+            ChatEntity(
+                id = chatId,
+                isGroup = true,
+                name = name,
+                memberHashes = all.joinToString(","),
+                groupIdHex = groupId,
+            )
+        )
+        all.forEach { memberHex ->
+            messageDao.upsertGroupMember(
+                GroupMemberEntity(
+                    chatId = chatId,
+                    destHashHex = memberHex,
+                    inviteStatus = if (memberHex == srcHex) MemberStatus.ACCEPTED else MemberStatus.INVITED,
+                )
+            )
+        }
+        Log.i(TAG, "Created PENDING group from invite: chatId=$chatId, groupId=$groupId")
+
+        // A system invite line (the inviter's hash; the name resolved when shown).
+        messageDao.upsert(
+            MessageEntity(
+                id = "inv_${groupId.take(16)}",
+                chatId = chatId,
+                senderHashHex = srcHex,
+                content = "invited you to \"$name\" — tap Accept or Decline below",
+                timestamp = (timestamp * 1000).toLong(),
+                isOutbound = false,
+                state = RetichatBridge.MessageState.DELIVERED,
+                systemKind = SystemText.MEMBER,
+            )
+        )
+        if (RetichatApp.activeChatId != chatId) {
+            MessageNotificationHelper.notify(
+                appContext,
+                "Group invite",
+                "${resolvedName(srcHex)} invited you to \"$name\"",
+                chatId,
+            )
         }
     }
 
@@ -1843,6 +1877,10 @@ class ChatRepository(
             val chat = chatDao.findByGroupIdPrefix(prefix + "%")
             if (chat != null) {
                 Log.i(TAG, "STOP received from $srcHex for group ${chat.id}")
+                // The source's own leave, under the group model: only a
+                // current member of the list, and for good.
+                val current = GroupMemberStatuses.statusOf(messageDao.groupMembersList(chat.id), srcHex)
+                if (GroupMemberStatuses.statusChange(current, GroupChatManager.Action.LEAVE) == null) return
                 messageDao.setGroupMemberStatus(chat.id, srcHex, MemberStatus.LEFT)
                 // Insert a system message in the group chat (name resolved when shown)
                 messageDao.upsert(

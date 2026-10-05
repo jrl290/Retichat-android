@@ -47,7 +47,7 @@ class GroupFieldsWiringTest {
         // No group entry is read from a field number directly.
         assertEquals(emptySet<String>(), sitesOf(Regex("LxmfFields\\.GROUP_(?!ENTRIES_IN_RETICHAT_FIELD)")))
         val repo = sources.getValue("data/repository/ChatRepository.kt")
-        assertEquals(10, Regex("fields\\.group\\(GroupEntry\\.").findAll(repo).count())
+        assertEquals(11, Regex("fields\\.group\\(GroupEntry\\.").findAll(repo).count())
     }
 
     @Test
