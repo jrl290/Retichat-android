@@ -231,22 +231,76 @@ object DisplayNames {
     }
 
     /**
-     * §5.4 placeholders, dropped by the migration wherever the name was not
-     * typed by the user: hash forms (8 to 32 hex, with or without a leading
-     * `?` or a trailing `…`), "Retichat", "Retichat Web" and "Anonymous
-     * Peer", all case-insensitive. The migration runs the same rule in SQL
-     * ([com.newendian.retichat.data.db.NamesMigration.placeholderSql]); the
-     * JVM test checks the two agree.
+     * §5.4 white space is §3's: Unicode White_Space and nothing else.
+     * Kotlin's `trim()` is not that set (it also removes U+001C-U+001F and
+     * keeps U+0085), so it is never used on a stored name.
+     */
+    fun isWhiteSpace(c: Char): Boolean =
+        c in '\u0009'..'\u000D' || c == ' ' || c == '\u0085' || c == '\u00A0' || c == '\u1680' ||
+            c in '\u2000'..'\u200A' || c == '\u2028' || c == '\u2029' || c == '\u202F' ||
+            c == '\u205F' || c == '\u3000'
+
+    /** [name] with §3 white space trimmed from both ends. */
+    fun trimWhiteSpace(name: String): String = name.trim { isWhiteSpace(it) }
+
+    /**
+     * §5.4 placeholders, dropped wherever the name was not typed by the user:
+     * hash forms (8 to 32 hex, with or without a leading `?` or a trailing
+     * `…`), "Retichat", "Retichat Web" and "Anonymous Peer", all
+     * case-insensitive, and the old web node defaults ([isWebNodeDefault]),
+     * surrounding white space (§3's) ignored. The migrations run the same
+     * rule in SQL ([com.newendian.retichat.data.db.NamesMigration.placeholderSql]);
+     * the JVM tests check both against the shared vectors.
      */
     fun isPlaceholder(name: String): Boolean {
-        val v = name.trim().lowercase()
-        return v in APP_PLACEHOLDERS || HASH_PLACEHOLDER.matches(v)
+        val t = trimWhiteSpace(name)
+        val v = t.lowercase()
+        return v in APP_PLACEHOLDERS || HASH_PLACEHOLDER.matches(v) || isWebNodeDefault(t)
     }
 
     /** "Retichat", "Retichat Web" and "Anonymous Peer", lowercased. */
     val APP_PLACEHOLDERS: List<String> = listOf("retichat", "retichat web", "anonymous peer")
 
     private val HASH_PLACEHOLDER = Regex("\\??[0-9a-f]{8,32}\u2026?")
+
+    /**
+     * §5.4: an old web node default, "Retichat Web (" + one or more
+     * characters + ")", ASCII case-insensitive, surrounding white space
+     * trimmed ("Retichat Web (retichat)", and as announced until 2026-09-23
+     * "Retichat Web (retichat) (0123456789ab)"). Nobody types one, so it is a
+     * placeholder even where a name may have been typed.
+     */
+    fun isWebNodeDefault(name: String): Boolean = WEB_NODE_DEFAULT.matches(asciiLower(trimWhiteSpace(name)))
+
+    private val WEB_NODE_DEFAULT = Regex("retichat web \\(.+\\)", RegexOption.DOT_MATCHES_ALL)
+
+    /**
+     * ASCII case folding only, as §5.4 asks: Kotlin's IGNORE_CASE is Unicode
+     * case folding (it would match a dotless ı to an i).
+     */
+    private fun asciiLower(s: String): String =
+        buildString(s.length) { s.forEach { append(if (it in 'A'..'Z') it + ('a' - 'A') else it) } }
+
+    /**
+     * §5.4: the old web announce suffix. Until 2026-09-23 the web announced
+     * every name as "<name> (<first 12 hex of the lxmf.delivery hash>)". A
+     * trailing " (" + 12 hex + ")" is stripped when, and only when, the 12 hex
+     * are the first 12 of [ownHash], the contact's own hash (ASCII
+     * case-insensitive), surrounding white space trimmed, with something
+     * before it; what is left is returned trimmed. One suffix, the last. Any
+     * other [name] is returned as it is. What is left meets the placeholder
+     * rules like any name ("Retichat (0123456789ab)" leaves a placeholder).
+     */
+    fun stripOwnHashSuffix(name: String, ownHash: String): String {
+        val prefix = ownHash.take(12)
+        if (!OWN_HASH_PREFIX.matches(prefix)) return name
+        val m = OWN_HASH_SUFFIX.matchEntire(trimWhiteSpace(name)) ?: return name
+        if (asciiLower(m.groupValues[2]) != asciiLower(prefix)) return name
+        return trimWhiteSpace(m.groupValues[1])
+    }
+
+    private val OWN_HASH_PREFIX = Regex("[0-9a-fA-F]{12}")
+    private val OWN_HASH_SUFFIX = Regex("(.+) \\(([0-9a-fA-F]{12})\\)", RegexOption.DOT_MATCHES_ALL)
 
     /** §4.1: the first 16 bytes of SHA-256 of the cleaned name (none hashes ""). */
     fun digest(name: String?): ByteArray =

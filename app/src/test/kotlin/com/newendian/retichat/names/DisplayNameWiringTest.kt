@@ -100,7 +100,9 @@ class DisplayNameWiringTest {
         assertTrue(accept.contains("onlyIfNone = !DisplayNames.recordsMessageTime(unverifiedReason)"))
         assertFalse(repo.contains("setMessageName("))
         // An announce carrying a name drops the legacy name.
-        assertTrue(repo.contains("DisplayNames.acceptAnnounceName(existing.announceName, displayName, existing.legacyName)"))
+        assertTrue(repo.contains("DisplayNames.acceptAnnounceName(existing.announceName, announced, existing.legacyName)"))
+        // §5.4: a received announce name loses the old web announce suffix first.
+        assertTrue(repo.contains("val announced = displayName?.let { DisplayNames.stripOwnHashSuffix(it, hex) }"))
         // Distro unwrap carries the name state and the signature result.
         val distro = src("service/RfedDistroClient.kt")
         assertTrue(distro.contains("\"display_name_state\"") && distro.contains("\"unverified_reason\""))

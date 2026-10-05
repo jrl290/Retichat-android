@@ -1972,7 +1972,9 @@ class ChatRepository(
         scope.launch(Dispatchers.IO) {
             val existing = contactDao.findByHash(hex)
             if (existing != null) {
-                when (val update = DisplayNames.acceptAnnounceName(existing.announceName, displayName, existing.legacyName)) {
+                // §5.4: an old web build can still announce "<name> (<12 hex>)".
+                val announced = displayName?.let { DisplayNames.stripOwnHashSuffix(it, hex) }
+                when (val update = DisplayNames.acceptAnnounceName(existing.announceName, announced, existing.legacyName)) {
                     NameUpdate.Unchanged -> Unit
                     is NameUpdate.Set -> {
                         contactDao.setAnnounceName(hex, update.name)

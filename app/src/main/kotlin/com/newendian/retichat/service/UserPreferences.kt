@@ -2,6 +2,7 @@ package com.newendian.retichat.service
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.newendian.retichat.names.DisplayNames
 
 /**
  * Shared preferences helper for user-facing settings that multiple
@@ -57,6 +58,9 @@ object UserPreferences {
      */
     private const val OLD_PLACEHOLDER_NAME = "Retichat"
 
+    /** The web's placeholder name (§5.4: it migrates to no name too). */
+    private const val OLD_WEB_PLACEHOLDER_NAME = "Retichat Web"
+
     private fun prefs(context: Context): SharedPreferences =
         context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
 
@@ -97,10 +101,15 @@ object UserPreferences {
         prefs(context).edit().putString(PREF_KEY_CHANNEL_DISPLAY_NAME, name).apply()
     }
 
-    /** §5.4: the pre-2026-09-27 display name as a Message Display Name. */
+    /**
+     * §5.4: the pre-2026-09-27 display name as a Message Display Name.
+     * Android's literal "Retichat", the web's "Retichat Web" and an old web
+     * node default become empty; white space is §3's.
+     */
     fun migratedMessageName(old: String?): String {
-        val trimmed = old.orEmpty().trim()
-        return if (trimmed == OLD_PLACEHOLDER_NAME) "" else trimmed
+        val trimmed = DisplayNames.trimWhiteSpace(old.orEmpty())
+        return if (trimmed == OLD_PLACEHOLDER_NAME || trimmed == OLD_WEB_PLACEHOLDER_NAME ||
+            DisplayNames.isWebNodeDefault(trimmed)) "" else trimmed
     }
 
     // ── Default TCP endpoint ──────────────────────────────────────────
