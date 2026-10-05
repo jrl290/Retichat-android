@@ -82,15 +82,17 @@ class ConversationViewModel(
     }
 
     fun send(content: String) {
-        if (content.isBlank()) return
+        val text = OutgoingText.of(content)
+        if (text.isEmpty()) return
         viewModelScope.launch {
-            repository.sendMessage(chatId, content)
+            repository.sendMessage(chatId, text)
         }
     }
 
     fun sendWithAttachment(content: String, filename: String, data: ByteArray) {
+        val text = OutgoingText.of(content)
         viewModelScope.launch {
-            repository.sendMessage(chatId, content, listOf(filename to data))
+            repository.sendMessage(chatId, text, listOf(filename to data))
         }
     }
 
