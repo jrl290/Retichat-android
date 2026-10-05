@@ -133,6 +133,17 @@ object DeliveryPolicy {
     }
 
     /**
+     * RFed SPEC §17.9: the private key a distro identity transfer on the
+     * device address carries (LXMF's custom pair with the transfer type), or
+     * null when [fields] carry none. It is offered only when the privacy
+     * filter lets its sender through ([allowlisted]), as the web offers it.
+     */
+    fun distroTransferKey(fields: LxmfFields): String? =
+        if (fields.getString(LxmfFields.FIELD_CUSTOM_TYPE) == LxmfFields.DISTRO_TRANSFER_TYPE) {
+            fields.getString(LxmfFields.FIELD_CUSTOM_DATA)
+        } else null
+
+    /**
      * RFed SPEC §17.11: a distro sent copy is addressed to the distro and
      * reaches a device only through the distro fan-out (RfedDistroClient),
      * never on the device's own address. One that arrives there is forged or

@@ -1378,14 +1378,9 @@ class ChatRepository(
         val groupId = fields.group(GroupEntry.ID)
         Log.i(TAG, "onMessageReceived: src=${srcHash.toHex().take(16)}, groupId=$groupId, content='${content.take(40)}'")
         // A distro identity transfer from another of our devices (RFed SPEC §17.9):
-        // LXMF's custom pair with our type string; not a message to display —
-        // offer to import it. Checked before anything else, as the web client does.
-        if (fields.getString(LxmfFields.FIELD_CUSTOM_TYPE) == LxmfFields.DISTRO_TRANSFER_TYPE) {
-            fields.getString(LxmfFields.FIELD_CUSTOM_DATA)?.let { keyHex ->
-                RfedDistroClient.offerTransfer(srcHash.toHex(), keyHex)
-                return
-            }
-        }
+        // LXMF's custom pair with our type string; not a message to display.
+        // Offered below only when the privacy filter lets its sender through.
+        val transferKey = DeliveryPolicy.distroTransferKey(fields)
         // RFed SPEC §17.11: a distro sent copy reaches this device only through
         // the distro fan-out (RfedDistroClient), never on its own address.
         // Dropped first, whoever sent it and filter on or off, as iOS and the
@@ -1399,6 +1394,19 @@ class ChatRepository(
         scope.launch(Dispatchers.IO) {
             val srcHex = srcHash.toHex()
             val msgId = hash.toHex()
+
+            // A transfer is offered only from a sender the privacy filter lets
+            // through, as the web offers it (James, 2026-10-05), whatever else
+            // it carries; it is never a message. Until 2026-10-05 it was offered
+            // from anyone.
+            if (transferKey != null) {
+                if (allowlisted(srcHex)) {
+                    RfedDistroClient.offerTransfer(srcHex, transferKey)
+                } else {
+                    Log.i(TAG, "onMessageReceived: DROPPED distro identity transfer from ${srcHex.take(8)}: the privacy filter does not let it through")
+                }
+                return@launch
+            }
 
             // The privacy filter and the group rule (DeliveryPolicy), before
             // any write, so a stranger leaves nothing behind. The source is
