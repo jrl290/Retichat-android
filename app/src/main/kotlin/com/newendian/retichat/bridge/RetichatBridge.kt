@@ -60,7 +60,8 @@ interface RfedBlobCallback {
  * background thread already attached to the JVM — marshal to a coroutine
  * scope inside `onStatus` if you need to touch UI state.
  *
- * `status` is one of [RetichatBridge.AppLinkStatus] constants.
+ * `status` is one of [RetichatBridge.AppLinkStatus] constants, which include
+ * the event RECOVERED: a handler that acts on ACTIVE alone is unaffected by it.
  */
 @Keep
 interface AppLinkStatusCallback {
@@ -94,9 +95,10 @@ interface AppLinkSendCallback {
 /**
  * Every APP_LINK status change, with the link it is about: [RetichatBridge.propagationLinkEventsRegister].
  * `status` is a [RetichatBridge.AppLinkStatus]; `linkId` is the link's id for
- * ESTABLISHING and ACTIVE (a new link's establishment is its ACTIVE) and null
- * for the rest. Fires on a Rust thread already attached to the JVM and must
- * not block: hand the work to a coroutine and return.
+ * ESTABLISHING, ACTIVE (a new link's establishment is its ACTIVE) and
+ * RECOVERED (a STALE link heard from its peer again) and null for the rest.
+ * Fires on a Rust thread already attached to the JVM and must not block: hand
+ * the work to a coroutine and return.
  */
 @Keep
 interface PropagationLinkCallback {
@@ -782,13 +784,27 @@ object RetichatBridge {
     // request-suspends-until-ACTIVE) lives in ConnectionStateManager.
     // -------------------------------------------------------------------
 
-    /** APP_LINK lifecycle states — mirror of `lxmf_rust::ffi::AppLinkStatus`. */
+    /**
+     * APP_LINK statuses — mirror of app-links' `APP_LINK_*`: the lifecycle states
+     * (NONE .. DISCONNECTED, what [appLinkStatus] returns) and one event,
+     * [RECOVERED].
+     */
     object AppLinkStatus {
         const val NONE           = 0
         const val PATH_REQUESTED = 1
         const val ESTABLISHING   = 2
         const val ACTIVE         = 3
         const val DISCONNECTED   = 4
+
+        /**
+         * An event, never a state (app-links `APP_LINK_RECOVERED`, 0x05): the
+         * persistent link held for the destination had gone STALE and heard
+         * from its peer again, so it is ACTIVE once more. It is told once per
+         * recovery, with the link's id, and only for the link AppLinks still
+         * holds. [appLinkStatus] never returns it (it reads ACTIVE), and a
+         * handler that looks only for ACTIVE ignores it.
+         */
+        const val RECOVERED      = 5
     }
 
     /** Result codes for [appLinkRequestAsync] callbacks. */

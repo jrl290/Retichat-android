@@ -40,6 +40,21 @@ class PropagationJniContractTest {
     }
 
     @Test
+    fun aRecoveredStatusIsToldWithItsLinkAndEveryDocListsIt() {
+        // The event is told as every other status is: the JNI relays the code unchanged, and the link's
+        // id whenever AppLinks reports one (it does for ESTABLISHING, ACTIVE and RECOVERED).
+        val events = rust.substring(rust.indexOf("fn Java_com_newendian_retichat_bridge_RetichatBridge_nativePropagationLinkEventsRegister("))
+        val relay = events.substring(0, events.indexOf("// RTNode over Bluetooth"))
+        assertTrue(relay.contains("JValue::Int(status as jint)"))
+        assertTrue(relay.contains("Some(link) => match env.byte_array_from_slice(&link.link_id())"))
+        // The code is app-links' APP_LINK_RECOVERED (a Rust test of the JNI crate pins the 5 to the crate's own constant).
+        assertTrue(bridge.contains("const val RECOVERED      = 5"))
+        // The docs that list the statuses list it, so nobody reads 0..4 as all there is.
+        assertTrue(rust.contains("4 disconnected, 5 recovered"))
+        assertTrue(bridge.contains("RECOVERED (a STALE link heard from its peer again)"))
+    }
+
+    @Test
     fun r8KeepsTheNewCallbacksAndTheirImplementations() {
         for (callback in listOf("PropagationLinkCallback", "PropagationUploadCallback")) {
             assertTrue(callback, rules.contains("-keep interface com.newendian.retichat.bridge.$callback { *; }"))

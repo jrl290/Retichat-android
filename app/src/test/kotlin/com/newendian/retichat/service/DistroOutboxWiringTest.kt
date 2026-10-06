@@ -1,5 +1,6 @@
 package com.newendian.retichat.service
 
+import com.newendian.retichat.bridge.RetichatBridge
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -135,7 +136,7 @@ class DistroOutboxWiringTest {
     }
 
     @Test
-    fun theRuntimeStartsNoLinkAndOnlyAnEstablishmentOrTheStartUpCheckFlushes() {
+    fun theRuntimeStartsNoLinkAndOnlyALinksComingUpFlushes() {
         // It never opens or reopens the propagation link.
         assertFalse(runtime.contains("appLinkOpen"))
         assertFalse(runtime.contains("appLinkReopen"))
@@ -143,10 +144,35 @@ class DistroOutboxWiringTest {
         assertFalse(runtime.contains("selectPropagationNode"))
         // onLinkEstablished: the link callback's ACTIVE event and the check at start, nothing else.
         assertEquals(2, Regex("onLinkEstablished\\(").findAll(runtime).count())
-        // A STALE link's recovery is not observable; it is not called from anywhere in the app.
-        assertEquals(0, Regex("onLinkRecovered\\(").findAll(runtime).count())
+        // onLinkRecovered: the link callback's RECOVERED event (a STALE link that heard the node
+        // again), nothing else: no clock, no poll of the link.
+        assertEquals(1, Regex("onLinkRecovered\\(").findAll(runtime).count())
         // Its one delay is the §1 watch, which only logs.
         assertEquals(1, Regex("\\bdelay\\(").findAll(runtime).count())
         assertTrue(body(runtime, "delay(DistroOutbox.PROOF_LIVE_MS + 1)", "return UploadLeft(").contains("Log.e("))
+    }
+
+    @Test
+    fun aStaleLinksRecoveryIsTheLinkCallbacksRecoveredEventForTheNodesLinkOnly() {
+        val callback = body(runtime, "private val linkCallback = object : PropagationLinkCallback {", "// ---- What the user's actions owe ----")
+        // The same guards for both events: only the propagation node's link, and only with the link's id.
+        assertTrue(callback.contains("if (!destHash.contentEquals(node)) return"))
+        assertTrue(callback.contains("val id = linkId?.takeIf { it.isNotEmpty() }?.toHex()"))
+        // An establishment is ACTIVE; a STALE link's recovery is RECOVERED. Each is its own coming-up.
+        assertTrue(callback.contains("status == RetichatBridge.AppLinkStatus.ACTIVE && id != null"))
+        assertTrue(callback.contains("scope.launch { outbox.onLinkEstablished(id) }"))
+        assertTrue(callback.contains("status == RetichatBridge.AppLinkStatus.RECOVERED && id != null"))
+        assertTrue(callback.contains("scope.launch { outbox.onLinkRecovered(id) }"))
+        // Neither runs on the Rust thread that told it, and nothing in the callback waits or delays.
+        assertFalse(callback.contains("runBlocking"))
+        assertFalse(callback.contains("delay("))
+        // The status is AppLinks' own code 5, which no state of the link reuses.
+        val codes = listOf(
+            RetichatBridge.AppLinkStatus.NONE, RetichatBridge.AppLinkStatus.PATH_REQUESTED,
+            RetichatBridge.AppLinkStatus.ESTABLISHING, RetichatBridge.AppLinkStatus.ACTIVE,
+            RetichatBridge.AppLinkStatus.DISCONNECTED, RetichatBridge.AppLinkStatus.RECOVERED,
+        )
+        assertEquals(5, RetichatBridge.AppLinkStatus.RECOVERED)
+        assertEquals(codes.size, codes.toSet().size)
     }
 }

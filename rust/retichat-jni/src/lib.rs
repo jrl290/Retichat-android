@@ -1917,6 +1917,9 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeA
 /// ```kotlin
 /// interface AppLinkStatusCallback { fun onStatus(destHash: ByteArray, status: Int) }
 /// ```
+/// `status` is an `APP_LINK_*` code of app-links: 0 none .. 4 disconnected, and
+/// the event 5 recovered (a STALE link heard from its peer again; a handler that
+/// acts on ACTIVE alone ignores it).
 /// Replaces any previously registered callback (last register wins on
 /// the Kotlin side; the underlying Rust registry can hold multiple, but
 /// we only need one process-wide fan-out).
@@ -2714,10 +2717,14 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeP
 /// Register a second AppLinks status callback that also says which link an
 /// event is about: `callback.onLink(destHash, status, linkId)` for every status
 /// change of every app-link (0 none, 1 path requested, 2 establishing, 3 ACTIVE,
-/// 4 disconnected), with the link's id for establishing and ACTIVE and null
-/// otherwise. A new propagation link's establishment is its ACTIVE event.
-/// The existing `nativeAppLinkRegisterStatusCallback` is left as it is. The
-/// stack's shutdown drops every callback, so register again after each start.
+/// 4 disconnected, 5 recovered), with the link's id for establishing, ACTIVE and
+/// recovered and null otherwise. A new propagation link's establishment is its
+/// ACTIVE event; a STALE link's recovery (it heard from its peer again) is its
+/// RECOVERED event, an event only (`AppLinks::status` never returns it), told
+/// once per recovery and only for the link AppLinks still holds.
+/// The existing `nativeAppLinkRegisterStatusCallback` is left as it is and is
+/// told the same statuses. The stack's shutdown drops every callback, so
+/// register again after each start.
 #[no_mangle]
 pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativePropagationLinkEventsRegister(
     env: JNIEnv,

@@ -39,17 +39,19 @@ import java.util.concurrent.atomic.AtomicBoolean
  * for the propagation node ([PropagationSync] and the send paths set the node
  * and open it), and what is owed waits for that link to come up.
  *
- * What the stack does not tell us: a STALE propagation link that recovers
- * because the node is heard on it again (James's second coming-up, 2026-10-03).
- * Reticulum-rust's `Link::receive` makes a STALE link ACTIVE again with no
- * callback (link.rs, "Mark active if stale"), and AppLinks reports no status for
- * it, so [DistroOutbox.onLinkRecovered], which is ready and tested, is not called
- * from here: nothing in this process can hear it without polling the link, which
- * DESIGN_PRINCIPLES §1 and §3 forbid. It needs a recovered callback on
- * `LinkHandle` that AppLinks reports, a change to the shared crates. (A held
- * STALE link is replaced by a new one when the node announces, and a link that
- * times out is re-opened: both are establishments, and both are observed.) Until
- * then, what is owed when a STALE link recovers waits for the next establishment.
+ * The link comes up in two ways (James, 2026-10-03), and both are events the
+ * stack tells, never read by polling (DESIGN_PRINCIPLES §1 and §3): a new link's
+ * establishment (AppLinks' ACTIVE, [DistroOutbox.onLinkEstablished]), and a STALE
+ * link's recovery because the node is heard on it again (AppLinks' RECOVERED,
+ * [DistroOutbox.onLinkRecovered]). The reference's `Link.__receive` makes a STALE
+ * link ACTIVE again and tells no one; Reticulum-rust's `link_recovered` callback
+ * (an API extension, PARITY-AUDIT-1.5.2.md A34) tells AppLinks, which reports
+ * RECOVERED with the link's id, for the link it still holds. Until that was wired
+ * (2026-10-06) what was owed when a STALE link recovered waited for the next
+ * establishment (about 35 s on staging). A held STALE link that is replaced by a
+ * new one, or that times out and is re-opened, is an establishment as before; the
+ * outbox itself runs a recovery only while that link is still the propagation
+ * link ([DistroOutbox.onLinkRecovered]).
  */
 object DistroOutboxRuntime {
     private const val TAG = "DistroOutbox"
@@ -135,6 +137,11 @@ object DistroOutboxRuntime {
             if (status == RetichatBridge.AppLinkStatus.ACTIVE && id != null) {
                 val outbox = box ?: return
                 scope.launch { outbox.onLinkEstablished(id) }
+            }
+            // A STALE propagation link that heard the node again is up again: its RECOVERED event.
+            if (status == RetichatBridge.AppLinkStatus.RECOVERED && id != null) {
+                val outbox = box ?: return
+                scope.launch { outbox.onLinkRecovered(id) }
             }
         }
     }

@@ -457,4 +457,24 @@ mod tests {
             Value::Array(vec![Value::F64(1_767_225_600.25), Value::Array(vec![Value::Binary(b"abc".to_vec())])])
         );
     }
+
+    /// The JNI relays the status byte of every app-link event as AppLinks reports it, and Kotlin's
+    /// `RetichatBridge.AppLinkStatus` must be the same numbers: the states 0..4 and the event
+    /// RECOVERED (5), which is how a STALE propagation link's recovery reaches the outbox.
+    #[test]
+    fn kotlins_app_link_statuses_are_app_links_own() {
+        let kotlin = include_str!("../../../app/src/main/kotlin/com/newendian/retichat/bridge/RetichatBridge.kt");
+        for (name, code) in [
+            ("NONE", app_links::APP_LINK_NONE),
+            ("PATH_REQUESTED", app_links::APP_LINK_PATH_REQUESTED),
+            ("ESTABLISHING", app_links::APP_LINK_ESTABLISHING),
+            ("ACTIVE", app_links::APP_LINK_ACTIVE),
+            ("DISCONNECTED", app_links::APP_LINK_DISCONNECTED),
+            ("RECOVERED", app_links::APP_LINK_RECOVERED),
+        ] {
+            let declaration = format!("const val {name:<14} = {code}");
+            assert!(kotlin.contains(&declaration), "Kotlin lacks `{declaration}`");
+        }
+        assert_eq!(app_links::APP_LINK_RECOVERED, 5);
+    }
 }
