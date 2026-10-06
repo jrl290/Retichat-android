@@ -40,11 +40,16 @@ import java.util.concurrent.atomic.AtomicBoolean
  * and open it), and what is owed waits for that link to come up.
  *
  * What the stack does not tell us: a STALE propagation link that recovers
- * because the node is heard on it again. Reticulum-rust's `Link::receive` makes
- * it ACTIVE again with no callback, and AppLinks reports no status for it, so
- * [DistroOutbox.onLinkRecovered] is not called from here. (A held STALE link is
- * replaced by a new one when the node announces: that is an establishment, and
- * it is observed.) See the outstanding item in the report on this work.
+ * because the node is heard on it again (James's second coming-up, 2026-10-03).
+ * Reticulum-rust's `Link::receive` makes a STALE link ACTIVE again with no
+ * callback (link.rs, "Mark active if stale"), and AppLinks reports no status for
+ * it, so [DistroOutbox.onLinkRecovered], which is ready and tested, is not called
+ * from here: nothing in this process can hear it without polling the link, which
+ * DESIGN_PRINCIPLES §1 and §3 forbid. It needs a recovered callback on
+ * `LinkHandle` that AppLinks reports, a change to the shared crates. (A held
+ * STALE link is replaced by a new one when the node announces, and a link that
+ * times out is re-opened: both are establishments, and both are observed.) Until
+ * then, what is owed when a STALE link recovers waits for the next establishment.
  */
 object DistroOutboxRuntime {
     private const val TAG = "DistroOutbox"
