@@ -316,6 +316,12 @@ object StackRuntime {
         // first wave of sends fail with "APP_LINK not ACTIVE".
         ConnectionStateManager.register(app, routerHandle)
 
+        // What this device owes its distro (RFed SPEC §17.12, §17.11): load what a previous run
+        // left owed and listen for the propagation link, whose coming-up uploads it. The link is
+        // the router's, opened by the sync and the send paths: this never starts it.
+        runCatching { DistroOutboxRuntime.start(app) }
+            .onFailure { Log.e(TAG, "DistroOutboxRuntime.start failed", it) }
+
         // The live route RFed pushes this device's messages on, proved per
         // push; without it RFed can reach a running app only by FCM push.
         runCatching { PropagationStream.start(app, routerHandle, identityHandle, selfDestHash) }
@@ -386,6 +392,8 @@ object StackRuntime {
         readyDeferred = null
         // The next start registers the distro again (the node may have changed).
         RfedDistroClient.onStackStopped()
+        // No proof can come for an upload still open: each is decided not proved, and nothing is sent.
+        DistroOutboxRuntime.stop()
 
         ConnectionStateManager.unregister()
 

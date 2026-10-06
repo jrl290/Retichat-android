@@ -12,6 +12,7 @@ import com.newendian.retichat.bridge.GroupEntry
 import com.newendian.retichat.bridge.LxmfFields
 import com.newendian.retichat.service.DistroCodec
 import com.newendian.retichat.service.DistroManager
+import com.newendian.retichat.service.DistroOutboxRuntime
 import com.newendian.retichat.service.RfedDistroClient
 import com.newendian.retichat.bridge.RetichatBridge
 import com.newendian.retichat.service.GroupChatManager
@@ -105,7 +106,6 @@ class ChatRepository(
 
     fun onMessageState(hash: ByteArray, state: Int) {
         val hashHex = hash.toHex()
-        if (finishSentCopy(hashHex, state)) return
         if (state == RetichatBridge.MessageState.DELIVERED) {
             deliveryTargets.take(hashHex)?.let { target ->
                 scope.launch(Dispatchers.IO) { recordDelivered(target) }
@@ -982,7 +982,7 @@ class ChatRepository(
         localId: String,
         directHandle: Long,
         createCopy: () -> Long,
-        onSent: () -> Unit = {},
+        onSent: suspend () -> Unit = {},
     ) {
         try {
             val current = messageDao.findById(localId) ?: return
@@ -1154,98 +1154,30 @@ class ChatRepository(
         return nodeHash
     }
 
-    /** §17.11 sent-copies in flight, by LXMF hash hex, until a terminal state. */
-    private val sentCopyHandles = java.util.concurrent.ConcurrentHashMap<String, Long>()
-
     /**
      * RFed SPEC §17.11 "Sent-message sync": after the user's message to
      * [recipient] went out as the distro ([sentAs] is the source it actually
-     * used), send the distro one copy so every sibling device can file it as
+     * used), owe the distro one copy so every sibling device can file it as
      * sent. Destination and source are the distro, signed with its key; text
      * only (attachments are not copied); 0xFB/0xFC/0xFD carry the marker, the
      * recipient and this device's own address, so this device recognises and
-     * drops its own echo of the fan-out. PROPAGATED at once, because only
-     * RFed answers for the distro address. iOS counterpart: ChatRepository.swift.
+     * drops its own echo of the fan-out. PROPAGATED, because only RFed answers
+     * for the distro address. iOS counterpart: ChatRepository.swift.
      *
-     * Fire-and-forget: no bubble, and the copy never touches the user's
-     * message state. Its outcome arrives through [onMessageState] and is
-     * only logged, so a failed copy is visible without a retry (§3).
+     * The copy is packed and signed once, here, and kept in the distro outbox
+     * until the propagation node proves it ([DistroOutboxRuntime.oweSentCopy],
+     * "The phones' outbox"): uploaded at once when the propagation link is up,
+     * otherwise when it comes up, and again when it next comes up after an
+     * upload that was not proved (James's decided exception, 2026-10-03). Until
+     * then it handed the copy to the LXMF router once and kept nothing, so one
+     * whose upload was not proved, or that was made while no propagation link
+     * could be had, was lost. No bubble, and the copy never touches the user's
+     * message state.
      */
-    private fun sendDistroSentCopy(recipient: ByteArray, sentAs: ByteArray, title: String, content: String) {
+    private suspend fun sendDistroSentCopy(recipient: ByteArray, sentAs: ByteArray, title: String, content: String) {
         val recipientHex = recipient.toHex()
         if (!DistroCodec.shouldSendSentCopy(sentAs.toHex(), DistroManager.deliveryHashHex, recipientHex)) return
-        val distro = DistroManager.deliveryHash ?: return
-        val distroHandle = DistroManager.identityHandle
-        val deviceHex = selfDestHash.toHex()
-        if (distroHandle == 0L || !DistroCodec.isHex32(deviceHex)) {
-            Log.w(TAG, "sent-copy: distro or device identity gone — no copy for ${recipientHex.take(8)}")
-            return
-        }
-        // The router encrypts to the distro by recalling its public key. We
-        // hold that key, so remember it rather than depend on having heard
-        // RFed's announce of our own distro (§5: readiness before the send).
-        if (!RetichatBridge.transportIdentityKnown(distro)) {
-            val pub = RetichatBridge.identityPublicKey(distroHandle)
-            if (pub == null || !RetichatBridge.identityRememberLxmfDelivery(distro, pub)) {
-                Log.e(TAG, "sent-copy: could not remember the distro's key: ${RetichatBridge.lastError()}")
-                return
-            }
-        }
-        selectPropagationNode() ?: return
-        val h = RetichatBridge.messageCreate(
-            destHash = distro,
-            srcHash = distro,
-            content = content,
-            title = title,
-            method = RetichatBridge.DeliveryMethod.PROPAGATED,
-            identityHandle = distroHandle,
-        )
-        if (h == 0L) {
-            Log.e(TAG, "sent-copy: messageCreate failed: ${RetichatBridge.lastError()}")
-            return
-        }
-        val marked =
-            RetichatBridge.messageAddFieldString(h, LxmfFields.FIELD_CUSTOM_TYPE, LxmfFields.DISTRO_SENT_TYPE) &&
-            RetichatBridge.messageAddFieldString(h, LxmfFields.FIELD_CUSTOM_DATA, recipientHex) &&
-            RetichatBridge.messageAddFieldString(h, LxmfFields.FIELD_CUSTOM_META, deviceHex)
-        if (!marked) {
-            Log.e(TAG, "sent-copy: marking fields failed: ${RetichatBridge.lastError()}")
-            RetichatBridge.messageDestroy(h)
-            return
-        }
-        if (!RetichatBridge.messageSendViaAppLinks(h)) {
-            Log.e(TAG, "sent-copy: messageSendViaAppLinks failed: ${RetichatBridge.lastError()}")
-            RetichatBridge.messageDestroy(h)
-            return
-        }
-        val hash = RetichatBridge.messageGetHash(h)?.toHex()
-        if (hash == null) {
-            Log.w(TAG, "sent-copy for ${recipientHex.take(8)} submitted without a hash — its outcome will not be logged")
-            RetichatBridge.messageDestroy(h)
-            return
-        }
-        Log.i(TAG, "sent-copy for ${recipientHex.take(8)} submitted (${hash.take(16)})")
-        sentCopyHandles[hash] = h
-        // A state that landed before the entry above had nobody listening.
-        finishSentCopy(hash, RetichatBridge.messageGetState(h))
-    }
-
-    /**
-     * Log a §17.11 sent-copy's terminal state and release its handle.
-     * Returns true when [hashHex] is a sent-copy, so other state consumers
-     * skip it.
-     */
-    private fun finishSentCopy(hashHex: String, state: Int): Boolean {
-        if (!sentCopyHandles.containsKey(hashHex)) return false
-        if (!isTerminalState(state)) return true
-        val handle = sentCopyHandles.remove(hashHex) ?: return true
-        if (isSuccessState(state)) {
-            Log.i(TAG, "sent-copy ${hashHex.take(16)} accepted (state=$state)")
-        } else {
-            Log.w(TAG, "sent-copy ${hashHex.take(16)} ended in state=$state — sibling devices will not see this message")
-        }
-        RetichatBridge.messageDestroy(handle)
-        return true
+        DistroOutboxRuntime.oweSentCopy(appContext, recipient, title, content)
     }
 
     private suspend fun sendGroupMessage(
