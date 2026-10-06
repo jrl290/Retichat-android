@@ -589,12 +589,23 @@ class RfedChannelClient(
             val identityHandle = StackRuntime.identityHandle
             if (identityHandle == 0L) return@withLock false
 
-            val ownHashHex = StackRuntime.selfDestHash.toHex()
+            // RFed-spec/Channel.md "Distro holders" (James, 2026-10-03): a post
+            // is signed by the posting identity, the distro when this device
+            // holds one (as a DM is, DistroManager.sendingIdentity), otherwise
+            // the device: its source, the key in its prelude and its signature
+            // are that identity's, so readers see one sender for all of the
+            // user's devices. Decided once, here: the record, the echo id, the
+            // packing and the name state all take this one. Subscribing, the
+            // stream, pulls and push registrations stay the device's
+            // (`identityHandle`): RFed keys all of them by subscriber hash.
+            val (postingHash, postingHandle) =
+                DistroManager.sendingIdentity(StackRuntime.selfDestHash, identityHandle)
+            val postingHex = postingHash.toHex()
             val optimisticId = "pending|${System.nanoTime()}"
             val optimistic = ChannelMessageEntity(
                 id = optimisticId,
                 channelId = channel.id,
-                sourceHashHex = ownHashHex,
+                sourceHashHex = postingHex,
                 title = "",
                 content = content,
                 timestamp = System.currentTimeMillis(),
@@ -620,9 +631,9 @@ class RfedChannelClient(
                 // DISPLAY_NAMES.md §4.2: whether this post carries the
                 // Channel Display Name, decided once for the post (the retry
                 // below sends the same decision).
-                val postName = withContext(Dispatchers.IO) { channelPostName(channel.id, ownHashHex) }
+                val postName = withContext(Dispatchers.IO) { channelPostName(channel.id, postingHex) }
 
-                if (trySend(liveChannel, content, optimisticId, ownHashHex, identityHandle, postName)) {
+                if (trySend(liveChannel, content, optimisticId, postingHex, postingHandle, postName)) {
                     return@withLock true
                 }
 
@@ -636,7 +647,7 @@ class RfedChannelClient(
                     .onFailure {
                         Log.w(TAG, "stampCost refresh on retry failed: ${it.message}")
                     }
-                if (!trySend(liveChannel, content, optimisticId, ownHashHex, identityHandle, postName)) {
+                if (!trySend(liveChannel, content, optimisticId, postingHex, postingHandle, postName)) {
                     Log.w(TAG, "SEND failed twice — marking optimistic row FAILED for user retry")
                     channelDao.updateMessageSendState(
                         optimisticId,
@@ -675,10 +686,7 @@ class RfedChannelClient(
      */
     private suspend fun channelPostName(channelId: String, postingHex: String): NameField {
         adoptLegacyNameState()
-        val stored = UserPreferences.getChannelDisplayName(appContext)
-        // Stored cleaned since 2026-09-27; clean again for a value saved before.
-        val name = stored.takeIf { it.isNotEmpty() }?.let { DisplayNameSettings.clean(it, DisplayNameSettings.Kind.CHANNEL) }
-            ?.takeIf { it.isNotEmpty() }
+        val name = ownChannelName()
         val state = channelDao.nameState(channelId, postingHex)
         val newSender = state != null && channelDao.countSendersSeenAfter(channelId, state.lastIncludedAt) > 0
         return DisplayNames.channelPostName(
@@ -688,6 +696,30 @@ class RfedChannelClient(
             newSenderSinceInclude = newSender,
             nowMs = System.currentTimeMillis(),
         )
+    }
+
+    /** This device's Channel Display Name, cleaned, or null while it is unset (§4.2). */
+    private fun ownChannelName(): String? {
+        val stored = UserPreferences.getChannelDisplayName(appContext)
+        // Stored cleaned since 2026-09-27; clean again for a value saved before.
+        return stored.takeIf { it.isNotEmpty() }?.let { DisplayNameSettings.clean(it, DisplayNameSettings.Kind.CHANNEL) }
+            ?.takeIf { it.isNotEmpty() }
+    }
+
+    /**
+     * §4.2 "Learning from the channel": a post this device received in
+     * [channelId] from its current posting identity [postingHex], key binding
+     * and signature passed, with 0xD1 [field] and the post's time [postAtMs].
+     * What it carries is recorded only when it is the value this device would
+     * send now ([DisplayNames.learnedPostName]); a name it does not hold is
+     * never recorded, so its own clear never follows a sibling's name.
+     */
+    private suspend fun learnPostName(channelId: String, postingHex: String, field: NameField, postAtMs: Long) {
+        adoptLegacyNameState()
+        val state = channelDao.nameState(channelId, postingHex)
+        val learned = DisplayNames.learnedPostName(ownChannelName(), field, postAtMs, state?.lastIncludedAt)
+            ?: return
+        channelDao.upsertNameState(ChannelNameStateEntity(channelId, postingHex, learned.digestHex, learned.at))
     }
 
     /** The post carrying [postName] was handed to RFed: remember what the readers got (§4.2). */
@@ -720,12 +752,12 @@ class RfedChannelClient(
         channel: ChannelEntity,
         content: String,
         optimisticId: String,
-        ownHashHex: String,
-        identityHandle: Long,
+        postingHex: String,
+        postingHandle: Long,
         postName: NameField,
     ): Boolean = withContext(Dispatchers.IO) {
         val packed = RetichatBridge.channelLxmPack(
-            channel.channelName, identityHandle, content.toByteArray(), ByteArray(0), postName,
+            channel.channelName, postingHandle, content.toByteArray(), ByteArray(0), postName,
         ) ?: run {
             Log.w(TAG, "LXMF pack failed: ${RetichatBridge.lastError()}")
             return@withContext false
@@ -771,16 +803,16 @@ class RfedChannelClient(
             return@withContext false
         }
         Log.i(TAG, "SEND ok: channel='${channel.channelName}' id=${channel.id} rfedDest=${rfedChannelDest.toHex()} payload=${finalPayload.size}B stamp=${(channel.stampCost ?: 0)} name=${postName.state}")
-        recordPostName(channel.id, ownHashHex, postName)
+        recordPostName(channel.id, postingHex, postName)
 
         // Upgrade optimistic row → canonical id (same as echo will use)
-        val canonicalId = canonicalMessageId(ownHashHex, tsMs)
+        val canonicalId = canonicalMessageId(postingHex, tsMs)
         // Drop optimistic row, insert canonical (Room can't change PK directly)
         channelDao.upsertMessage(
             ChannelMessageEntity(
                 id = canonicalId,
                 channelId = channel.id,
-                sourceHashHex = ownHashHex,
+                sourceHashHex = postingHex,
                 title = "",
                 content = content,
                 timestamp = tsMs,
@@ -972,7 +1004,28 @@ class RfedChannelClient(
             val msgId = canonicalMessageId(sourceHashHex, result.timestampMs)
             if (channelDao.messageExists(channelHashHex, msgId) > 0) return@withContext
 
-            val isOutbound = sourceHashHex.equals(StackRuntime.selfDestHash.toHex(), ignoreCase = true)
+            // RFed-spec/Channel.md "Own posts": a post is the user's own when
+            // its source is this device's lxmf.delivery hash or the hash of
+            // the distro this device holds now, whichever of the user's
+            // devices sent it. It is stored and shown as outgoing, SENT (it
+            // came from RFed, so RFed has it; a channel post has no per-reader
+            // confirmation, so never DELIVERED), never notified, never counted
+            // as a sender seen in the channel. A device that gave up its
+            // distro no longer holds it: that distro's later posts are another
+            // poster's to it.
+            val deviceHex = StackRuntime.selfDestHash.toHex()
+            val distroHex = DistroManager.deliveryHashHex
+            val isOutbound = DistroCodec.isOwnChannelPost(sourceHashHex, deviceHex, distroHex)
+            // DISPLAY_NAMES.md §4.2 "Learning from the channel": a post from
+            // the current posting identity (the echo of this device's own
+            // post, or one a sibling signed with the same distro), after the
+            // key binding and signature passed, tells this device what readers
+            // last got from it, but only a value equal to the one it would
+            // send itself.
+            val postingHex = DistroCodec.postingHex(deviceHex, distroHex)
+            if (isOutbound && sourceHashHex.equals(postingHex, ignoreCase = true)) {
+                learnPostName(channelHashHex, postingHex, result.displayName, result.timestampMs)
+            }
             // DISPLAY_NAMES.md §4.2 / §5.1: the poster is seen in this channel,
             // and its 0xD1 (reported only after the key binding and signature
             // checks) sets or clears its channel name here. Never the
@@ -990,6 +1043,7 @@ class RfedChannelClient(
                     timestamp = result.timestampMs,
                     isOutbound = isOutbound,
                     signatureValidated = true,
+                    sendState = ChannelMessageEntity.SEND_STATE_SENT,
                 )
             )
             channelDao.bumpLastMessageTime(channelHashHex, result.timestampMs)

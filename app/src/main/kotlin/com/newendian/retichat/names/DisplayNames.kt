@@ -338,5 +338,39 @@ object DisplayNames {
         return if (include) NameField.Name(current) else NameField.Absent
     }
 
+    /** What a received post teaches the send rule: the digest to record as the last one included, and its time. */
+    data class LearnedPostName(val digestHex: String, val at: Long)
+
+    /**
+     * §4.2 "Learning from the channel" (narrowed 2026-10-03). A post this
+     * device received in a channel from its current posting identity (the
+     * echo of its own post, or one a sibling device signed with the same
+     * distro), after the key binding and the signature passed, carries
+     * [field], key 0 of its 0xD1, and was made at [postAtMs]. It is recorded,
+     * as what readers last got and when, only when it is later than
+     * [lastIncludedAt] (null when nothing is recorded) and its value is the
+     * one this device would send itself now:
+     *  - `Name(s)` where `s` is this device's Channel Display Name [ownName]
+     *    (the same digest), or
+     *  - `Clear` while [ownName] is unset.
+     * Any other post teaches nothing: one with no key 0, a name other than
+     * this device's, a name while this device has none, a clear while it has
+     * one. A device never records, and so never clears, a name it does not
+     * hold: with no name it would otherwise learn a sibling's and clear it on
+     * its next post, after each of the sibling's posts; two devices with
+     * different names would each find the other's recorded and include their
+     * own on every post. Returns null when nothing is learned.
+     */
+    fun learnedPostName(ownName: String?, field: NameField, postAtMs: Long, lastIncludedAt: Long?): LearnedPostName? {
+        if (postAtMs <= (lastIncludedAt ?: 0L)) return null
+        val own = ownName.nonEmpty()
+        val digest = if (own != null) {
+            if (field is NameField.Name && digestHex(field.name) == digestHex(own)) digestHex(own) else null
+        } else {
+            if (field is NameField.Clear) EMPTY_DIGEST_HEX else null
+        }
+        return digest?.let { LearnedPostName(it, postAtMs) }
+    }
+
     private fun String?.nonEmpty(): String? = this?.takeIf { it.isNotEmpty() }
 }

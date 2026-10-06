@@ -200,6 +200,30 @@ object DistroCodec {
         return SentCopy.Store(sentTo!!)
     }
 
+    /**
+     * RFed-spec/Channel.md "Distro holders": the hash the device signs its
+     * channel posts with, its posting identity. The distro's `lxmf.delivery`
+     * hash when the device holds one ([distroHex]), otherwise the device's own
+     * ([deviceHex]). Subscribing, the stream, pulls and push registrations are
+     * the device's whichever it is.
+     */
+    fun postingHex(deviceHex: String, distroHex: String?): String =
+        distroHex?.takeIf { it.isNotEmpty() } ?: deviceHex
+
+    /**
+     * RFed-spec/Channel.md "Own posts": a received channel post is the user's
+     * own when its source is this device's `lxmf.delivery` hash or the hash of
+     * the distro this device holds now ([distroHex], null when none), whichever
+     * of the user's devices sent it. A device that gave up its distro no longer
+     * holds it, so that distro's later posts are another poster's. An empty
+     * hash (the stack is down, no distro) matches nothing.
+     */
+    fun isOwnChannelPost(sourceHex: String, deviceHex: String, distroHex: String?): Boolean =
+        sourceHex.isNotEmpty() && (
+            sourceHex.equals(deviceHex, ignoreCase = true) ||
+                (distroHex != null && sourceHex.equals(distroHex, ignoreCase = true))
+            )
+
     private fun readArrayCount(data: ByteArray, h: IntArray): Int? {
         if (h[0] >= data.size) return null
         val tag = data[h[0]].toInt() and 0xff
