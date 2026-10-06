@@ -78,13 +78,13 @@ class DistroChannelPostsTest {
             "private suspend fun subscribeOnServer(" to "/**\n     * Parse `/rfed/subscribe` response",
             "suspend fun pullDeferred(" to "// ── Inbound blob dispatch",
             "private suspend fun sendChannelStreamConfig(" to "// ── Send ──",
-            "suspend fun leaveChannel(" to "// ── Per-channel push toggle",
+            "private suspend fun leaveHere(" to "// ── Channels and the distro",
         )) {
             val text = body(from, to)
             assertFalse(from, text.contains("DistroManager"))
             assertFalse(from, text.contains("postingHandle"))
         }
-        assertTrue(body("suspend fun leaveChannel(", "// ── Per-channel push toggle").contains("StackRuntime.identityHandle"))
+        assertTrue(body("private suspend fun leaveHere(", "// ── Channels and the distro").contains("StackRuntime.identityHandle"))
     }
 
     @Test

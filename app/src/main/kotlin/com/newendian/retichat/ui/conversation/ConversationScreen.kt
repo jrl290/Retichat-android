@@ -622,6 +622,16 @@ private fun ChannelConversationContent(
     val listState = rememberLazyListState()
     val dayMarkers = rememberDayMarkerText()
 
+    // A sibling device's leave (RFed SPEC §17.12 rule 6) removes the channel while it is
+    // open here: the screen closes, as the web closes it, and asks nothing. The user's
+    // own leave closes it itself (below), so it is not closed twice.
+    var channelSeen by remember(channelId) { mutableStateOf(false) }
+    var leavingHere by remember(channelId) { mutableStateOf(false) }
+    LaunchedEffect(channel) {
+        if (channel != null) channelSeen = true
+        else if (channelSeen && !leavingHere) onLeft()
+    }
+
     DisposableEffect(channelId) {
         app.rfedChannelClient.retainRfedLinkMonitor()
         onDispose {
@@ -872,6 +882,7 @@ private fun ChannelConversationContent(
             onLeave = {
                 showInfo = false
                 val ch = channel
+                leavingHere = true
                 scope.launch {
                     if (ch != null) app.rfedChannelClient.leaveChannel(ch.id)
                     onLeft()

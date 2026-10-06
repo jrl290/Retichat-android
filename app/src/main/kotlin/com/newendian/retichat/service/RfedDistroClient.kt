@@ -220,6 +220,19 @@ object RfedDistroClient {
             Log.w(TAG, "unreadable fields from ${srcHex.take(8)} — delivering without attachments")
         }
 
+        // RFed SPEC §17.12: a channel membership message from another device of this
+        // distro. Read before the generic fan-out dedupe and before the delivery-
+        // notification test below, which C also passes: it carries an empty 0x0C and
+        // no content so that clients older than §17.12 drop it. It is judged on its
+        // own repeat key: every C has source D and empty content, so the generic
+        // key (source and timestamp) would drop the second of two siblings' Cs made
+        // in the same instant, and the devices would end in different states.
+        val channelSync = DistroChannelSync.read(fieldsRaw)
+        if (channelSync != null) {
+            handleChannelSync(context, srcHex, timestamp, channelSync, o.optBoolean("signature_validated", false))
+            return
+        }
+
         val key = DistroCodec.seenKey(srcHex, timestamp)
         if (!UserPreferences.markDistroSeen(context, key)) {
             Log.i(TAG, "duplicate fan-out copy from ${srcHex.take(8)} — skipped")
@@ -258,6 +271,33 @@ object RfedDistroClient {
         }
         val srcHash = DistroCodec.hexToBytes(srcHex) ?: return
         app.repository.onDistroMessageReceived(srcHash, title, content, timestamp, fieldsRaw, nameField, unverifiedReason)
+    }
+
+    /**
+     * §17.12 "Receiving": rules 1 and 2 first (the unwrapped source is D, and its
+     * LXMF signature is D's: the source hash is plaintext inside the encrypted
+     * body and D's key is announced, so anyone can claim source D), then the
+     * rest in [RfedChannelClient.handleDistroChannelSync]. A repeat (the live
+     * fan-out and a pull, or two uploads of one C) is applied once. A dropped C
+     * is not recorded as seen, so a later copy is judged again.
+     */
+    private suspend fun handleChannelSync(
+        context: Context,
+        srcHex: String,
+        timestamp: Double,
+        marker: DistroChannelSync.Marker,
+        signatureValidated: Boolean,
+    ) {
+        val app = context.applicationContext as? RetichatApp ?: return
+        val key = DistroChannelSync.repeatKey(srcHex, timestamp, marker)
+        if (!UserPreferences.markDistroSeen(context, key)) {
+            Log.i(TAG, "duplicate membership message from ${srcHex.take(8)} — skipped")
+            return
+        }
+        val ownDistro = DistroManager.deliveryHashHex
+        val fromDistro = ownDistro != null && srcHex == ownDistro
+        val held = app.rfedChannelClient.handleDistroChannelSync(marker, fromDistro, fromDistro && signatureValidated)
+        if (!held) UserPreferences.forgetDistroSeen(context, key)
     }
 
     /** Another device offered us a distro key (field 0x0D or a distro blob). */

@@ -246,6 +246,20 @@ object UserPreferences {
         return true
     }
 
+    /**
+     * Un-record a fan-out copy that was dropped: nothing of it is kept, so a
+     * later copy is judged again (RFed SPEC §17.12 "Receiving": only a message
+     * held, applied, an own echo or stale, is recorded as seen).
+     */
+    @Synchronized
+    fun forgetDistroSeen(context: Context, key: String) {
+        val raw = prefs(context).getString(PREF_KEY_DISTRO_SEEN, "") ?: ""
+        if (raw.isEmpty()) return
+        val existing = raw.split('\n')
+        if (!existing.contains(key)) return
+        prefs(context).edit().putString(PREF_KEY_DISTRO_SEEN, existing.filter { it != key }.joinToString("\n")).apply()
+    }
+
     fun getDistroContacts(context: Context): Set<String> = getCsvSet(context, PREF_KEY_DISTRO_CONTACTS)
     fun isDistroContact(context: Context, destHashHex: String): Boolean =
         getDistroContacts(context).contains(destHashHex.lowercase())

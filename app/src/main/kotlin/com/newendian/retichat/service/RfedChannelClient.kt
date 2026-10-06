@@ -8,6 +8,7 @@ import com.newendian.retichat.bridge.ChannelLxmUnpackResult
 import com.newendian.retichat.bridge.RetichatBridge
 import com.newendian.retichat.data.db.dao.ChannelDao
 import com.newendian.retichat.data.db.dao.ContactDao
+import com.newendian.retichat.data.db.entity.ChannelMembershipEntity
 import com.newendian.retichat.data.db.entity.ChannelNameStateEntity
 import com.newendian.retichat.data.db.entity.ChannelSenderEntity
 import com.newendian.retichat.data.db.entity.names
@@ -15,6 +16,7 @@ import com.newendian.retichat.names.ContactNames
 import com.newendian.retichat.names.DisplayNames
 import com.newendian.retichat.names.NameField
 import com.newendian.retichat.names.NameUpdate
+import com.newendian.retichat.ui.channels.ChannelNameForm
 import com.newendian.retichat.data.db.entity.ChannelEntity
 import com.newendian.retichat.data.db.entity.ChannelMessageEntity
 import kotlinx.coroutines.CancellationException
@@ -266,7 +268,14 @@ class RfedChannelClient(
         data class Failed(val reason: String) : JoinResult()
     }
 
-    /** Join a channel by name. Persists the row, subscribes on the rfed node. */
+    /**
+     * Join a channel by name. Persists the row, subscribes on the rfed node.
+     * The user's own join of a channel not in the list is recorded for RFed
+     * SPEC §17.12 rule 5 and, with a distro, owed to the other devices as a
+     * membership message ([recordUsersAction]); a join of one already in the
+     * list is no change. Applying a sibling's join is [applyDistroChannelSync],
+     * which sends nothing.
+     */
     suspend fun joinChannel(name: String, rfedNodeIdentityHashHex: String): JoinResult =
         withContext(Dispatchers.IO) {
             val identityHandle = StackRuntime.identityHandle
@@ -298,14 +307,34 @@ class RfedChannelClient(
             )
             channelDao.upsert(entity)
             reconfigureChannelStreams()
+            if (existing == null) recordUsersAction(DistroChannelSync.OP_JOIN, entity)
             JoinResult.Joined(entity)
         }
 
-    /** Leave a channel. Deletes local rows and unsubscribes on the rfed node. */
+    /**
+     * Leave a channel. Deletes local rows and unsubscribes on the rfed node.
+     * The user's own leave is recorded for RFed SPEC §17.12 rule 5 and, with a
+     * distro, owed to the other devices ([recordUsersAction]); the list changed
+     * when the user acted, whatever becomes of the message.
+     */
     suspend fun leaveChannel(channelId: String): Boolean = withContext(Dispatchers.IO) {
-        val identityHandle = StackRuntime.identityHandle
         val entity = channelDao.findById(channelId) ?: return@withContext false
-        val channelHashBytes = FcmTokenRegistrar.hexToBytes(channelId) ?: return@withContext false
+        if (!leaveHere(entity)) return@withContext false
+        recordUsersAction(DistroChannelSync.OP_LEAVE, entity)
+        true
+    }
+
+    /**
+     * Leave [entity] on this device, by the user's action or a sibling's (§17.12
+     * rule 6): unsubscribe with the device key, remove the channel's push
+     * registration, its posts, its senders and its names, and drop it from the
+     * stream's filter. Sends no membership message. False, with nothing done,
+     * when the channel's id is not a hash.
+     */
+    private suspend fun leaveHere(entity: ChannelEntity): Boolean {
+        val channelId = entity.id
+        val identityHandle = StackRuntime.identityHandle
+        val channelHashBytes = FcmTokenRegistrar.hexToBytes(channelId) ?: return false
 
         val rfedChannelDest = legacyChannelDest(entity.rfedNodeIdentityHashHex)
         if (rfedChannelDest != null && identityHandle != 0L) {
@@ -341,7 +370,144 @@ class RfedChannelClient(
             openedChannelStreamIds.remove(channelId.lowercase())
         }
         reconfigureChannelStreams()
-        true
+        return true
+    }
+
+    // ── Channels and the distro (RFed SPEC §17.12) ─────────────────────
+
+    /**
+     * The user's own join or leave of [entity] on this device: recorded for rule
+     * 5, stamped after any record held (so an action made after this device took
+     * a sibling's record is newer than it on every device, even with this
+     * device's clock behind), with or without a distro. With a distro the change
+     * is owed to its other devices as one membership message
+     * ([DistroOutboxRuntime.oweChannelSync]), kept until the propagation node
+     * proves it. Nothing else sends one: not applying a received message, not
+     * the start's re-subscription, not a stamp refresh, not a join of a channel
+     * already in the list.
+     */
+    private suspend fun recordUsersAction(op: String, entity: ChannelEntity) {
+        try {
+            val recorded = channelDao.membership(entity.id)?.let { DistroChannelSync.Record(it.op, it.atMs) }
+            val atMs = DistroChannelSync.stampLocal(recorded, System.currentTimeMillis())
+            channelDao.upsertMembership(ChannelMembershipEntity(entity.id, op, atMs))
+            if (!DistroManager.hasDistro) return
+            DistroOutboxRuntime.oweChannelSync(appContext, op, entity.channelName, entity.id, atMs)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // The list changed when the user acted, whatever becomes of the message: said, never thrown at the screen.
+            Log.w(TAG, "The $op of #${entity.channelName} was not recorded or sent to the distro (§17.12): ${e.message}")
+        }
+    }
+
+    /**
+     * A membership message C unwrapped from the distro (§17.12 "Receiving"):
+     * rules 1-5 ([DistroChannelSync.disposition]), then rule 6
+     * ([applyDistroChannelSync]). [fromDistro] and [signedByDistro] are rules 1
+     * and 2's facts, which the caller knows from the unwrap. Returns true when
+     * C is held (applied, this device's own echo, or stale: each recorded as
+     * seen), false when it is dropped (rules 1, 2 and 4, each with a log line),
+     * so a later copy of it is judged again.
+     */
+    suspend fun handleDistroChannelSync(
+        marker: DistroChannelSync.Marker,
+        fromDistro: Boolean,
+        signedByDistro: Boolean,
+    ): Boolean = withContext(Dispatchers.IO) {
+        val record = marker.sync
+            ?.let { channelDao.membership(channelHash(it.name).toHex()) }
+            ?.let { DistroChannelSync.Record(it.op, it.atMs) }
+        val name = marker.sync?.name ?: "?"
+        when (val d = DistroChannelSync.disposition(
+            marker = marker,
+            fromDistro = fromDistro,
+            signedByDistro = signedByDistro,
+            ownDeviceHex = StackRuntime.selfDestHash.toHex(),
+            joinNameAccepted = ChannelNameForm::joinNameAccepted,
+            channelHashOf = { channelHash(it).toHex() },
+            recordOf = { record },
+        )) {
+            is DistroChannelSync.Disposition.Drop -> {
+                Log.w(TAG, "Channel membership message for #$name from device ${marker.byHex.take(12).ifEmpty { "?" }} dropped: ${d.reason} (§17.12 rule ${d.rule})")
+                false
+            }
+            DistroChannelSync.Disposition.Echo -> {
+                Log.i(TAG, "own channel ${marker.sync?.op ?: "membership"} echo for #$name — dropped (§17.12 rule 3)")
+                true
+            }
+            is DistroChannelSync.Disposition.Stale -> {
+                Log.i(TAG, "channel ${d.op} of #$name at ${d.atMs} is older than the ${d.recorded.op} at ${d.recorded.atMs} held here — dropped (§17.12 rule 5)")
+                true
+            }
+            is DistroChannelSync.Disposition.Apply -> {
+                applyDistroChannelSync(d, marker.byHex)
+                true
+            }
+        }
+    }
+
+    /**
+     * §17.12 rule 6: apply a sibling's join or leave on this device, with this
+     * device's own key and its own configured RFed node, as the user's own join
+     * or leave here would, then record it. No membership message is sent
+     * (nothing loops), and nothing asks the user anything: the channel list
+     * simply changes.
+     *  - join of a channel not in the list: stored, then subscribed. It is stored
+     *    first, so a subscription that cannot be made now is made by the start's
+     *    subscription of stored channels ([resubscribePersistedChannels]), never
+     *    by a retry (DESIGN_PRINCIPLES §3, §5). Not opened: its posts wait at RFed
+     *    until the user opens it, as for any stored channel;
+     *  - join of a channel already in the list: nothing but the record;
+     *  - leave of a channel in the list: [leaveHere];
+     *  - leave of a channel not in the list: nothing but the record.
+     */
+    private suspend fun applyDistroChannelSync(change: DistroChannelSync.Disposition.Apply, byHex: String) {
+        val held = channelDao.findById(change.channelHash)
+        var applied = "recorded"
+        if (change.op == DistroChannelSync.OP_JOIN && held == null) {
+            val node = UserPreferences.getEffectiveRfedNodeIdentityHash(appContext).trim().lowercase()
+            if (node.length < 32) {
+                // Not this device's to join without a node; the record still orders a later message.
+                Log.w(TAG, "Channel join of #${change.name} from device ${byHex.take(12)}: no RFed node configured here — recorded, not joined")
+            } else {
+                val entity = ChannelEntity(
+                    id = change.channelHash,
+                    channelName = change.name,
+                    rfedNodeIdentityHashHex = node,
+                )
+                channelDao.upsert(entity)
+                applied = "joined"
+                reconfigureChannelStreams()
+                scope.launch(Dispatchers.IO) { subscribeStoredChannel(entity) }
+            }
+        } else if (change.op == DistroChannelSync.OP_LEAVE && held != null) {
+            leaveHere(held)
+            applied = "left"
+        }
+        channelDao.upsertMembership(ChannelMembershipEntity(change.channelHash, change.op, change.atMs))
+        _activity.value = System.currentTimeMillis()
+        Log.i(TAG, "Channel ${change.op} of #${change.name} at ${change.atMs} from device ${byHex.take(12).ifEmpty { "?" }}: $applied (§17.12)")
+    }
+
+    /**
+     * Subscribe a channel the device has stored but not subscribed (a sibling's
+     * join), with the device's own key, once: the readiness gate of the send is
+     * the only wait, and a failure is logged, never retried. The start's
+     * [resubscribePersistedChannels] subscribes it if this could not.
+     */
+    private suspend fun subscribeStoredChannel(channel: ChannelEntity) {
+        val identityHandle = StackRuntime.identityHandle
+        if (identityHandle == 0L) return
+        val channelHashBytes = FcmTokenRegistrar.hexToBytes(channel.id) ?: return
+        val rfedChannelDest = legacyChannelDest(channel.rfedNodeIdentityHashHex) ?: return
+        runCatching {
+            val stampCost = subscribeOnServer(channelHashBytes, rfedChannelDest, identityHandle)
+            channelDao.updateStampCost(channel.id, stampCost)
+            Log.i(TAG, "Subscribed to '${channel.channelName}' joined on another device (stampCost=$stampCost)")
+        }.onFailure { e ->
+            Log.w(TAG, "Subscribing to '${channel.channelName}', joined on another device, failed: ${e.message}")
+        }
     }
 
     // ── Per-channel push toggle (mirrors iOS RfedChannelClient.enable/disableChannelPush) ──
