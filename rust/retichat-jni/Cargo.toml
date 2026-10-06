@@ -16,3 +16,10 @@ app_links = { path = "../../../app-links" }
 rmpv = "=1.0.0"
 jni = "0.21"
 sha2 = "0.10"
+# A member's own key as an accept or leave carries it (src/group_status.rs):
+# the version lxmf_rust already builds, not a second copy.
+base64 = "0.22"
+
+[dev-dependencies]
+# The shared vectors (tests/data/group_status_vectors.json).
+serde_json = "1.0"

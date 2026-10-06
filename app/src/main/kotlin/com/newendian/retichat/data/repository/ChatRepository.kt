@@ -1311,7 +1311,12 @@ class ChatRepository(
      * Called from the Rust delivery callback (background thread): direct,
      * opportunistic, propagated and stream-ingested messages all arrive here.
      * [unverifiedReason] is 0 validated, 1 source unknown, 2 invalid; it
-     * decides whether the message's 0xD1 name is accepted (§5.2).
+     * decides whether the message's 0xD1 name is accepted (§5.2). An accept or
+     * leave carries its sender's own key: [senderKey] is that key when it binds
+     * to the source (a source nobody held a key for is then checked under it, so
+     * [unverifiedReason] is 0 or 2 for it), and [packed] is the message exactly
+     * as received, which a creator keeps (RFed-spec Group.md, "Member statuses
+     * and keys"). Both are null for any other message.
      */
     fun onMessageReceived(
         hash: ByteArray,
@@ -1323,6 +1328,8 @@ class ChatRepository(
         signatureValid: Boolean,
         unverifiedReason: Int,
         fieldsRaw: ByteArray = ByteArray(0),
+        senderKey: ByteArray? = null,
+        packed: ByteArray? = null,
     ) {
         val fields = LxmfFields.decodeOrEmpty(fieldsRaw, onFailure = {
             Log.w(TAG, "onMessageReceived: fields from ${srcHash.toHex().take(8)} unreadable (${it::class.java.simpleName}) — storing the message without them")

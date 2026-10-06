@@ -256,11 +256,11 @@ object StackRuntime {
             override fun onMessage(
                 hash: ByteArray, srcHash: ByteArray, destHash: ByteArray,
                 title: String, content: String, timestamp: Double, signatureValid: Boolean,
-                unverifiedReason: Int, fieldsRaw: ByteArray,
+                unverifiedReason: Int, fieldsRaw: ByteArray, senderKey: ByteArray?, packed: ByteArray?,
             ) {
                 repo.onMessageReceived(
                     hash, srcHash, destHash, title, content, timestamp, signatureValid,
-                    unverifiedReason, fieldsRaw,
+                    unverifiedReason, fieldsRaw, senderKey, packed,
                 )
             }
         })

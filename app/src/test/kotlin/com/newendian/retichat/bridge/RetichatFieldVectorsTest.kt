@@ -107,6 +107,7 @@ class RetichatFieldVectorsTest {
         override fun addFieldBool(key: Int, value: Boolean) = calls.add("field $key bool $value")
         override fun setRetichatString(key: Int, value: String) = calls.add("retichat $key str $value")
         override fun setRetichatBool(key: Int, value: Boolean) = calls.add("retichat $key bool $value")
+        override fun setRetichatStatuses(elements: List<ByteArray>) = calls.add("retichat 10 statuses ${elements.size}")
     }
 
     private fun send(entries: List<Map<String, Any?>>, inRetichatField: Boolean): List<String> {

@@ -8,8 +8,19 @@ import androidx.annotation.Keep
  * `unverifiedReason` is 0 when the signature validated, 1 when the source is
  * unknown (no key yet), 2 when the signature is invalid. A received 0xD1 name
  * is accepted by it (DISPLAY_NAMES.md §5.2), never by `signatureValid` alone.
- * The native side calls exactly this 9-argument signature
- * (`([B[B[BLjava/lang/String;Ljava/lang/String;DZI[B)V`).
+ *
+ * An accept or a leave of a group carries its sender's own key (RFed-spec
+ * Group.md, "Member statuses and keys"). [senderKey] is that key (64 bytes)
+ * when it binds to the message's source, and a source the router held no key
+ * for is then checked under it, so `unverifiedReason` is 0 or 2 for it as for
+ * any signature. [packed] is the message exactly as received (`destination |
+ * source | signature | payload`) for an accept or leave of at most 2144 bytes:
+ * what a creator keeps. Both are null for every other message. The native
+ * side remembers nothing: the key is remembered by the group code, after the
+ * group rule has passed.
+ *
+ * The native side calls exactly this 11-argument signature
+ * (`([B[B[BLjava/lang/String;Ljava/lang/String;DZI[B[B[B)V`).
  */
 @Keep
 interface MessageCallback {
@@ -23,6 +34,8 @@ interface MessageCallback {
         signatureValid: Boolean,
         unverifiedReason: Int,
         fieldsRaw: ByteArray,
+        senderKey: ByteArray?,
+        packed: ByteArray?,
     )
 }
 
@@ -466,6 +479,30 @@ object RetichatBridge {
     fun messageSetRetichatBool(handle: Long, key: Int, value: Boolean): Boolean =
         nativeMessageSetRetichatBool(handle, key, value) == 0
 
+    /**
+     * RFed-spec Group.md, "Member statuses and keys", DISPLAY_NAMES.md §10 key
+     * 10: write `GROUP_STATUSES` on an outbound `status`: a native array of
+     * bin, one for each of [elements] (a member's own packed accept or leave
+     * exactly as the creator received it), in the Retichat field 0xD1 whatever
+     * [LxmfFields.GROUP_ENTRIES_IN_RETICHAT_FIELD] says (key 10 has no old
+     * top-level field). An empty list is a creator's valid answer. False, with
+     * [lastError], and the message unchanged, when an element has no payload or
+     * is over 2144 bytes.
+     */
+    fun messageSetRetichatStatuses(handle: Long, elements: List<ByteArray>): Boolean =
+        nativeMessageSetRetichatStatuses(handle, elements.toTypedArray()) == 0
+
+    /**
+     * An element of a `status`, or an entry held for its sender's key (a
+     * member's own packed accept or leave, 97..=2144 bytes), unpacked and
+     * checked as if it had arrived directly (see [UnpackedGroupMessage]):
+     * the signature under the key held for its source, else under the key it
+     * carries when that binds. Nothing is remembered. Null with [lastError]
+     * when it is not an LXMF message of that size.
+     */
+    fun groupUnpackPacked(packed: ByteArray): UnpackedGroupMessage? =
+        nativeGroupUnpackPacked(packed)?.let { UnpackedGroupMessage.parse(it) }
+
     /** Clone a message as a fresh PROPAGATED copy, preserving fields/attachments. */
     fun messageClonePropagated(handle: Long): Long = nativeMessageClonePropagated(handle)
 
@@ -523,6 +560,8 @@ object RetichatBridge {
     private external fun nativeMessageAddFieldBool(handle: Long, key: Int, value: Boolean): Int
     private external fun nativeMessageSetRetichatString(handle: Long, key: Int, value: String): Int
     private external fun nativeMessageSetRetichatBool(handle: Long, key: Int, value: Boolean): Int
+    private external fun nativeMessageSetRetichatStatuses(handle: Long, elements: Array<ByteArray>): Int
+    private external fun nativeGroupUnpackPacked(packed: ByteArray): ByteArray?
     private external fun nativeMessageClonePropagated(handle: Long): Long
     private external fun nativeRouterIngestPropagated(router: Long, lxmfData: ByteArray): Boolean
     private external fun nativeRouterSetMessageStateCallback(router: Long, callback: MessageStateCallback): Int

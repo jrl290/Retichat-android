@@ -54,6 +54,17 @@ class LxmfFields private constructor(
      */
     private fun retichatEntry(key: Int): Any? = (entries[FIELD_RETICHAT] as? Map<*, *>)?.get(key)
 
+    /**
+     * Key 10 of the Retichat field 0xD1, a `status`'s GROUP_STATUSES
+     * (RFed-spec Group.md, "Member statuses and keys"; DISPLAY_NAMES.md §10):
+     * the array as decoded, or null when 0xD1 is absent or not a map, holds no
+     * key 10, or holds one that is not an array. Its elements are whatever the
+     * sender put in it (a reader checks each on its own: a packed message is a
+     * [ByteArray]). Never read from a top-level field: it has no old one, so a
+     * released build, which reads only the old fields, skips it.
+     */
+    fun groupStatuses(): List<Any?>? = retichatEntry(RF_GROUP_STATUSES) as? List<*>
+
     /** Get a raw binary field, or null. */
     fun getBytes(key: Int): ByteArray? = entries[key] as? ByteArray
 
@@ -142,6 +153,13 @@ class LxmfFields private constructor(
         const val RF_GROUP_RELAY_FOR     = 7
         const val RF_GROUP_RELAY_DONE    = 8
         const val RF_GROUP_MEMBER_KEYS   = 9
+        /**
+         * Key 10: array of bin, a `status`'s GROUP_STATUSES (the members' own
+         * packed accept and leave messages). The one group entry that is not
+         * in [GroupEntry]'s table of nine: it has no old top-level field and is
+         * written into the Retichat field in both forms.
+         */
+        const val RF_GROUP_STATUSES      = 10
 
         /**
          * §10 transition: false sends group entries in the old top-level
@@ -375,12 +393,12 @@ enum class GroupEntry(val key: Int, val legacyField: Int, val type: Type) {
     ID(LxmfFields.RF_GROUP_ID, 0xA0, Type.STR),                    // 32-hex group identifier
     MEMBERS(LxmfFields.RF_GROUP_MEMBERS, 0xA1, Type.STR),          // comma-sep member hashes (invite only)
     NAME(LxmfFields.RF_GROUP_NAME, 0xA2, Type.STR),                // human-readable group name
-    ACTION(LxmfFields.RF_GROUP_ACTION, 0xA3, Type.STR),            // invite|accept|leave|relay_req|relay_done
+    ACTION(LxmfFields.RF_GROUP_ACTION, 0xA3, Type.STR),            // invite|accept|leave|relay_req|relay_done|status
     SENDER(LxmfFields.RF_GROUP_SENDER, 0xA4, Type.STR),            // original sender hex
     RELAY_SEEN(LxmfFields.RF_GROUP_RELAY_SEEN, 0xA5, Type.STR),    // comma-sep hashes already delivered
     RELAY_FOR(LxmfFields.RF_GROUP_RELAY_FOR, 0xA6, Type.STR),      // hash of member requesting relay
     RELAY_DONE(LxmfFields.RF_GROUP_RELAY_DONE, 0xA7, Type.BOOL),   // relay-complete confirmation
-    MEMBER_KEYS(LxmfFields.RF_GROUP_MEMBER_KEYS, 0xA8, Type.STR);  // one hash:base64-public-key pair per invite chunk
+    MEMBER_KEYS(LxmfFields.RF_GROUP_MEMBER_KEYS, 0xA8, Type.STR);  // one hash:base64-public-key pair per invite chunk; an accept/leave carries its sender's own
 
     enum class Type { STR, BOOL }
 }

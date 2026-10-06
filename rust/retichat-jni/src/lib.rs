@@ -19,11 +19,12 @@
 //! thread, so it attaches to the JVM before calling Kotlin.
 
 mod distro_outbox;
+mod group_status;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use jni::objects::{GlobalRef, JByteArray, JClass, JObject, JString, JValue};
+use jni::objects::{GlobalRef, JByteArray, JClass, JObject, JObjectArray, JString, JValue};
 use jni::sys::{jbyteArray, jfloat, jint, jlong, jstring};
 use jni::{JNIEnv, JavaVM};
 
@@ -539,11 +540,21 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeD
 /// fun onMessage(hash: ByteArray, srcHash: ByteArray, destHash: ByteArray,
 ///               title: String, content: String, timestamp: Double,
 ///               signatureValid: Boolean, unverifiedReason: Int,
-///               fieldsRaw: ByteArray)
+///               fieldsRaw: ByteArray, senderKey: ByteArray?, packed: ByteArray?)
 /// ```
 /// `unverifiedReason`: 0 validated, 1 source unknown (no key yet), 2
 /// signature invalid. DISPLAY_NAMES.md §5.2 accepts a 0xD1 name differently
 /// for 1 and 2, so decide on it, never on `signatureValid` alone.
+///
+/// An accept or a leave of a group carries its sender's own key (RFed-spec
+/// Group.md, "Member statuses and keys"): `senderKey` is that key (64 bytes)
+/// when it binds to the message's source, and a source the router held no key
+/// for is then checked under it, so `unverifiedReason` is 0 or 2 for it, as for
+/// any signature (`group_status::receipt`). `packed` is the whole message as
+/// received (`destination | source | signature | payload`), for an accept or
+/// leave of at most 2144 bytes: what a creator keeps. Both are null for every
+/// other message. Nothing is remembered here: Kotlin remembers `senderKey`
+/// after the group rule has passed.
 #[no_mangle]
 pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeRouterSetDeliveryCallback(
     mut env: JNIEnv,
@@ -569,67 +580,100 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeR
 
     *DELIVERY_CB.lock().unwrap() = Some((jvm, global_ref));
 
-    let result = lxmf::router_set_delivery_callback(
-        router as u64,
-        Arc::new(move |msg: lxmf::ReceivedMessage| {
-            let guard = DELIVERY_CB.lock().unwrap();
-            let (jvm, cb_ref) = match guard.as_ref() {
-                Some(pair) => pair,
-                None => return,
-            };
+    // `lxmf::router_set_delivery_callback` hands over a `ReceivedMessage`
+    // snapshot, which holds neither the packed bytes nor the signature. The
+    // callback is registered on the router itself to be given the message
+    // (`LXMRouter::register_delivery_callback`, which that wrapper calls too).
+    let Some(router) = rns::get_handle::<Arc<Mutex<lxmf_rust::LXMRouter>>>(router as u64) else {
+        rns::set_error("invalid router handle".to_string());
+        return -1;
+    };
+    let registered = match router.lock() {
+        Ok(mut router) => {
+            router.register_delivery_callback(Arc::new(deliver_to_kotlin));
+            Ok(())
+        }
+        Err(e) => Err(e.to_string()),
+    };
+    ok_or_neg(registered)
+}
 
-            // Attach current thread to JVM
-            let mut env = match jvm.attach_current_thread() {
-                Ok(env) => env,
-                Err(_) => return,
-            };
+/// A byte array for Kotlin, or null for none.
+fn optional_jbytes<'a>(env: &JNIEnv<'a>, data: Option<&[u8]>) -> JObject<'a> {
+    match data {
+        Some(bytes) => env.byte_array_from_slice(bytes).map(JObject::from).unwrap_or_else(|_| JObject::null()),
+        None => JObject::null(),
+    }
+}
 
-            // Build arguments
-            let j_hash = env.byte_array_from_slice(&msg.hash).unwrap();
-            let j_src = env.byte_array_from_slice(&msg.source_hash).unwrap();
-            let j_dest = env.byte_array_from_slice(&msg.destination_hash).unwrap();
-            let j_title = env.new_string(&msg.title).unwrap();
-            let j_content = env.new_string(&msg.content).unwrap();
+/// The router's delivery callback: a received message to Kotlin's
+/// `MessageCallback.onMessage`, from whatever thread the router delivers on.
+fn deliver_to_kotlin(message: &lxmf_rust::LXMessage) {
+    let mut msg = lxmf::ReceivedMessage::from_lxmessage(message);
+    // An accept or leave's carried key, checked here for a source the router
+    // holds no key for; the key and the packed message for Kotlin.
+    let receipt = group_status::receipt(message, msg.signature_validated, msg.unverified_reason);
+    msg.signature_validated = receipt.validated;
+    msg.unverified_reason = receipt.unverified_reason;
 
-            // Raw LXMF fields (msgpack bytes — Kotlin decodes)
-            let j_fields = env.byte_array_from_slice(&msg.fields_raw).unwrap();
+    let guard = DELIVERY_CB.lock().unwrap();
+    let (jvm, cb_ref) = match guard.as_ref() {
+        Some(pair) => pair,
+        None => return,
+    };
 
-            let call_result = env.call_method(
-                cb_ref.as_obj(),
-                "onMessage",
-                "([B[B[BLjava/lang/String;Ljava/lang/String;DZI[B)V",
-                &[
-                    JValue::Object(&j_hash),
-                    JValue::Object(&j_src),
-                    JValue::Object(&j_dest),
-                    JValue::Object(&JObject::from(j_title)),
-                    JValue::Object(&JObject::from(j_content)),
-                    JValue::Double(msg.timestamp),
-                    JValue::Bool(msg.signature_validated as u8),
-                    // 0 validated, 1 source unknown, 2 signature invalid
-                    // (DISPLAY_NAMES.md §5.2 treats 1 and 2 differently).
-                    JValue::Int(msg.unverified_reason as i32),
-                    JValue::Object(&j_fields),
-                ],
-            );
-            if let Err(e) = call_result {
-                android_log(&format!("delivery callback call_method failed: {}", e));
-            }
-            match env.exception_check() {
-                Ok(true) => {
-                    android_log("delivery callback raised Java exception");
-                    let _ = env.exception_describe();
-                    let _ = env.exception_clear();
-                }
-                Ok(false) => {}
-                Err(e) => {
-                    android_log(&format!("delivery callback exception_check failed: {}", e));
-                }
-            }
-        }),
+    // Attach current thread to JVM
+    let mut env = match jvm.attach_current_thread() {
+        Ok(env) => env,
+        Err(_) => return,
+    };
+
+    // Build arguments
+    let j_hash = env.byte_array_from_slice(&msg.hash).unwrap();
+    let j_src = env.byte_array_from_slice(&msg.source_hash).unwrap();
+    let j_dest = env.byte_array_from_slice(&msg.destination_hash).unwrap();
+    let j_title = env.new_string(&msg.title).unwrap();
+    let j_content = env.new_string(&msg.content).unwrap();
+
+    // Raw LXMF fields (msgpack bytes — Kotlin decodes)
+    let j_fields = env.byte_array_from_slice(&msg.fields_raw).unwrap();
+    let j_key = optional_jbytes(&env, receipt.sender_key.as_deref());
+    let j_packed = optional_jbytes(&env, receipt.packed.as_deref());
+
+    let call_result = env.call_method(
+        cb_ref.as_obj(),
+        "onMessage",
+        "([B[B[BLjava/lang/String;Ljava/lang/String;DZI[B[B[B)V",
+        &[
+            JValue::Object(&j_hash),
+            JValue::Object(&j_src),
+            JValue::Object(&j_dest),
+            JValue::Object(&JObject::from(j_title)),
+            JValue::Object(&JObject::from(j_content)),
+            JValue::Double(msg.timestamp),
+            JValue::Bool(msg.signature_validated as u8),
+            // 0 validated, 1 source unknown, 2 signature invalid
+            // (DISPLAY_NAMES.md §5.2 treats 1 and 2 differently).
+            JValue::Int(msg.unverified_reason as i32),
+            JValue::Object(&j_fields),
+            JValue::Object(&j_key),
+            JValue::Object(&j_packed),
+        ],
     );
-
-    ok_or_neg(result)
+    if let Err(e) = call_result {
+        android_log(&format!("delivery callback call_method failed: {}", e));
+    }
+    match env.exception_check() {
+        Ok(true) => {
+            android_log("delivery callback raised Java exception");
+            let _ = env.exception_describe();
+            let _ = env.exception_clear();
+        }
+        Ok(false) => {}
+        Err(e) => {
+            android_log(&format!("delivery callback exception_check failed: {}", e));
+        }
+    }
 }
 
 /// `RetichatBridge.nativeRouterSetMessageStateCallback(router: Long, callback: MessageStateCallback): Int`
@@ -984,6 +1028,84 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeM
     value: jni::sys::jboolean,
 ) -> jint {
     ok_or_neg(lxmf::message_set_retichat_bool(handle as u64, key as i64, value != 0))
+}
+
+/// `RetichatBridge.nativeMessageSetRetichatStatuses(handle: Long, elements: Array<ByteArray>): Int`
+///
+/// RFed-spec Group.md, "Member statuses and keys" and DISPLAY_NAMES.md §10 key
+/// 10: write `GROUP_STATUSES` on the outbound message `handle`: a native array
+/// of bin, one for each of `elements` (a member's own packed accept or leave
+/// as the creator received it), always in the Retichat field 0xD1 (key 10 has
+/// no old top-level field), beside the entries already there. An empty array
+/// is a creator's valid answer. Each element is as it was received, never
+/// wrapped again (CHECK_THESE_THINGS_FIRST §11). 0 on success; -1 with
+/// `nativeLastError` and the message unchanged for an element no receiver
+/// would read (no payload, or over 2144 bytes) or a null array or element.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeMessageSetRetichatStatuses(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    elements: JObjectArray,
+) -> jint {
+    if elements.is_null() {
+        rns::set_error("elements is null".to_string());
+        return -1;
+    }
+    let count = match env.get_array_length(&elements) {
+        Ok(count) => count,
+        Err(e) => {
+            rns::set_error(format!("elements: {e}"));
+            return -1;
+        }
+    };
+    let mut list = Vec::with_capacity(count.max(0) as usize);
+    for index in 0..count {
+        let element = match env.get_object_array_element(&elements, index) {
+            Ok(element) if !element.is_null() => element,
+            _ => {
+                rns::set_error(format!("element {index} is null"));
+                return -1;
+            }
+        };
+        list.push(jbytes_to_vec(&env, &JByteArray::from(element)));
+    }
+    let Some(msg) = rns::get_handle::<Arc<Mutex<lxmf_rust::lx_message::LXMessage>>>(handle as u64) else {
+        rns::set_error("invalid message handle".to_string());
+        return -1;
+    };
+    let result = match msg.lock() {
+        Ok(mut m) => group_status::set_statuses(&mut m, &list),
+        Err(e) => Err(e.to_string()),
+    };
+    ok_or_neg(result)
+}
+
+/// `RetichatBridge.nativeGroupUnpackPacked(packed: ByteArray): ByteArray?`
+///
+/// An element of a `status` (a member's own packed accept or leave, as the
+/// creator received it) or an entry held for its sender's key, unpacked and
+/// checked as if it had arrived directly: the router's own unpack and
+/// signature check under the key held for the source, then the key the
+/// message carries for its own sender when none is held
+/// (`group_status::unpack_element`). Nothing is remembered. Returns the
+/// buffer `group_status::encode_element` documents (verdict, bound key flag,
+/// destination, source, message hash, timestamp, the key, the fields), or
+/// null with `nativeLastError` when `packed` is not an LXMF message of the
+/// size of an accept or leave (97..=2144 bytes). The bytes are another
+/// member's: a panic is caught and reported as null.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeGroupUnpackPacked(
+    env: JNIEnv,
+    _class: JClass,
+    packed: JByteArray,
+) -> jbyteArray {
+    let packed = jbytes_to_vec(&env, &packed);
+    let result = std::panic::catch_unwind(|| {
+        group_status::unpack_element(&packed).map(|element| group_status::encode_element(&element))
+    })
+    .unwrap_or_else(|_| Err("unpacking the message panicked".to_string()));
+    bytes_or_null(&env, result)
 }
 
 /// `RetichatBridge.nativeRouterIngestPropagated(routerHandle: Long, lxmfData: ByteArray): Boolean`
