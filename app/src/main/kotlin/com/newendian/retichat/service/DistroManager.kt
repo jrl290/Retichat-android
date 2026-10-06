@@ -139,6 +139,19 @@ object DistroManager {
     }
 
     /**
+     * The distro this device holds and the identity handle that signs as it,
+     * read together: a generate, import or forget cannot come between them, so
+     * a message made from them is signed by the key its source names. Null when
+     * no distro is held.
+     */
+    @Synchronized
+    fun signing(): Pair<DistroState, Long>? {
+        val state = _state.value ?: return null
+        val handle = identityHandle
+        return if (handle != 0L) state to handle else null
+    }
+
+    /**
      * `(sourceHash, signingIdentityHandle)` for an outgoing message: the
      * distro when one is loaded, otherwise the device.
      */

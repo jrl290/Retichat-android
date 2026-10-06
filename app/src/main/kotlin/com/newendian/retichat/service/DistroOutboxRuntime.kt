@@ -146,14 +146,14 @@ object DistroOutboxRuntime {
      */
     suspend fun oweChannelSync(context: Context, op: String, channelName: String, channelHashHex: String, atMs: Long) {
         try {
-            val distro = DistroManager.state.value ?: return
+            val (distro, signer) = DistroManager.signing() ?: return
             val deviceHex = StackRuntime.selfDestHash.toHex()
             if (!DistroCodec.isHex32(deviceHex)) {
                 Log.w(TAG, "the $op of #$channelName not sent to the distro: this device's address is not known (§17.12)")
                 return
             }
             val label = "the $op of #$channelName (§17.12)"
-            val (packed, hash) = pack(distro) { handle ->
+            val (packed, hash) = pack(distro, signer) { handle ->
                 RetichatBridge.messageSetDistroChannelSync(handle, op, channelName, atMs, deviceHex)
             } ?: return
             val entry = OwedEntry(
@@ -179,14 +179,14 @@ object DistroOutboxRuntime {
      */
     suspend fun oweSentCopy(context: Context, recipient: ByteArray, title: String, content: String) {
         try {
-            val distro = DistroManager.state.value ?: return
+            val (distro, signer) = DistroManager.signing() ?: return
             val recipientHex = recipient.toHex()
             val deviceHex = StackRuntime.selfDestHash.toHex()
             if (!DistroCodec.isHex32(deviceHex)) {
                 Log.w(TAG, "sent-copy: this device's address is not known — no copy for ${recipientHex.take(8)}")
                 return
             }
-            val (packed, hash) = pack(distro, title = title, content = content) { handle ->
+            val (packed, hash) = pack(distro, signer, title = title, content = content) { handle ->
                 RetichatBridge.messageAddFieldString(handle, LxmfFields.FIELD_CUSTOM_TYPE, LxmfFields.DISTRO_SENT_TYPE) &&
                     RetichatBridge.messageAddFieldString(handle, LxmfFields.FIELD_CUSTOM_DATA, recipientHex) &&
                     RetichatBridge.messageAddFieldString(handle, LxmfFields.FIELD_CUSTOM_META, deviceHex)
@@ -207,14 +207,15 @@ object DistroOutboxRuntime {
     }
 
     /**
-     * Make a message from the distro to the distro ([DistroManager]'s key signs
-     * it), set its fields with [fields], pack and sign it once, and return its
+     * Make a message from the distro to the distro (its key, the identity
+     * [signer], signs it), set its fields with [fields], pack and sign it once, and return its
      * LXMF bytes and message hash (hex). Null, said, when any step fails. The
      * message is made DIRECT only so that packing needs no destination: it is
      * never sent from here; only the bytes it packs to are kept.
      */
     private suspend fun pack(
         distro: DistroManager.DistroState,
+        signer: Long,
         title: String = "",
         content: String = "",
         fields: (Long) -> Boolean,
@@ -222,7 +223,7 @@ object DistroOutboxRuntime {
         val distroHash = DistroCodec.hexToBytes(distro.deliveryHashHex) ?: return@withContext null
         val handle = RetichatBridge.messageCreate(
             destHash = distroHash, srcHash = distroHash, content = content, title = title,
-            method = RetichatBridge.DeliveryMethod.DIRECT, identityHandle = DistroManager.identityHandle,
+            method = RetichatBridge.DeliveryMethod.DIRECT, identityHandle = signer,
         )
         if (handle == 0L) {
             Log.e(TAG, "messageCreate failed: ${RetichatBridge.lastError()}")

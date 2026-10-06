@@ -118,6 +118,23 @@ class DistroOutboxWiringTest {
     }
 
     @Test
+    fun anOwedMessageIsSignedByTheKeyItsSourceNames() {
+        // The distro and the handle that signs as it are read together (DistroManager.signing), so a
+        // generate, import or forget between two reads cannot give a source that the key does not match.
+        val channel = body(runtime, "suspend fun oweChannelSync(", "suspend fun oweSentCopy(")
+        val sent = body(runtime, "suspend fun oweSentCopy(", "private suspend fun pack(")
+        for ((name, text) in listOf("C" to channel, "sent-copy" to sent)) {
+            assertEquals(name, 1, Regex("DistroManager\\.signing\\(\\)").findAll(text).count())
+            assertFalse(name, text.contains("DistroManager.identityHandle"))
+            assertFalse(name, text.contains("DistroManager.state.value"))
+        }
+        val pack = body(runtime, "private suspend fun pack(", "private class JniPropagationPort(")
+        assertFalse(pack.contains("DistroManager.identityHandle"))
+        assertFalse(pack.contains("DistroManager.state"))
+        assertTrue(pack.contains("identityHandle = signer"))
+    }
+
+    @Test
     fun theRuntimeStartsNoLinkAndOnlyAnEstablishmentOrTheStartUpCheckFlushes() {
         // It never opens or reopens the propagation link.
         assertFalse(runtime.contains("appLinkOpen"))
