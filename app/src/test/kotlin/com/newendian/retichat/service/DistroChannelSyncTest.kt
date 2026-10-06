@@ -81,6 +81,26 @@ class DistroChannelSyncTest {
     /** Retichat-js: int 64 for 2026-01-01 00:00 UTC, `d3 00 00 01 9b 76 da a8 00` (§17.12). */
     private val webAt = bytes(0xd3, listOf(0x00, 0x00, 0x01, 0x9b, 0x76, 0xda, 0xa8, 0x00))
 
+    /**
+     * The fields of C as the phones write them (rust/retichat-jni `distro_outbox.rs`
+     * pins this very literal for the writer): join, `public.general`, 2026-01-01
+     * 00:00 UTC as uint 64, sent by device 0123...cdef.
+     */
+    private val phonesC = "840cc400ccfbb3726665642e64697374726f2e6368616e6e656cccfc93a46a6f696eae7075626c69632e67656e6572616ccf0000019b76daa800ccfdd9203031323334353637383961626364656630313233343536373839616263646566"
+
+    private fun unhex(h: String) = ByteArray(h.length / 2) { h.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
+
+    @Test
+    fun theBytesThePhonesWriteAreReadBackAsTheActionTheyCarry() {
+        val marker = DistroChannelSync.read(unhex(phonesC))!!
+        assertNull(marker.problem)
+        assertEquals(DistroChannelSync.Sync("join", "public.general", 1_767_225_600_000L), marker.sync)
+        assertEquals("0123456789abcdef0123456789abcdef", marker.byHex)
+        // And they are the very bytes the test's own builder makes of the same fields.
+        assertEquals(phonesC, fields(at = uint64(1_767_225_600_000), by = "0123456789abcdef0123456789abcdef")
+            .joinToString("") { "%02x".format(it) })
+    }
+
     @Test
     fun theWebsInt64AndRmpvsUint64HoldingOneValueAreTheSameAction() {
         assertEquals(1_767_225_600_000L, 0x19b76daa800L)

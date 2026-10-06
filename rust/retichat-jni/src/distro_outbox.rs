@@ -264,6 +264,23 @@ mod tests {
         );
     }
 
+    /// The bytes of C's fields for join, `public.general`, 2026-01-01 00:00 UTC and `DEVICE`, written out
+    /// as hex. The same literal is pinned on the reading side (Kotlin `DistroChannelSyncTest`), so a
+    /// writer and a reader that drift apart cannot both pass.
+    const C_FIELDS_HEX: &str = "840cc400ccfbb3726665642e64697374726f2e6368616e6e656cccfc93a46a6f696eae7075626c69632e67656e6572616ccf0000019b76daa800ccfdd9203031323334353637383961626364656630313233343536373839616263646566";
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    #[test]
+    fn c_is_exactly_these_bytes_which_the_phones_reader_pins_too() {
+        let (_d, _h, mut msg) = distro_message("");
+        set_channel_sync_fields(&mut msg, "join", "public.general", 1_767_225_600_000, DEVICE).unwrap();
+        let packed = pack_message(&Arc::new(Mutex::new(msg))).unwrap();
+        assert_eq!(hex(&fields_of(&packed)), C_FIELDS_HEX);
+    }
+
     #[test]
     fn at_ms_goes_as_uint64_for_a_real_time_and_the_array_is_never_a_bin() {
         let (_d, _h, mut msg) = distro_message("");
