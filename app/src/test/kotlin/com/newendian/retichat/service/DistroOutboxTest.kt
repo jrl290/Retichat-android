@@ -1,0 +1,990 @@
+package com.newendian.retichat.service
+
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/**
+ * What a device owes its distro (RFed SPEC §17.12 "On the sending device",
+ * §17.11, "The phones' outbox"), driven with fake link and upload events: every
+ * ruling of James's of 2026-10-03 and 2026-10-04 as a case, and the tests the
+ * spec asks every client for ("Tests every client makes for the sending
+ * device"). The mutation each guards is named where it is not obvious.
+ */
+class DistroOutboxTest {
+    private val d1 = HeldDistro("d".repeat(32), "1".repeat(128))
+    private val d2 = HeldDistro("e".repeat(32), "2".repeat(128))
+
+    // ---- fakes ----
+
+    /** What a later run loads: only what the store was given and not told to remove. */
+    private class FakeStore : OutboxStore {
+        val rows = LinkedHashMap<String, OwedEntry>()
+        var refuse = false
+        var refuseRemoval = false
+        override suspend fun loadAll(): List<OwedEntry> = rows.values.toList()
+        override suspend fun put(entry: OwedEntry): Boolean {
+            if (refuse) return false
+            rows.remove(entry.id)
+            rows[entry.id] = entry
+            return true
+        }
+        override suspend fun remove(id: String, msgHash: String) {
+            if (rows[id]?.msgHash == msgHash) rows.remove(id)
+        }
+        override suspend fun removeId(id: String) {
+            if (refuseRemoval) throw IllegalStateException("storage refuses it")
+            rows.remove(id)
+        }
+    }
+
+    /** One upload that left, with the sink the stack would call. */
+    private class Sent(val linkId: String, val entryId: String, val msgHash: String, val key: String, val sink: UploadSink) {
+        fun proved() = sink.proved()
+        fun lost() = sink.lost()
+    }
+
+    private class FakePort : PropagationPort {
+        var held: HeldLink? = null
+        val builds = mutableListOf<OwedEntry>()
+        val sent = mutableListOf<Sent>()
+        private val gates = ArrayDeque<CompletableDeferred<Unit>>()
+        private var failNextBuild: Exception? = null
+        private var buildSerial = 0
+
+        /** The next build waits for the returned gate: a stamp that takes a while. */
+        fun gateNextBuild(): CompletableDeferred<Unit> = CompletableDeferred<Unit>().also { gates.addLast(it) }
+        fun failNextBuild(e: Exception) { failNextBuild = e }
+
+        override fun held(): HeldLink? = held
+
+        override suspend fun build(entry: OwedEntry): ByteArray {
+            builds += entry
+            val gate = gates.removeFirstOrNull()
+            gate?.await()
+            failNextBuild?.let { failNextBuild = null; throw it }
+            buildSerial++
+            return "${entry.id}|${entry.msgHash}|${entry.distroKey.take(4)}".toByteArray()
+        }
+
+        override fun upload(upload: ByteArray, sink: UploadSink): UploadLeft? {
+            val link = held ?: return null
+            if (!link.active) return null
+            val (id, hash, key) = String(upload).split("|")
+            sent += Sent(link.id, id, hash, key, sink)
+            return UploadLeft(link.id, resource = false)
+        }
+
+        fun uploadsOf(id: String) = sent.filter { it.entryId == id }
+    }
+
+    private class Lines : OutboxLog {
+        val info = mutableListOf<String>()
+        val warn = mutableListOf<String>()
+        val error = mutableListOf<String>()
+        override fun info(message: String) { info += message }
+        override fun warn(message: String) { warn += message }
+        override fun error(message: String) { error += message }
+        fun all() = info + warn + error
+    }
+
+    private inner class Rig(scope: CoroutineScope, val store: FakeStore = FakeStore(), var distro: HeldDistro? = d1) {
+        val port = FakePort()
+        val lines = Lines()
+        var clock = 1_000L
+        val outbox = DistroOutbox(store, port, { distro }, lines, scope, now = { clock })
+        fun link(id: String, active: Boolean = true) { port.held = HeldLink(id, active) }
+    }
+
+    private fun channel(op: String, name: String, hash: String, distro: HeldDistro = d1, at: Long = 1) = OwedEntry(
+        id = DistroChannelSync.entryId("hash-of-$name"), kind = OwedKind.CHANNEL,
+        distro = distro.delivery, distroKey = distro.publicKey, msgHash = hash, packed = hash.toByteArray(),
+        label = "the $op of #$name (§17.12)", op = op, name = name, atMs = at,
+    )
+
+    private fun sentCopy(hash: String, to: String = "c".repeat(32), distro: HeldDistro = d1) = OwedEntry(
+        id = "sent:$hash", kind = OwedKind.SENT, distro = distro.delivery, distroKey = distro.publicKey,
+        msgHash = hash, packed = hash.toByteArray(), label = "the sent-copy for ${to.take(8)} (§17.11)", toHex = to,
+    )
+
+    private fun run(block: suspend CoroutineScope.(Rig) -> Unit) = runBlocking {
+        val rig = Rig(this)
+        rig.outbox.start()
+        block(rig)
+    }
+
+    // ---- owing ----
+
+    @Test
+    fun anEntryIsKeptBeforeAnythingCanYieldAndWaitsForTheLinkWhenItIsNotUp() = run { rig ->
+        val join = channel("join", "public.x", "m1")
+        rig.outbox.owe(join)
+        // Written, and nothing built or sent: the link is not up, and it is never started.
+        assertEquals(listOf(join), rig.store.rows.values.toList())
+        assertEquals(emptyList<OwedEntry>(), rig.port.builds)
+        assertTrue(rig.lines.info.any { it.contains("owed to the distro") })
+        assertEquals(listOf(join), rig.outbox.owed())
+    }
+
+    @Test
+    fun withTheLinkUpItGoesAtOnceAndOnlyTheNodesProofSettlesIt() = run { rig ->
+        rig.link("L1")
+        val join = channel("join", "public.x", "m1")
+        rig.outbox.owe(join)
+        yield()
+        assertEquals(1, rig.port.sent.size)
+        // Sent is not proved: it is still owed, in storage too.
+        assertEquals(listOf(join), rig.outbox.owed())
+        assertTrue(rig.store.rows.containsKey(join.id))
+        rig.port.sent[0].proved()
+        yield()
+        assertEquals(emptyList<OwedEntry>(), rig.outbox.owed())
+        assertTrue("storage lets it go too", rig.store.rows.isEmpty())
+        assertTrue(rig.lines.info.any { it.contains("propagated to the distro as a packet") })
+        assertTrue(rig.lines.error.isEmpty())
+    }
+
+    @Test
+    fun theUsersOwnActionReadsNoFailureRecordAndIsNotHeldBackByAnEarlierFailure() = run { rig ->
+        rig.link("L1")
+        val a = sentCopy("a")
+        rig.outbox.owe(a)
+        yield()
+        rig.port.sent[0].lost()
+        // A second message, owed after a failure of another, is the user's own action: it goes.
+        rig.outbox.owe(sentCopy("b"))
+        yield()
+        assertEquals(2, rig.port.sent.size)
+    }
+
+    // ---- what storage refuses ----
+
+    @Test
+    fun storageThatRefusesAWriteLargerThanWhatItHoldsNeverKeepsAReplacedJoinForALaterRun() = run { rig ->
+        // Owe a join (kept), fill storage, owe a §17.11 sent copy (refused), then owe a
+        // leave of the same channel (refused): what storage holds must not hold the join.
+        val join = channel("join", "public.x", "join")
+        rig.outbox.owe(join)
+        assertTrue(rig.store.rows.containsKey(join.id))
+        rig.store.refuse = true
+        rig.outbox.owe(sentCopy("copy"))
+        val leave = channel("leave", "public.x", "leave")
+        rig.outbox.owe(leave)
+        assertFalse("the replaced join is not left for a later run", rig.store.rows.containsKey(join.id))
+        // This run still holds what the user did last, and is told: never silent.
+        assertEquals(setOf(sentCopy("copy").id, leave.id), rig.outbox.owed().map { it.id }.toSet())
+        assertEquals(2, rig.lines.error.count { it.contains("could not be kept in storage") })
+        // It still goes while the link is up in this run.
+        rig.link("L1")
+        rig.outbox.onLinkEstablished("L1")
+        assertEquals(setOf(sentCopy("copy").id, leave.id), rig.port.sent.map { it.entryId }.toSet())
+        assertTrue("the replaced join never goes", rig.port.sent.none { it.msgHash == "join" })
+    }
+
+    @Test
+    fun storageThatRefusesEvenTheSmallerWriteIsSaid() = run { rig ->
+        rig.outbox.owe(channel("join", "public.x", "join"))
+        rig.store.refuse = true
+        rig.store.refuseRemoval = true
+        rig.outbox.owe(channel("leave", "public.x", "leave"))
+        assertTrue(rig.lines.error.any { it.contains("refuses even a smaller write") })
+    }
+
+    // ---- a distro given up ----
+
+    @Test
+    fun aMembershipMessageOwedToADistroGivenUpIsDroppedAndASentCopyKeepsItsOwnDistro() = run { rig ->
+        val join = channel("join", "public.x", "join")
+        val copy = sentCopy("copy")
+        rig.outbox.owe(join)
+        rig.outbox.owe(copy)
+        // Give up D (a log line says the join was dropped), import D again, bring the link up.
+        rig.link("L0")
+        rig.outbox.onLinkEstablished("L0")
+        rig.port.sent.single { it.entryId == join.id }.lost()
+        assertNotNull(rig.outbox.unproved.at(join))
+        rig.port.held = null
+        rig.distro = null
+        rig.outbox.onDistroChanged()
+        yield()
+        assertNull("a record goes with the message it belongs to", rig.outbox.unproved.at(join))
+        assertTrue(rig.lines.warn.any { it.contains("no longer holds") && it.contains("the join of #public.x") })
+        assertEquals(listOf(copy), rig.outbox.owed())
+        assertFalse(rig.store.rows.containsKey(join.id))
+        rig.distro = d1
+        rig.link("L1")
+        rig.outbox.onLinkEstablished("L1")
+        // The join is not uploaded again (mutation: keeping it while no distro is held uploads it, and
+        // the sibling joins a channel this device left); the copy goes once.
+        assertEquals(1, rig.port.sent.count { it.entryId == copy.id })
+        assertEquals(1, rig.port.sent.count { it.entryId == join.id })
+    }
+
+    @Test
+    fun aSentCopyMadeUnderD1StillGoesToD1WhenTheDeviceHoldsD2() = run { rig ->
+        val old = sentCopy("old", distro = d1)
+        rig.outbox.owe(old)
+        // Taking D2 drops no sent-copy: it is already packed and signed as D1, with D1's key.
+        rig.distro = d2
+        rig.outbox.onDistroChanged()
+        val fresh = sentCopy("fresh", distro = d2)
+        rig.outbox.owe(fresh)
+        rig.link("L1")
+        rig.outbox.onLinkEstablished("L1")
+        // Each is built with its OWN distro's key (mutation: the key of the distro held now would
+        // encrypt D1's copy to D2, which D1's devices cannot read).
+        assertEquals(listOf("1111", "2222"), rig.port.sent.map { it.key })
+        assertEquals(listOf(d1.publicKey, d2.publicKey), rig.port.builds.map { it.distroKey })
+    }
+
+    @Test
+    fun givingUpTheDistroWhileASentCopyIsBuiltStillUploadsItToItsOwnDistro() = runBlocking {
+        val rig = Rig(this)
+        rig.outbox.start()
+        rig.link("L1")
+        val gate = rig.port.gateNextBuild()
+        rig.outbox.owe(sentCopy("copy"))
+        yield()
+        rig.distro = null
+        rig.outbox.onDistroChanged()
+        gate.complete(Unit)
+        yield()
+        assertEquals(1, rig.port.sent.size)
+        assertEquals("1111", rig.port.sent[0].key)
+    }
+
+    @Test
+    fun theLogLineSaysAnUploadAlreadyOnTheWireCannotBeTakenBack() = run { rig ->
+        rig.link("L1")
+        val join = channel("join", "public.x", "join")
+        rig.outbox.owe(join)
+        yield()
+        rig.distro = null
+        rig.outbox.onDistroChanged()
+        assertTrue(rig.lines.warn.single().contains("already left"))
+        // And its proof, if the node gives it, is said as any proof is.
+        rig.port.sent[0].proved()
+        assertTrue(rig.lines.info.any { it.contains("propagated") })
+    }
+
+    // ---- the app stops and starts ----
+
+    @Test
+    fun whatIsOwedSurvivesARestartAndGoesOnceOnTheNextLink() = runBlocking {
+        val store = FakeStore()
+        val first = Rig(this, store)
+        first.outbox.start()
+        val join = channel("join", "public.x", "join")
+        first.outbox.owe(join)
+        // The app stops before the link ever came up: a new process loads the store.
+        val second = Rig(this, store)
+        second.outbox.start()
+        assertEquals(listOf(join), second.outbox.owed())
+        second.link("L1")
+        second.outbox.onLinkEstablished("L1")
+        assertEquals(1, second.port.sent.size)
+        second.port.sent[0].proved()
+        yield()
+        assertTrue(store.rows.isEmpty())
+    }
+
+    @Test
+    fun theStacksStopDecidesAnOpenUploadAndSendsNothingAndItGoesOnTheNextStart() = run { rig ->
+        rig.link("L1")
+        val join = channel("join", "public.x", "join")
+        rig.outbox.owe(join)
+        yield()
+        // A newer link is up when the stop decides it: still nothing is sent.
+        rig.link("L2")
+        rig.outbox.onStop()
+        assertEquals(1, rig.port.sent.size)
+        assertEquals(listOf(join), rig.outbox.owed())
+        assertTrue(rig.lines.error.any { it.contains("the connection stopped") })
+        // Stopped, the next start's first link carries it, once.
+        rig.link("L9")
+        rig.outbox.start()
+        rig.outbox.onLinkEstablished("L9")
+        assertEquals(listOf("L1", "L9"), rig.port.sent.map { it.linkId })
+    }
+
+    // ---- an upload that is lost ----
+
+    @Test
+    fun anUploadReportedLostIsSaidAndWaitsForTheNextComingUpThenGoesOnce() = run { rig ->
+        rig.link("L1")
+        val join = channel("join", "public.x", "join")
+        rig.outbox.owe(join)
+        yield()
+        rig.port.sent[0].lost()
+        yield()
+        // Said: a log line and an error the client can show. It stays owed, and is not sent at the
+        // failure itself (mutation: uploading it again at the failure sends it with no coming-up).
+        assertTrue(rig.lines.error.any { it.contains("was not proved") && it.contains("still owed") })
+        assertEquals(listOf(join), rig.outbox.owed())
+        assertEquals(1, rig.port.sent.size)
+        // The next coming-up is the link's next establishment...
+        rig.link("L2")
+        rig.outbox.onLinkEstablished("L2")
+        assertEquals(listOf("L1", "L2"), rig.port.sent.map { it.linkId })
+        // ...and it goes once.
+        rig.port.sent[1].proved()
+        rig.link("L3")
+        rig.outbox.onLinkEstablished("L3")
+        assertEquals(2, rig.port.sent.size)
+    }
+
+    @Test
+    fun theNextComingUpMayBeAStaleLinksRecoveryOnTheSameLink() = run { rig ->
+        rig.link("L1")
+        rig.outbox.owe(channel("join", "public.x", "join"))
+        yield()
+        rig.port.sent[0].lost()
+        // The link recovers from STALE: it comes up. Mutation: no flush on the recovery leaves it
+        // waiting for an establishment that may never come.
+        rig.outbox.onLinkRecovered("L1")
+        assertEquals(listOf("L1", "L1"), rig.port.sent.map { it.linkId })
+    }
+
+    @Test
+    fun aStaleLinkThatANewOneReplacedStartsNoFlushWhenItRecovers() = run { rig ->
+        rig.link("L1")
+        rig.outbox.owe(channel("join", "public.x", "join"))
+        yield()
+        rig.port.sent[0].lost()
+        rig.link("L2")
+        // L1 is no longer the propagation link: its recovery sends nothing and counts nothing.
+        val before = rig.outbox.propComingUps
+        rig.outbox.onLinkRecovered("L1")
+        assertEquals(1, rig.port.sent.size)
+        assertEquals(before, rig.outbox.propComingUps)
+        // L2's own coming-up carries it.
+        rig.outbox.onLinkEstablished("L2")
+        assertEquals(listOf("L1", "L2"), rig.port.sent.map { it.linkId })
+    }
+
+    @Test
+    fun nothingButTheLinkComingUpStartsAFlush() = run { rig ->
+        rig.link("L1")
+        rig.outbox.owe(channel("join", "public.x", "join"))
+        yield()
+        rig.port.sent[0].lost()
+        // Not a distro change, not another action, not a start: a failed upload goes again only on a coming-up.
+        rig.outbox.onDistroChanged()
+        rig.outbox.start()
+        rig.outbox.owe(sentCopy("other"))
+        yield()
+        assertEquals(listOf("channel:hash-of-public.x", "sent:other"), rig.port.sent.map { it.entryId })
+        assertEquals(1, rig.port.uploadsOf("channel:hash-of-public.x").size)
+    }
+
+    @Test
+    fun aProofAfterTheLossReportSettlesItAndItDoesNotGoAgain() = run { rig ->
+        rig.link("L1")
+        val join = channel("join", "public.x", "join")
+        rig.outbox.owe(join)
+        yield()
+        rig.port.sent[0].lost()
+        // The node had the packet after all.
+        rig.port.sent[0].proved()
+        yield()
+        assertEquals(emptyList<OwedEntry>(), rig.outbox.owed())
+        assertTrue(rig.store.rows.isEmpty())
+        assertTrue(rig.lines.warn.any { it.contains("proved after all") })
+        // Mutation: ignoring the late proof uploads it again on the next link.
+        rig.link("L2")
+        rig.outbox.onLinkEstablished("L2")
+        assertEquals(1, rig.port.sent.size)
+    }
+
+    @Test
+    fun aProofLaterThanFiveSecondsIsLoggedAsAViolationAndSettlesAllTheSame() = run { rig ->
+        rig.link("L1")
+        rig.outbox.owe(sentCopy("copy"))
+        yield()
+        rig.clock += 7_000
+        rig.port.sent[0].proved()
+        yield()
+        assertTrue(rig.lines.error.any { it.contains("§1 VIOLATION") && it.contains("7000 ms") })
+        assertEquals(emptyList<OwedEntry>(), rig.outbox.owed())
+    }
+
+    @Test
+    fun aBuildThatThrowsIsSaidKeptOwedAndGoesOnceOnTheNextComingUp() = run { rig ->
+        rig.link("L1")
+        rig.port.failNextBuild(IllegalStateException("the stamp cannot be mined"))
+        val join = channel("join", "public.x", "join")
+        rig.outbox.owe(join)
+        yield()
+        assertTrue(rig.port.sent.isEmpty())
+        assertTrue(rig.lines.error.any { it.contains("the stamp cannot be mined") && it.contains("still owed") })
+        assertEquals(listOf(join), rig.outbox.owed())
+        // A flush under way that listed it does not build it again, and the link coming up does.
+        rig.outbox.onLinkEstablished("L1")
+        assertEquals(1, rig.port.sent.size)
+    }
+
+    @Test
+    fun anUploadWhoseBuildThrowsWhileAFlushThatListedItBuildsAnEarlierEntryIsNotBuiltAgainByThatFlush() = runBlocking {
+        val rig = Rig(this)
+        rig.outbox.start()
+        val early = sentCopy("early")
+        val x = channel("join", "public.x", "x")
+        // Both owed with the link down.
+        rig.outbox.owe(early)
+        rig.outbox.owe(x)
+        rig.link("L1")
+        // The established flush lists early and x, and builds early (a stamp that takes a while).
+        val gate = rig.port.gateNextBuild()
+        val first = launch { rig.outbox.onLinkEstablished("L1") }
+        yield()
+        // A second coming-up (a recovery) lists them too: early is in flight, x is built, and its build throws.
+        rig.port.failNextBuild(IllegalStateException("the key cannot be read"))
+        val second = launch { rig.outbox.onLinkRecovered("L1") }
+        yield()
+        second.join()
+        assertTrue(rig.lines.error.any { it.contains("the key cannot be read") })
+        assertEquals(1, rig.port.builds.count { it.id == x.id })
+        // The first flush reaches x: its failure was decided at this coming-up or later, so it is not built
+        // again (mutation: a build failure left unrecorded is built again by the flush under way, with no
+        // coming-up between).
+        gate.complete(Unit)
+        first.join()
+        assertEquals(1, rig.port.builds.count { it.id == x.id })
+        assertTrue(rig.port.sent.none { it.entryId == x.id })
+        // It goes once on the next coming-up.
+        rig.outbox.onLinkEstablished("L1")
+        assertEquals(2, rig.port.builds.count { it.id == x.id })
+        assertEquals(1, rig.port.sent.count { it.entryId == x.id })
+    }
+
+    // ---- a STALE link replaced by a new one (the third ruling) ----
+
+    @Test
+    fun aReplacedLinkDecidesNothingTheNewLinkDoesNotUploadWhileTheFirstUploadIsOpenAndTheLateProofSettlesIt() = run { rig ->
+        rig.link("L1")
+        val join = channel("join", "public.x", "join")
+        rig.outbox.owe(join)
+        yield()
+        assertEquals(1, rig.port.sent.size)
+        // L1 goes STALE and L2 replaces it: L2's coming-up must not upload the entry a second time
+        // while the first upload is open (mutation: an in-flight check for the same link only).
+        rig.link("L2")
+        rig.outbox.onLinkEstablished("L2")
+        assertEquals(1, rig.port.sent.size)
+        // The node proves the upload over the old link: one upload, one stamp, one fan-out.
+        rig.port.sent[0].proved()
+        yield()
+        assertEquals(emptyList<OwedEntry>(), rig.outbox.owed())
+        rig.link("L3")
+        rig.outbox.onLinkEstablished("L3")
+        assertEquals(1, rig.port.sent.size)
+    }
+
+    @Test
+    fun theOldLinksUploadLostWhileANewerLinkIsUpGoesOnceOnTheNewerLinkAtOnce() = run { rig ->
+        rig.link("L1")
+        val join = channel("join", "public.x", "join")
+        rig.outbox.owe(join)
+        yield()
+        rig.link("L2")
+        rig.outbox.onLinkEstablished("L2")
+        assertEquals(1, rig.port.sent.size)
+        // The old link's upload is reported lost (the phones' receipt timeout, or a Resource's failure):
+        // that is the event. Mutation: leaving it for the next coming-up while the newer link is up.
+        rig.port.sent[0].lost()
+        yield()
+        assertEquals(listOf("L1", "L2"), rig.port.sent.map { it.linkId })
+        assertTrue(rig.lines.error.any { it.contains("goes once on that one now") })
+        // A failure of that upload on the newer link waits for the next coming-up like any other.
+        rig.port.sent[1].lost()
+        yield()
+        assertEquals(2, rig.port.sent.size)
+        rig.link("L3")
+        rig.outbox.onLinkEstablished("L3")
+        assertEquals(listOf("L1", "L2", "L3"), rig.port.sent.map { it.linkId })
+    }
+
+    @Test
+    fun withNoNewerLinkUpAnOldLinksLossWaitsForTheNextComingUp() = run { rig ->
+        rig.link("L1")
+        rig.outbox.owe(channel("join", "public.x", "join"))
+        yield()
+        // L1 was replaced by L2, which has not come up yet (still establishing).
+        rig.link("L2", active = false)
+        rig.port.sent[0].lost()
+        yield()
+        assertEquals(1, rig.port.sent.size)
+        // Not even built: a link that is not up is no event.
+        assertEquals(1, rig.port.builds.size)
+        rig.link("L2")
+        rig.outbox.onLinkEstablished("L2")
+        assertEquals(listOf("L1", "L2"), rig.port.sent.map { it.linkId })
+    }
+
+    @Test
+    fun aLateProofOverTheOldLinkAfterTheLossSentItOnTheNewLinkSettlesItAndTheNewUploadsLossSendsNothing() = run { rig ->
+        rig.link("L1")
+        rig.outbox.owe(channel("join", "public.x", "join"))
+        yield()
+        rig.link("L2")
+        rig.outbox.onLinkEstablished("L2")
+        rig.port.sent[0].lost()
+        yield()
+        assertEquals(2, rig.port.sent.size)
+        // The node then proves the first upload late: owed no more.
+        rig.port.sent[0].proved()
+        yield()
+        assertEquals(emptyList<OwedEntry>(), rig.outbox.owed())
+        // The new link's upload is lost: nothing goes, now or on the next coming-up.
+        rig.port.sent[1].lost()
+        yield()
+        rig.link("L3")
+        rig.outbox.onLinkEstablished("L3")
+        assertEquals(2, rig.port.sent.size)
+        // And if both uploads reached the node, the sibling holds the second as a repeat: the same message.
+        assertEquals(rig.port.sent[0].msgHash, rig.port.sent[1].msgHash)
+    }
+
+    @Test
+    fun aStopDecidesTheOldUploadWithANewerLinkUpAndSendsNothing() = run { rig ->
+        rig.link("L1")
+        rig.outbox.owe(channel("join", "public.x", "join"))
+        yield()
+        rig.link("L2")
+        rig.outbox.onLinkEstablished("L2")
+        rig.outbox.onStop()
+        yield()
+        assertEquals(1, rig.port.sent.size)
+    }
+
+    // ---- flushes and the failure record ----
+
+    @Test
+    fun twoFlushesOnOneLinkWithALossBetweenThemTheEarlierDoesNotUploadAgainWhatTheNewerSawLost() = runBlocking {
+        val rig = Rig(this)
+        rig.outbox.start()
+        val y = sentCopy("y")
+        val ch = channel("join", "public.x", "join")
+        rig.outbox.owe(y)
+        rig.outbox.owe(ch)
+        rig.link("L1")
+        // The established flush builds y (a stamp that takes a while); a recovered flush then runs
+        // and uploads ch, whose packet is reported lost; then the first flush reaches ch.
+        val gate = rig.port.gateNextBuild()
+        val established = launch { rig.outbox.onLinkEstablished("L1") }
+        yield()
+        val recovered = launch { rig.outbox.onLinkRecovered("L1") }
+        yield()
+        recovered.join()
+        // The recovered flush (coming-up 2) skipped y (in flight for the first flush) and uploaded ch.
+        assertEquals(listOf(ch.id), rig.port.sent.map { it.entryId })
+        rig.port.sent.single().lost()
+        gate.complete(Unit)
+        established.join()
+        // The earlier flush uploaded y and did not upload ch again, though ch is owed and not in
+        // flight: mutation, a flush that goes on after a newer one began uploads it with no coming-up.
+        assertEquals(1, rig.port.sent.count { it.entryId == ch.id })
+        assertEquals(1, rig.port.sent.count { it.entryId == y.id })
+    }
+
+    /** An entry y owed after a loss, then the user's own entry ch uploaded at once: the case of the first two tests below. */
+    private suspend fun CoroutineScope.yOwedAfterALossThenChUploaded(rig: Rig): Pair<OwedEntry, OwedEntry> {
+        rig.link("L1")
+        val y = sentCopy("y")
+        rig.outbox.owe(y)
+        yield()
+        rig.port.sent.single { it.entryId == y.id }.lost()
+        yield()
+        val ch = channel("join", "public.x", "join")
+        rig.outbox.owe(ch)
+        yield()
+        assertEquals(1, rig.port.sent.count { it.entryId == ch.id })
+        return y to ch
+    }
+
+    @Test
+    fun theUsersOwnUploadReportedLostWhileARecoveredFlushBuildsAnEarlierEntryIsNotUploadedByThatFlush() = runBlocking {
+        val rig = Rig(this)
+        rig.outbox.start()
+        val (y, ch) = yOwedAfterALossThenChUploaded(rig)
+        // The link goes STALE and recovers: the recovered flush lists y and ch and builds y.
+        val gate = rig.port.gateNextBuild()
+        val flush = launch { rig.outbox.onLinkRecovered("L1") }
+        yield()
+        assertEquals("the flush builds y first", y.id, rig.port.builds.last().id)
+        // ch's packet is reported lost while the flush builds y.
+        rig.port.sent.single { it.entryId == ch.id }.lost()
+        yield()
+        gate.complete(Unit)
+        flush.join()
+        // Mutation: a flush that checks only that the entry is owed and not in flight uploads it at
+        // once, with no coming-up after the failure (Retichat-js 145ca2f).
+        assertEquals(1, rig.port.sent.count { it.entryId == ch.id })
+        assertEquals(2, rig.port.sent.count { it.entryId == y.id })
+        // Nor did the flush mine a stamp for it.
+        assertEquals(1, rig.port.builds.count { it.id == ch.id })
+        // It goes once on the link's next coming-up, which may be on the same link.
+        rig.outbox.onLinkRecovered("L1")
+        assertEquals(2, rig.port.sent.count { it.entryId == ch.id })
+    }
+
+    @Test
+    fun anUploadOnAReplacedLinkDecidedWhileTheNewLinksFlushBuildsAnEarlierEntryGoesOnceOnTheNewLinkAndItsFailureWaits() = runBlocking {
+        val rig = Rig(this)
+        rig.outbox.start()
+        val (y, ch) = yOwedAfterALossThenChUploaded(rig)
+        // L1 goes STALE and L2 replaces it; L2's established flush lists y and ch, and builds y. ch is
+        // open on L1 and so left alone.
+        rig.link("L2")
+        val gate = rig.port.gateNextBuild()
+        val flush = launch { rig.outbox.onLinkEstablished("L2") }
+        yield()
+        assertEquals(y.id, rig.port.builds.last().id)
+        // L1's upload of ch is reported lost: the newer link is up, so it goes once on L2 at once (the third ruling).
+        rig.port.sent.single { it.entryId == ch.id && it.linkId == "L1" }.lost()
+        yield()
+        val onL2 = rig.port.sent.single { it.entryId == ch.id && it.linkId == "L2" }
+        // That upload is reported lost too, still while the flush builds y: a failure waits for the next coming-up.
+        onL2.lost()
+        yield()
+        gate.complete(Unit)
+        flush.join()
+        // Mutation: a flush that does not read when an upload failed uploads it a third time at once.
+        assertEquals(2, rig.port.sent.count { it.entryId == ch.id })
+        assertEquals("built for L1, and again for the send on L2, never a third time", 2, rig.port.builds.count { it.id == ch.id })
+        rig.link("L3")
+        rig.outbox.onLinkEstablished("L3")
+        assertEquals(3, rig.port.sent.count { it.entryId == ch.id })
+    }
+
+    @Test
+    fun anUploadAnEarlierFlushMadeReportedLostWhileALaterFlushOnTheSameLinkBuildsIsNotUploadedByIt() = runBlocking {
+        val rig = Rig(this)
+        rig.outbox.start()
+        val y = sentCopy("y")
+        val ch = channel("join", "public.x", "join")
+        // y's upload is open on L1 (the user's own action) and ch is owed with no link up: [y, ch].
+        rig.link("L1")
+        rig.outbox.owe(y)
+        yield()
+        val yUpload = rig.port.sent.single()
+        rig.port.held = null
+        rig.outbox.owe(ch)
+        rig.link("L1")
+        // The first flush (coming-up 1) leaves y to its open upload and uploads ch.
+        rig.outbox.onLinkEstablished("L1")
+        val chUpload = rig.port.sent.single { it.entryId == ch.id }
+        // y's upload is lost before the second flush starts; the second (coming-up 2) builds y.
+        yUpload.lost()
+        yield()
+        val gate = rig.port.gateNextBuild()
+        val second = launch { rig.outbox.onLinkRecovered("L1") }
+        yield()
+        assertEquals(y.id, rig.port.builds.last().id)
+        // ch, made by the FIRST flush, is reported lost while the second builds y. The failure is
+        // recorded at the coming-up current now (2), not the first flush's (1).
+        chUpload.lost()
+        yield()
+        gate.complete(Unit)
+        second.join()
+        // Mutation: recording the failure at the coming-up of the flush that made the upload (1) lets the
+        // second flush (2) upload it again at once.
+        assertEquals(1, rig.port.sent.count { it.entryId == ch.id })
+        assertEquals(1, rig.port.builds.count { it.id == ch.id })
+    }
+
+    // ---- two actions on one channel whose decisions overlap ----
+
+    /**
+     * The user joins CH and the join's upload stays open on L1; L2 replaces L1; the user leaves CH and the
+     * leave goes at once on L2. An older entry `early` (owed after a loss) is listed before the leave. A
+     * recovered flush on L2 builds `early`. Returns what the cases below decide in different orders.
+     */
+    private inner class Overlap(val scope: CoroutineScope, val rig: Rig) {
+        val early = sentCopy("early")
+        val join = channel("join", "public.x", "join")
+        val leave = channel("leave", "public.x", "leave")
+        lateinit var joinUpload: Sent
+        lateinit var leaveUpload: Sent
+        lateinit var flush: kotlinx.coroutines.Job
+        lateinit var gate: CompletableDeferred<Unit>
+
+        suspend fun setUp() {
+            rig.link("L1")
+            rig.outbox.owe(early)
+            yield()
+            rig.port.sent.single { it.entryId == early.id }.lost()
+            yield()
+            rig.outbox.owe(join)
+            yield()
+            joinUpload = rig.port.sent.single { it.entryId == join.id }
+            rig.link("L2")
+            rig.outbox.owe(leave)
+            yield()
+            leaveUpload = rig.port.sent.single { it.msgHash == "leave" }
+            assertEquals("the leave goes at once on the newer link", "L2", leaveUpload.linkId)
+            // A coming-up's flush on L2 lists early, then the leave, and builds early.
+            gate = rig.port.gateNextBuild()
+            flush = scope.launch { rig.outbox.onLinkRecovered("L2") }
+            yield()
+            assertEquals(early.id, rig.port.builds.last().id)
+        }
+
+        suspend fun finish() {
+            gate.complete(Unit)
+            flush.join()
+            // The flush neither uploaded the leave nor mined a stamp for it.
+            assertEquals(1, rig.port.sent.count { it.msgHash == "leave" })
+            assertEquals(1, rig.port.builds.count { it.msgHash == "leave" })
+            // It goes once on the next coming-up; the join, owed no more, never goes again.
+            rig.outbox.onLinkEstablished("L2")
+            assertEquals(2, rig.port.sent.count { it.msgHash == "leave" })
+            assertEquals(1, rig.port.sent.count { it.msgHash == "join" })
+        }
+    }
+
+    @Test
+    fun aFailureBelongsToTheExactMessageTheJoinDecidedByItsLossAfterTheLeavesLossTakesNoRecordAndCostsTheLeaveNothing() = runBlocking {
+        val rig = Rig(this); rig.outbox.start()
+        val o = Overlap(this, rig); o.setUp()
+        // The leave's upload is reported lost while the flush builds `early`: its record is written.
+        o.leaveUpload.lost()
+        // Then the old link's loss decides the join, owed no more: it keeps no record, and takes no other's.
+        o.joinUpload.lost()
+        yield()
+        assertNotNull(rig.outbox.unproved.at(o.leave))
+        assertNull("a message owed no more keeps no record", rig.outbox.unproved.at(o.join))
+        o.finish()
+    }
+
+    @Test
+    fun theJoinDecidedBeforeTheLeavesLossOrProvedLateAfterItChangesNothingForTheLeave() = runBlocking {
+        // Before: the join's loss, then the leave's.
+        run {
+            val rig = Rig(this); rig.outbox.start()
+            val o = Overlap(this, rig); o.setUp()
+            o.joinUpload.lost(); yield()
+            o.leaveUpload.lost(); yield()
+            assertNull(rig.outbox.unproved.at(o.join))
+            assertNotNull(rig.outbox.unproved.at(o.leave))
+            o.finish()
+        }
+        // Proved after: the leave's loss, then the join proved (late, over the old link).
+        run {
+            val rig = Rig(this); rig.outbox.start()
+            val o = Overlap(this, rig); o.setUp()
+            o.leaveUpload.lost(); yield()
+            o.joinUpload.proved(); yield()
+            assertNotNull("the older action's proof does not clear the newer's record", rig.outbox.unproved.at(o.leave))
+            o.finish()
+        }
+        // Reported lost before the leave's loss and proved late after it.
+        run {
+            val rig = Rig(this); rig.outbox.start()
+            val o = Overlap(this, rig); o.setUp()
+            o.joinUpload.lost(); yield()
+            o.leaveUpload.lost(); yield()
+            o.joinUpload.proved(); yield()
+            assertNotNull(rig.outbox.unproved.at(o.leave))
+            o.finish()
+        }
+    }
+
+    @Test
+    fun theJoinsBuildThrowingAfterTheLeavesLossAlsoTakesNothingFromTheLeave() = runBlocking {
+        val rig = Rig(this); rig.outbox.start()
+        val early = sentCopy("early")
+        val join = channel("join", "public.x", "join")
+        val leave = channel("leave", "public.x", "leave")
+        // The join's build is the one that throws, and it is decided after the leave's loss.
+        rig.link("L1")
+        rig.outbox.owe(early)
+        yield()
+        rig.port.sent.single().lost()
+        yield()
+        rig.port.held = null
+        rig.outbox.owe(join)           // owed, link down
+        rig.link("L1")
+        val joinGate = rig.port.gateNextBuild()
+        val joinFlush = launch { rig.outbox.onLinkEstablished("L1") }  // builds early (gated)
+        yield()
+        // The user leaves while that flush builds: the leave goes at once and is lost.
+        rig.outbox.owe(leave)
+        yield()
+        rig.port.sent.single { it.msgHash == "leave" }.lost()
+        yield()
+        joinGate.complete(Unit)
+        joinFlush.join()
+        // The flush listed [early, join]; the join was replaced by the leave, so it was never built or sent.
+        assertTrue(rig.port.builds.none { it.msgHash == "join" })
+        assertEquals(1, rig.port.sent.count { it.msgHash == "leave" })
+        assertNull(rig.outbox.unproved.at(join))
+        assertNotNull(rig.outbox.unproved.at(leave))
+    }
+
+    @Test
+    fun twoSentCopiesInPlaceOfAJoinAndALeaveTheOlderIsStillOwedAndGoesOnceOnTheNewerLinkAtOnce() = run { rig ->
+        val older = sentCopy("older")
+        val newer = sentCopy("newer")
+        rig.link("L1")
+        rig.outbox.owe(older)
+        yield()
+        rig.link("L2")
+        rig.outbox.owe(newer)
+        yield()
+        // The older copy's upload (open on the replaced L1) is lost while L2 is up: once on L2 at once.
+        rig.port.sent.single { it.entryId == older.id }.lost()
+        yield()
+        assertEquals(listOf("L1", "L2"), rig.port.sent.filter { it.entryId == older.id }.map { it.linkId })
+        assertEquals(1, rig.port.sent.count { it.entryId == newer.id })
+    }
+
+    @Test
+    fun theOlderActionsProofDoesNotClearTheNewerActionsFailureRecord() = runBlocking {
+        val rig = Rig(this)
+        rig.outbox.start()
+        rig.link("L1")
+        val join = channel("join", "public.x", "join")
+        rig.outbox.owe(join)
+        yield()
+        val joinUpload = rig.port.sent.single()
+        rig.link("L2")
+        val leave = channel("leave", "public.x", "leave")
+        rig.outbox.owe(leave)
+        yield()
+        val leaveUpload = rig.port.sent.single { it.msgHash == "leave" }
+        leaveUpload.lost()
+        // The join, proved late over the old link, is owed no more and clears only its own record.
+        joinUpload.proved()
+        yield()
+        assertNotNull(rig.outbox.unproved.at(leave))
+        assertNull(rig.outbox.unproved.at(join))
+        assertEquals(listOf(leave), rig.outbox.owed())
+    }
+
+    @Test
+    fun aReplacedActionsFailureRecordGoesWithIt() = run { rig ->
+        rig.link("L1")
+        val join = channel("join", "public.x", "join")
+        rig.outbox.owe(join)
+        yield()
+        rig.port.sent.single().lost()
+        assertNotNull(rig.outbox.unproved.at(join))
+        assertEquals(1, rig.outbox.unproved.size)
+        // The user leaves: the join is owed no more, and so is its record.
+        rig.outbox.owe(channel("leave", "public.x", "leave"))
+        assertNull(rig.outbox.unproved.at(join))
+        assertEquals(0, rig.outbox.unproved.size)
+    }
+
+    @Test
+    fun aReplacedActionIsNeverSentEvenWhenItWasReplacedWhileItsUploadWasBeingBuilt() = runBlocking {
+        val rig = Rig(this)
+        rig.outbox.start()
+        rig.link("L1")
+        val gate = rig.port.gateNextBuild()
+        val join = channel("join", "public.x", "join")
+        rig.outbox.owe(join)
+        yield()
+        // The user leaves while the join's stamp is being mined.
+        val leave = channel("leave", "public.x", "leave")
+        rig.outbox.owe(leave)
+        yield()
+        gate.complete(Unit)
+        yield()
+        // Only the newest action goes: the siblings would otherwise make the change the user undid.
+        assertEquals(listOf("leave"), rig.port.sent.map { it.msgHash })
+        assertTrue(rig.lines.info.any { it.contains("was replaced by a later action") })
+    }
+
+    @Test
+    fun atMostOneUploadOfAnEntryIsInFlightAtATime() = run { rig ->
+        rig.link("L1")
+        rig.outbox.owe(channel("join", "public.x", "join"))
+        yield()
+        // Established again (a new coming-up) while the first upload is open: not uploaded again.
+        rig.outbox.onLinkEstablished("L1")
+        rig.outbox.onLinkRecovered("L1")
+        assertEquals(1, rig.port.sent.size)
+    }
+
+    @Test
+    fun anOpenUploadOfAnOlderActionDoesNotHoldBackTheNewerActionOnTheSameChannel() = run { rig ->
+        rig.link("L1")
+        val join = channel("join", "public.x", "join")
+        rig.outbox.owe(join)
+        yield()
+        assertEquals(1, rig.port.sent.size)
+        // The user leaves while no link is up: the leave is owed, the join's upload is still open on L1.
+        rig.port.held = null
+        val leave = channel("leave", "public.x", "leave")
+        rig.outbox.owe(leave)
+        // L2 comes up: the leave goes. At most one upload is in flight per MESSAGE, not per channel.
+        rig.link("L2")
+        rig.outbox.onLinkEstablished("L2")
+        assertEquals(listOf("join", "leave"), rig.port.sent.map { it.msgHash })
+        assertEquals("L2", rig.port.sent.last().linkId)
+    }
+
+    @Test
+    fun aFlushWhoseLinkGoesDownMidwayLeavesTheRestForTheNextOne() = runBlocking {
+        val rig = Rig(this)
+        rig.outbox.start()
+        rig.outbox.owe(sentCopy("a"))
+        rig.outbox.owe(sentCopy("b"))
+        rig.link("L1")
+        val gate = rig.port.gateNextBuild()
+        val flush = launch { rig.outbox.onLinkEstablished("L1") }
+        yield()
+        rig.port.held = null
+        gate.complete(Unit)
+        flush.join()
+        // The first was built for a link that is gone: nothing left, nothing decided. Nor the second.
+        assertTrue(rig.port.sent.isEmpty())
+        assertEquals(2, rig.outbox.owed().size)
+        assertTrue(rig.lines.error.isEmpty())
+        rig.link("L2")
+        rig.outbox.onLinkEstablished("L2")
+        assertEquals(2, rig.port.sent.size)
+    }
+
+    // ---- the phones' event ----
+
+    @Test
+    fun aResourcesFailureDecidesItLikeAPacketsTimeout() = run { rig ->
+        rig.link("L1")
+        rig.outbox.owe(sentCopy("big"))
+        yield()
+        rig.port.sent[0].lost()
+        yield()
+        assertTrue(rig.lines.error.any { it.contains("was not proved") })
+        assertEquals(1, rig.outbox.owed().size)
+    }
+
+    @Test
+    fun anUploadThatCouldNotBeQueuedLeavesNothingDecided() = run { rig ->
+        rig.link("L1", active = false)
+        // Not ACTIVE when the user acts: it waits (and is never started).
+        rig.outbox.owe(sentCopy("copy"))
+        yield()
+        assertTrue(rig.port.builds.isEmpty())
+        assertTrue(rig.lines.error.isEmpty())
+    }
+
+    @Test
+    fun theOutboxDoesNotUseAClockOrATimerToSendAnything() {
+        val source = java.io.File("src/main/kotlin/com/newendian/retichat/service/DistroOutbox.kt").readText()
+        val code = source.lines().filterNot { it.trim().startsWith("*") || it.trim().startsWith("//") || it.trim().startsWith("/*") }.joinToString("\n")
+        for (forbidden in listOf("delay(", "Thread.sleep", "Timer", "withTimeout", "schedule(", "postDelayed", "AlarmManager")) {
+            assertFalse(forbidden, code.contains(forbidden))
+        }
+    }
+}
