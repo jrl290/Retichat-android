@@ -1214,6 +1214,9 @@ class RfedChannelClient(
             )
             channelDao.bumpLastMessageTime(channelHashHex, result.timestampMs)
             _activity.value = System.currentTimeMillis()
+            // One line per post stored, saying whose it was taken for: "own" is a post of the user's device or of the
+            // distro this device holds (staging probe: test-harnesses/staging/probe_phone_distro_channels.mjs).
+            Log.i(TAG, "Channel post stored: #${channel.channelName} src=${sourceHashHex.take(16)} as=${if (isOutbound) "own" else "incoming"} content='${content.take(40)}'")
 
             if (!isOutbound &&
                 UserPreferences.isChannelNotificationsEnabled(appContext, channelHashHex)
