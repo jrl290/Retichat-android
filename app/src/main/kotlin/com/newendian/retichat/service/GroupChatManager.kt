@@ -117,6 +117,7 @@ class GroupChatManager(
         members: List<String>,
     ) {
         val ownKey = ownKeyEntry()
+        Log.i(TAG, "Accept for group ${groupId.take(8)} to ${members.count { it != selfHex }} member(s), own key ${if (ownKey != null) "carried" else "NOT carried"}")
         members.filter { it != selfHex }.forEach { target ->
             send(target) { handle ->
                 GroupEnvelopes.write(handle, GroupEnvelopes.accept(groupId, selfHex, ownKey))
@@ -194,6 +195,7 @@ class GroupChatManager(
         members: List<String>,
     ) {
         val ownKey = ownKeyEntry()
+        Log.i(TAG, "Leave for group ${groupId.take(8)} to ${members.count { it != selfHex }} member(s), own key ${if (ownKey != null) "carried" else "NOT carried"}")
         members.filter { it != selfHex }.forEach { target ->
             send(target, "") { handle ->
                 GroupEnvelopes.write(handle, GroupEnvelopes.leave(groupId, selfHex, ownKey))

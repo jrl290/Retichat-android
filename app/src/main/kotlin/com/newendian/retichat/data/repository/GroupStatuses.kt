@@ -234,7 +234,7 @@ class GroupStatusEngine(
      * (RFed-spec Group.md, "The creator's answer"). Returns whether it counted.
      */
     suspend fun takeDirect(arrival: Arrival): Boolean = lock.withLock {
-        val taken = takeChange(arrival.chat, arrival.src, arrival.action, arrival.msgId, arrival.timestampMs, arrival.signature, arrival.packed)
+        val taken = takeChange(arrival.chat, arrival.src, arrival.action, arrival.msgId, arrival.timestampMs, arrival.signature, arrival.packed, "directly")
         val counted = taken == Taken.COUNTED
         if (counted && arrival.action == GroupChatManager.Action.ACCEPT && arrival.senderKey != null) {
             answerAccept(arrival.chat, arrival.src)
@@ -268,8 +268,8 @@ class GroupStatusEngine(
         all.take(memberCount).forEachIndexed { index, element ->
             val result = if (joined) takeElement(chat, groupId, element) else "the user has not accepted the group"
             when (result) {
-                COUNTED -> counted++
-                HELD -> held++
+                COUNTED -> { counted++; log("Element $index of the status for group ${groupId.take(8)}: counted") }
+                HELD -> { held++; log("Element $index of the status for group ${groupId.take(8)}: held until its key is here") }
                 else -> {
                     skipped++
                     log("Skipped element $index of the status for group ${groupId.take(8)}: $result")
@@ -326,7 +326,7 @@ class GroupStatusEngine(
         // The key it carries is remembered as the one an accept arriving directly brings.
         unpacked.senderKey?.let { remember(src, it) }
         val taken = takeChange(
-            chat, src, action, unpacked.hash.toHex(), (unpacked.timestamp * 1000).toLong(), unpacked.signature, element,
+            chat, src, action, unpacked.hash.toHex(), (unpacked.timestamp * 1000).toLong(), unpacked.signature, element, "in a status",
         )
         return if (taken == Taken.COUNTED) COUNTED else HELD
     }
@@ -346,10 +346,19 @@ class GroupStatusEngine(
         timestampMs: Long,
         signature: Int,
         packed: ByteArray?,
+        via: String,
     ): Taken = when (GroupStatuses.verdict(signature, switched)) {
         GroupStatuses.Verdict.HOLD -> { hold(chat, src, action, msgId, packed); Taken.HELD }
-        GroupStatuses.Verdict.IGNORE -> Taken.IGNORED
-        GroupStatuses.Verdict.COUNT -> { applyChange(chat, src, action, msgId, timestampMs, packed); Taken.COUNTED }
+        GroupStatuses.Verdict.IGNORE -> {
+            log("Group ${chat.groupIdHex.orEmpty().take(8)}: $action of ${src.take(12)} arriving $via ignored: its signature does not verify (signature=$signature)")
+            Taken.IGNORED
+        }
+        GroupStatuses.Verdict.COUNT -> {
+            // Greppable for the staging probe (test-harnesses/staging/probe_phone_group_statuses.mjs).
+            log("Group ${chat.groupIdHex.orEmpty().take(8)}: $action of ${src.take(12)} arriving $via counted, ${if (signature == Signature.VALIDATED) "verified" else "unverified"} (signature=$signature)")
+            applyChange(chat, src, action, msgId, timestampMs, packed)
+            Taken.COUNTED
+        }
     }
 
     /**

@@ -16,5 +16,12 @@
                 <action android:name="com.newendian.retichat.DEBUG_DISTRO" />
             </intent-filter>
         </receiver>
+        <receiver
+            android:name=".debug.GroupDebugReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.newendian.retichat.DEBUG_GROUP" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>
