@@ -5,6 +5,8 @@ import android.util.Base64
 import android.util.Log
 import com.newendian.retichat.GroupMemberStatuses
 import com.newendian.retichat.MemberStatus
+import com.newendian.retichat.PhotoLocationNotRemoved
+import com.newendian.retichat.PhotoMetadata
 import com.newendian.retichat.RetichatApp
 import com.newendian.retichat.bridge.GroupEntry
 import com.newendian.retichat.bridge.LxmfFields
@@ -527,9 +529,20 @@ class ChatRepository(
 
     /**
      * Send a text message in a 1:1 or group chat.
+     *
+     * The one entry for what the user composes (direct, group and distro
+     * sends alike), and so the one place every attachment is cleaned: a photo
+     * leaves without where it was taken (James, 2026-10-05). Before anything is
+     * stored or sent, each attachment goes through [PhotoMetadata]; one that
+     * cannot be made safe stops the whole send with [PhotoLocationNotRemoved].
+     * No other path needs it: a group relay forwards text only, and a queued
+     * message's attachments are the files stored by the send below, cleaned.
      */
     suspend fun sendMessage(chatId: String, content: String, attachmentFiles: List<Pair<String, ByteArray>> = emptyList()) {
         Log.d(TAG, "sendMessage: chatId=$chatId, content='${content.take(40)}', routerHandle=$routerHandle, selfDest=${selfDestHash.toHex().take(16)}")
+        val attachments = attachmentFiles.map { (filename, data) ->
+            filename to (PhotoMetadata.withoutLocation(data) ?: throw PhotoLocationNotRemoved(filename))
+        }
         val chat = chatDao.findById(chatId)
         if (chat == null) {
             Log.e(TAG, "sendMessage: chat not found for id=$chatId")
@@ -537,11 +550,11 @@ class ChatRepository(
         }
 
         if (chat.isGroup) {
-            sendGroupMessage(chat, content, attachmentFiles)
+            sendGroupMessage(chat, content, attachments)
         } else {
             val destHash = chat.memberHashes.hexToBytes()
             Log.d(TAG, "sendMessage: direct to ${chat.memberHashes.take(16)}, destHash ${destHash.size} bytes")
-            sendDirectMessage(chatId, destHash, content, attachmentFiles)
+            sendDirectMessage(chatId, destHash, content, attachments)
         }
     }
 

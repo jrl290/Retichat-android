@@ -3,6 +3,7 @@ package com.newendian.retichat.ui.conversation
 import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -50,6 +51,8 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.paging.compose.collectAsLazyPagingItems
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import com.newendian.retichat.PhotoLocationNotRemoved
+import com.newendian.retichat.PhotoMetadata
 import com.newendian.retichat.RetichatApp
 import com.newendian.retichat.bridge.RetichatBridge
 import com.newendian.retichat.data.db.entity.AttachmentEntity
@@ -176,10 +179,18 @@ private fun DmConversationContent(
                     } else null
                 } ?: uri.lastPathSegment ?: "attachment"
 
-                val bytes = cr.openInputStream(uri)?.use { it.readBytes() }
-                if (bytes != null && bytes.isNotEmpty()) {
-                    pendingAttachmentName = filename
-                    pendingAttachmentData = bytes
+                val picked = cr.openInputStream(uri)?.use { it.readBytes() }
+                if (picked != null && picked.isNotEmpty()) {
+                    // A photo leaves without where it was taken (James,
+                    // 2026-10-05): held as it will leave, so the preview shows
+                    // what is sent, and one that cannot be made safe is not held.
+                    val bytes = PhotoMetadata.withoutLocation(picked)
+                    if (bytes == null) {
+                        Toast.makeText(context, PhotoLocationNotRemoved.messageFor(filename), Toast.LENGTH_LONG).show()
+                    } else {
+                        pendingAttachmentName = filename
+                        pendingAttachmentData = bytes
+                    }
                 }
             } catch (e: Exception) {
                 android.util.Log.e("ConversationScreen", "Failed to read attachment", e)

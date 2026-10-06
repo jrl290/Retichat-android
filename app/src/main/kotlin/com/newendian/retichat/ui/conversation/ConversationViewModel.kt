@@ -1,5 +1,7 @@
 package com.newendian.retichat.ui.conversation
 
+import android.util.Log
+import android.widget.Toast
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -7,6 +9,8 @@ import androidx.paging.Pager
 import androidx.paging.PagingConfig
 import androidx.paging.PagingData
 import androidx.paging.cachedIn
+import com.newendian.retichat.PhotoLocationNotRemoved
+import com.newendian.retichat.RetichatApp
 import com.newendian.retichat.data.db.entity.AttachmentEntity
 import com.newendian.retichat.data.db.entity.ChatEntity
 import com.newendian.retichat.data.db.entity.GroupMemberEntity
@@ -92,7 +96,14 @@ class ConversationViewModel(
     fun sendWithAttachment(content: String, filename: String, data: ByteArray) {
         val text = OutgoingText.of(content)
         viewModelScope.launch {
-            repository.sendMessage(chatId, text, listOf(filename to data))
+            try {
+                repository.sendMessage(chatId, text, listOf(filename to data))
+            } catch (e: PhotoLocationNotRemoved) {
+                // A photo leaves without where it was taken (James, 2026-10-05):
+                // nothing was stored or sent; say why (this runs on Main).
+                Log.w("ConversationVM", "not sent: ${e.message}")
+                RetichatApp.appInstance?.let { Toast.makeText(it, e.message, Toast.LENGTH_LONG).show() }
+            }
         }
     }
 
