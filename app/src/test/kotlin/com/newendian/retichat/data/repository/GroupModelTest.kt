@@ -65,9 +65,10 @@ class GroupModelTest {
                 // Naming someone else (GROUP_SENDER not the source's own).
                 assertFalse(rule(action, held = held, namesOther = true))
                 assertFalse(rule(action, held = held, signature = Signature.INVALID))
-                // No key for the source here yet: counted, as v0.1.8 counts it
-                // (James, 2026-10-05). An unverifiable leave is final; the next
-                // release carries the member's key in each accept and leave.
+                // No key for the source here and none carried that binds: the rule
+                // lets it through, and its worth is decided by GroupStatuses.verdict
+                // (counted until the switch, held from it): a message that carries
+                // the key is verified or forged before it gets here.
                 assertTrue(rule(action, held = held, signature = Signature.SOURCE_UNKNOWN))
             }
             assertFalse(rule(action, held = Held.NONE, sourceStatus = null))
@@ -189,34 +190,41 @@ class GroupModelTest {
         assertTrue(received.contains("namesOther = DeliveryPolicy.namesOther(fields.group(GroupEntry.SENDER), srcHex)"))
         assertTrue(received.contains("closed = here.closed"))
         assertTrue(body(repo, "groupStanding").contains("UserPreferences.isGroupClosed(appContext, groupId)"))
-        // No member's status is changed for GROUP_SENDER.
+        // No member's status is changed for GROUP_SENDER: the engine is handed the packet source,
+        // and moves the member the source names.
         assertFalse(repo.contains("groupSender ?: srcHex"))
-        assertTrue(body(repo, "handleGroupMessage").contains("messageDao.setGroupMemberStatus(chat.id, srcHex, next)"))
+        assertTrue(body(repo, "handleGroupMessage").contains("src = srcHex,"))
+        assertTrue(body(File("src/main/kotlin/com/newendian/retichat/data/repository/GroupStatuses.kt").readText(), "applyChange")
+            .contains("store.setMemberStatus(chat.id, src, next)"))
     }
 
     /**
-     * James chose v0.1.8's filter behaviour for this release (2026-10-05): an
-     * invite the filter let through allowlists its listed members (each once
-     * its key checks out) and its inviter as it is processed, and a member's
-     * own accept allowlists it, in a pending group too. The next release adds
-     * the creator answering an accept with the current member statuses and
-     * the member's key carried in each accept and leave.
+     * RFed-spec Group.md, "The privacy filter" (James, 2026-10-06): the members
+     * of a group pass the filter from the user's accept, or from creating the
+     * group, and no sooner. An invite brings the members' keys only (on hidden
+     * rows) and allows nobody; the creator's `status` answer to the user's accept
+     * covers what the filter dropped before it. Until this change (from
+     * 2026-10-05) an invite allowlisted its listed members and its inviter as it
+     * was processed, as v0.1.8 does, and a member's accept allowlisted it in a
+     * pending group too.
      */
     @Test
-    fun anInviteAllowlistsItsListedMembersAsV018DoesAndAHeldGroupKeepsItsList() {
+    fun anInviteBringsKeysOnlyAndTheMembersPassTheFilterFromTheUsersAcceptAndCreation() {
         val invite = body(repo, "handleGroupInvite")
-        assertTrue(invite.contains("ensureAllowlistedContact(memberHash)"))
-        assertTrue(invite.contains("if (srcHex in members && srcHex != self) ensureAllowlistedContact(srcHex)"))
+        assertFalse(invite.contains("ensureAllowlistedContact("))
+        assertTrue(invite.contains("ensureContact(memberHash)"))
         // The keys loop runs only over the held list, or the new group's own.
         assertTrue(invite.contains("if (memberHash !in members || memberHash == self) return@forEach"))
         val held = invite.indexOf("if (standing.chat != null) {\n")
         val create = invite.indexOf("chatDao.upsert(")
         assertTrue("a held group returns before anything is created", held in 0 until create)
-        assertTrue(body(repo, "acceptGroupInvite").contains("ensureAllowlistedContact(it)"))
+        // The user's accept and the user's creation let every member through.
+        assertTrue(body(repo, "acceptGroupInvite").contains("allMembers.filter { it != selfHex }.forEach { ensureAllowlistedContact(it) }"))
         assertTrue(body(repo, "createGroupChat").contains("ensureAllowlistedContact(hexHash)"))
-        // A member's own accept, pending group or joined.
-        val group = body(repo, "handleGroupMessage")
-        assertTrue(group.contains("if (accepted && srcHex != selfHex()) {"))
-        assertFalse(group.contains("Held.JOINED && srcHex"))
+        // A member's own accept lets it through only in a group the user joined: the engine's, not the pending group's.
+        assertFalse(body(repo, "handleGroupMessage").contains("ensureAllowlistedContact("))
+        val apply = body(File("src/main/kotlin/com/newendian/retichat/data/repository/GroupStatuses.kt").readText(), "applyChange")
+        assertTrue(apply.contains("if (accepted && src != self && GroupMemberStatuses.held(true, members, self) == DeliveryPolicy.Held.JOINED) {"))
+        assertTrue(apply.contains("store.allow(src)"))
     }
 }

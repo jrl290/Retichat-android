@@ -66,18 +66,25 @@ class DeliveryPolicyTest {
         assertFalse(repo.contains("Dropped group invite from stranger"))
     }
 
+    /**
+     * RFed-spec Group.md, "The privacy filter" (James, 2026-10-06): the members
+     * of a group pass the filter from the user's accept, or from creating the
+     * group, not from the invite's arrival (the creator's `status` answer to the
+     * accept covers what the filter dropped before). From 2026-10-05 to that
+     * change an invite allowlisted its listed members and its inviter as it was
+     * processed, as v0.1.8 does, and a member's accept allowlisted it in a
+     * pending group too.
+     */
     @Test
-    fun theUserAllowlistsWhomItChatsWithAndTheMembersOfItsGroups() {
+    fun theUserAllowlistsWhomItChatsWithAndTheMembersOfGroupsItCreatesOrAccepts() {
         assertTrue(body(repo, "getOrCreateDirectChat").contains("addContact(destHash)"))
         assertTrue(body(repo, "createGroupChat").contains("ensureAllowlistedContact("))
         assertTrue(body(repo, "acceptGroupInvite").contains("ensureAllowlistedContact("))
-        // James chose v0.1.8's filter behaviour for this release (2026-10-05):
-        // an invite allowlists its listed members whose key checks out and its
-        // inviter as it is processed, and a member's own accept allowlists it.
-        // The next release adds the creator answering an accept with the
-        // current member statuses and the member's key carried in each accept
-        // and leave.
-        assertEquals(1, Regex("ensureAllowlistedContact\\(").findAll(body(repo, "handleGroupMessage")).count())
-        assertEquals(2, Regex("ensureAllowlistedContact\\(").findAll(body(repo, "handleGroupInvite")).count())
+        // An invite allows nobody; a member's own accept is the engine's (GroupStatusEngine.applyChange: only in a joined group).
+        assertEquals(0, Regex("ensureAllowlistedContact\\(").findAll(body(repo, "handleGroupMessage")).count())
+        assertEquals(0, Regex("ensureAllowlistedContact\\(").findAll(body(repo, "handleGroupInvite")).count())
+        assertTrue(body(repo, "handleGroupInvite").contains("ensureContact(memberHash)"))
+        // The only other caller: the engine's store, behind the engine's own joined-group check.
+        assertTrue(repo.contains("allowContact = { ensureAllowlistedContact(it) }"))
     }
 }

@@ -9,6 +9,7 @@ import com.newendian.retichat.PhotoLocationNotRemoved
 import com.newendian.retichat.PhotoMetadata
 import com.newendian.retichat.RetichatApp
 import com.newendian.retichat.bridge.GroupEntry
+import com.newendian.retichat.bridge.JniGroupNative
 import com.newendian.retichat.bridge.LxmfFields
 import com.newendian.retichat.service.DistroCodec
 import com.newendian.retichat.service.DistroManager
@@ -25,6 +26,7 @@ import com.newendian.retichat.service.UserPreferences
 import com.newendian.retichat.data.db.dao.ChatDao
 import com.newendian.retichat.data.db.dao.ChatPreview
 import com.newendian.retichat.data.db.dao.ContactDao
+import com.newendian.retichat.data.db.dao.GroupStatusDao
 import com.newendian.retichat.data.db.dao.MessageDao
 import com.newendian.retichat.data.db.entity.*
 import com.newendian.retichat.data.model.*
@@ -53,6 +55,7 @@ class ChatRepository(
     private val chatDao: ChatDao,
     private val messageDao: MessageDao,
     private val contactDao: ContactDao,
+    private val groupStatusDao: GroupStatusDao,
     private val attachmentDir: File,
     private val scope: CoroutineScope,
 ) {
@@ -70,6 +73,35 @@ class ChatRepository(
 
     /** Lazily initialised after configure(); non-null only when routerHandle != 0. */
     private var groupChatManager: GroupChatManager? = null
+
+    /**
+     * Member statuses and keys (RFed-spec Group.md, 2026-10-06): what an accept
+     * or leave is worth by its signature, what it changes, the creator's copies
+     * and its `status` answer, and the entries held for a key. See
+     * [GroupStatuses]; the decisions are the engine's, the storage Room's.
+     */
+    private val groupStatuses = GroupStatusEngine(
+        store = RoomGroupStatusStore(
+            chatDao, messageDao, groupStatusDao,
+            allowContact = { ensureAllowlistedContact(it) },
+            keepContactKey = { hex, key ->
+                ensureContact(hex)
+                contactDao.setPublicKey(hex, key.toHex())
+            },
+        ),
+        native = JniGroupNative,
+        selfHex = { selfHex() },
+        answer = { chat, member, statuses ->
+            val groupId = chat.groupIdHex
+            val manager = groupChatManager
+            if (groupId == null || manager == null) {
+                Log.w(TAG, "status for ${chat.id} to ${member.take(8)} not sent: ${if (groupId == null) "no group id" else "stack offline"}")
+            } else {
+                manager.sendStatus(groupId, member, statuses)
+            }
+        },
+        log = { Log.i(TAG, it) },
+    )
 
     fun configure(selfHash: ByteArray, router: Long, identity: Long) {
         selfDestHash = selfHash
@@ -290,10 +322,12 @@ class ChatRepository(
     }
 
     /**
-     * [hex] passes the privacy filter from now on: a listed member of a group
-     * held here (an invite the filter let through, the user's creation or
-     * accept, the member's own accept), accepted by association. A new row is
-     * hidden (no contact); an existing one keeps whether it is a contact.
+     * [hex] passes the privacy filter from now on: a member of a group the
+     * user created or accepted (RFed-spec Group.md, "The privacy filter": the
+     * members pass from the user's accept, or from creating the group, not
+     * from the invite's arrival; a member's own accept in a joined group
+     * likewise), accepted by association. A new row is hidden (no contact); an
+     * existing one keeps whether it is a contact.
      */
     private suspend fun ensureAllowlistedContact(hex: String) {
         contactDao.insertIfAbsent(ContactEntity(destHashHex = hex, isAllowlisted = true))
@@ -421,6 +455,7 @@ class ChatRepository(
                 name = name,
                 memberHashes = hashes,
                 groupIdHex = groupIdHex,
+                creatorHex = selfHex(),
             )
         )
 
@@ -1384,6 +1419,7 @@ class ChatRepository(
                     namesOther = DeliveryPolicy.namesOther(fields.group(GroupEntry.SENDER), srcHex),
                     closed = here.closed,
                     signature = signature,
+                    sourceIsCreator = here.sourceIsCreator,
                 )
                 if (!allowed) {
                     Log.i(TAG, "onMessageReceived: DROPPED group ${action ?: "message"} for ${groupId.take(8)} from ${srcHex.take(8)} (group ${here.held}, source ${here.sourceStatus ?: "not listed"}, closed=${here.closed}, signature=$signature)")
@@ -1402,7 +1438,7 @@ class ChatRepository(
 
             val group = standing
             if (groupId != null && group != null) {
-                handleGroupMessage(msgId, srcHex, content, timestamp, fields, group, signature)
+                handleGroupMessage(msgId, srcHex, content, timestamp, fields, group, signature, senderKey, packed)
             } else {
                 handleDirectMessage(msgId, srcHash, srcHex, content, timestamp, fields)
             }
@@ -1509,7 +1545,9 @@ class ChatRepository(
      * What the group rule asks about a message naming group [groupId] from
      * the packet source [srcHex]: the group as held here ([chat], its
      * [members]), where the user stands in it, the source's status on its
-     * list, and whether the user rejected or left it.
+     * list, whether the user rejected or left it, and whether the source is
+     * the group's creator (a `status` counts only from it; false for a group
+     * whose creator is not recorded, one held before database 14).
      */
     private data class GroupStanding(
         val chat: ChatEntity?,
@@ -1517,6 +1555,7 @@ class ChatRepository(
         val held: DeliveryPolicy.Held,
         val sourceStatus: String?,
         val closed: Boolean,
+        val sourceIsCreator: Boolean,
     )
 
     private suspend fun groupStanding(groupId: String, srcHex: String): GroupStanding {
@@ -1528,6 +1567,7 @@ class ChatRepository(
             held = GroupMemberStatuses.held(chat != null, members, selfHex()),
             sourceStatus = GroupMemberStatuses.statusOf(members, srcHex),
             closed = UserPreferences.isGroupClosed(appContext, groupId),
+            sourceIsCreator = chat?.creatorHex != null && chat.creatorHex == srcHex,
         )
     }
 
@@ -1546,9 +1586,17 @@ class ChatRepository(
         fields: LxmfFields,
         standing: GroupStanding,
         signature: Int,
+        senderKey: ByteArray?,
+        packed: ByteArray?,
     ) {
         val groupId = fields.group(GroupEntry.ID) ?: return
         val groupAction = fields.group(GroupEntry.ACTION)
+
+        // What any group message the rule kept brings: the key an accept or
+        // leave carries is remembered (after the rule, never for a message it
+        // dropped), and a message its source signed shows that source's key is
+        // here, so what was held for it is decided now, before this message.
+        groupStatuses.onKept(srcHex, groupAction, signature, senderKey)
 
         if (groupAction == GroupChatManager.Action.INVITE) {
             handleGroupInvite(srcHex, groupId, timestamp, fields, standing)
@@ -1559,36 +1607,32 @@ class ChatRepository(
         when (groupAction) {
             GroupChatManager.Action.ACCEPT, GroupChatManager.Action.LEAVE -> {
                 // The source's own accept or leave (the rule took it only from
-                // a current member naming nobody else). A member that left
-                // stays left; an accept from one already accepted is nothing
-                // new; a decline arrives as a leave from a member still invited.
-                val next = GroupMemberStatuses.statusChange(standing.sourceStatus, groupAction)
-                if (next == null) {
-                    Log.i(TAG, "group ${chat.id}: $groupAction from ${srcHex.take(8)} changes nothing (was ${standing.sourceStatus})")
-                    return
-                }
-                messageDao.setGroupMemberStatus(chat.id, srcHex, next)
-                val accepted = groupAction == GroupChatManager.Action.ACCEPT
-                Log.i(TAG, "${srcHex.take(8)} ${if (accepted) "accepted" else "left"} group ${chat.id}")
-                // A member's own accept passes the privacy filter, in a pending
-                // group too: v0.1.8's filter behaviour, which James chose for
-                // this release (see handleGroupInvite).
-                if (accepted && srcHex != selfHex()) {
-                    ensureAllowlistedContact(srcHex)
-                }
-                // A system line about the member (name resolved when shown).
-                messageDao.upsert(
-                    MessageEntity(
-                        id = if (accepted) "acc_${srcHex.take(8)}_${groupId.take(8)}" else msgId,
-                        chatId = chat.id,
-                        senderHashHex = srcHex,
-                        content = if (accepted) "joined the group" else "left the group",
-                        timestamp = (timestamp * 1000).toLong(),
-                        isOutbound = false,
-                        state = RetichatBridge.MessageState.DELIVERED,
-                        systemKind = SystemText.MEMBER,
+                // a current member naming nobody else, not forged). Verified
+                // (under a key held, or the one it carries), it counts; one no
+                // key can verify counts until the switch and is held from it.
+                // What it changes (a member that left stays left; a decline
+                // arrives as a leave from a member still invited), the
+                // creator's copy and answer are the engine's.
+                groupStatuses.takeDirect(
+                    Arrival(
+                        msgId = msgId,
+                        src = srcHex,
+                        chat = chat,
+                        action = groupAction,
+                        timestampMs = (timestamp * 1000).toLong(),
+                        signature = signature,
+                        senderKey = senderKey,
+                        packed = packed,
                     )
                 )
+            }
+
+            GroupChatManager.Action.STATUS -> {
+                // The creator's answer to the user's accept (the rule took it
+                // only from the group's creator, for a group the user joined,
+                // signed by it): each element is a member's own accept or
+                // leave, checked on its own.
+                groupStatuses.takeStatuses(chat, fields.groupStatuses())
             }
 
             GroupChatManager.Action.RELAY_REQUEST -> {
@@ -1667,16 +1711,18 @@ class ChatRepository(
     /**
      * An invite from [srcHex] the rule kept (a source the privacy filter
      * allows, for a group the user never rejected or left). Each listed
-     * member whose key checks out is kept (the user's accept needs every key)
-     * and, with the inviter, allowlisted as the invite is processed, as
-     * v0.1.8 does: James chose v0.1.8's filter behaviour for this release
-     * (2026-10-05); the next release adds the creator answering an accept
-     * with the current member statuses and the member's key carried in each
-     * accept and leave. The rows stay hidden (no contact). A group held here
-     * keeps the list its creation or first invite gave it (James, 2026-10-01:
-     * "There are no membership changes for a group"): another invite brings
-     * keys only, and allowlists only members on that list. Until 2026-10-05 a
-     * later invite marked its sender accepted, adding it.
+     * member whose key checks out is kept on a hidden row (the user's accept
+     * needs every key). Nobody passes the privacy filter by it: the members
+     * pass from the user's accept (James, 2026-10-01: "If the invite is
+     * accepted, the other group members are considered allowed"; RFed-spec
+     * Group.md, "The privacy filter", 2026-10-06), and the creator's answer to
+     * that accept (`status`) brings back the accepts the filter dropped before.
+     * Between 2026-10-05 and that change the members were let through as the
+     * invite arrived, as v0.1.8 does. A group held here keeps the list its
+     * creation or first invite gave it (James, 2026-10-01: "There are no
+     * membership changes for a group"): another invite brings keys only. The
+     * invite's source is recorded as the group's creator, once, with the
+     * group: a `status` counts only from it.
      */
     private suspend fun handleGroupInvite(
         srcHex: String,
@@ -1707,13 +1753,17 @@ class ChatRepository(
                 Log.w(TAG, "Ignored mismatched group member key for ${memberHash.take(8)}")
                 return@forEach
             }
-            // v0.1.8's filter behaviour (above): a listed member passes the
-            // privacy filter once its key checks out.
-            ensureAllowlistedContact(memberHash)
+            // The key is kept on a hidden row (the user's accept needs every
+            // one). Nobody passes the privacy filter by an invite: the members
+            // pass from the user's accept (RFed-spec Group.md, "The privacy
+            // filter"), and the creator's answer to that accept brings back what
+            // the filter dropped before.
+            ensureContact(memberHash)
             contactDao.setPublicKey(memberHash, publicKey.toHex())
         }
-        // The inviter too, when it is on the list (v0.1.8: so the user can talk back).
-        if (srcHex in members && srcHex != self) ensureAllowlistedContact(srcHex)
+        // A key this invite brought may be one an accept or leave is held for
+        // (from the switch): each such one is decided now.
+        groupStatuses.decideHeld()
 
         if (standing.chat != null) {
             Log.i(TAG, "invite for held group ${standing.chat.id} from ${srcHex.take(8)}: member keys only")
@@ -1732,6 +1782,7 @@ class ChatRepository(
                 name = name,
                 memberHashes = all.joinToString(","),
                 groupIdHex = groupId,
+                creatorHex = srcHex,
             )
         )
         all.forEach { memberHex ->
@@ -1802,8 +1853,12 @@ class ChatRepository(
             return
         }
 
+        // Every member's key is here now, so an accept or leave held for its
+        // key (from the switch) is decided before the group fans out.
+        groupStatuses.decideHeld()
         messageDao.setGroupMemberStatus(chatId, selfHex, MemberStatus.ACCEPTED)
-        // Every member passes the privacy filter (iOS acceptGroupInvite).
+        // Every member passes the privacy filter (iOS acceptGroupInvite): from
+        // the user's accept, not from the invite's arrival.
         allMembers.filter { it != selfHex }.forEach { ensureAllowlistedContact(it) }
         groupChatManager?.sendAccept(groupId, allMembers)
             ?: Log.w(TAG, "acceptGroupInvite: stack offline, accept will not be broadcast")
@@ -1963,6 +2018,9 @@ class ChatRepository(
         messageDao.deleteDeliveryTrackingForChat(chat.id)
         messageDao.deleteMessagesForChat(chat.id)
         messageDao.deleteGroupMembersForChat(chat.id)
+        // The creator's copies and the entries held for a key go with the group.
+        groupStatusDao.deleteCopies(chat.id)
+        groupStatusDao.deleteHeld(chat.id)
         chatDao.delete(chat)
         UserPreferences.setChatMuted(appContext, chat.id, false)
         Log.i(TAG, "Deleted chat ${chat.id}")
@@ -1986,6 +2044,8 @@ class ChatRepository(
             Log.i(TAG, "contact ${hex.take(8)} announced as a distro address")
         }
         scope.launch(Dispatchers.IO) {
+            // The key an announce brings may be one an accept or leave is held for.
+            groupStatuses.decideHeld(hex)
             val existing = contactDao.findByHash(hex)
             if (existing != null) {
                 // §5.4: an old web build can still announce "<name> (<12 hex>)".

@@ -38,7 +38,11 @@ object DeliveryPolicy {
     enum class Held {
         /** No such group here. */
         NONE,
-        /** Invited, not accepted yet: the group relays for nobody, and its chat asks nothing of the members. */
+        /**
+         * Invited, not accepted yet: the group relays for nobody, takes no
+         * status, and lets nobody through the privacy filter (the members pass
+         * from the user's accept, RFed-spec Group.md "The privacy filter").
+         */
         PENDING,
         /** Created or accepted by the user. */
         JOINED,
@@ -79,6 +83,14 @@ object DeliveryPolicy {
      *   signature that fails.
      * - A relay request: only for a group the user joined, from a member that
      *   accepted it, with a validated signature.
+     * - A status (RFed-spec Group.md, "Receiving a status", James 2026-10-06):
+     *   the creator's answer to the user's accept, only from the group's
+     *   creator ([sourceIsCreator]: the invite's authenticated source, which
+     *   the group records; false for a group held before that was recorded),
+     *   only for a group the user joined, and only with a validated signature:
+     *   the creator's key is held, as every member's is when the user accepts.
+     *   Whether the creator has left decides nothing: a status is a carrier,
+     *   and each element in it is checked on its own.
      * - Any other action: only from a current member of a joined group, with
      *   a validated signature.
      *
@@ -92,6 +104,7 @@ object DeliveryPolicy {
         namesOther: Boolean,
         closed: Boolean,
         signature: Int,
+        sourceIsCreator: Boolean = false,
     ): Boolean {
         val forged = signature == Signature.INVALID
         val proven = signature == Signature.VALIDATED
@@ -101,11 +114,17 @@ object DeliveryPolicy {
         return when (action) {
             GroupChatManager.Action.RELAY_REQUEST ->
                 held == Held.JOINED && sourceStatus == MemberStatus.ACCEPTED && proven
-            // A source whose key is not here yet (SOURCE_UNKNOWN) is counted
-            // as v0.1.8 counts it. The risk: anyone who knows the group id can
-            // forge a listed member's leave, and a leave is final. The next
-            // release closes it by carrying the member's key in each accept
-            // and leave.
+            GroupChatManager.Action.STATUS ->
+                held == Held.JOINED && sourceIsCreator && proven
+            // A message that is not verified passes this rule and is decided
+            // by what it is worth (GroupStatuses.verdict): an accept or leave
+            // carries its sender's own key, so a source nobody held a key for
+            // is verified by the key it carries (validated, or invalid and
+            // dropped here). One that no key can verify (a client from before
+            // 2026-10-06 sends none) is counted until the switch
+            // (LxmfFields.GROUP_ENTRIES_IN_RETICHAT_FIELD, around 2026-10-26),
+            // as v0.1.8 counts it, and from then on is held until its sender's
+            // key arrives. Only the forged one is dropped here.
             GroupChatManager.Action.ACCEPT, GroupChatManager.Action.LEAVE ->
                 isCurrent(sourceStatus) && !namesOther && !forged
             else -> held == Held.JOINED && isCurrent(sourceStatus) && proven

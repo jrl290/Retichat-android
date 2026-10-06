@@ -42,6 +42,8 @@ class GroupChatManager(
         const val LEAVE         = "leave"
         const val RELAY_REQUEST = "relay_req"
         const val RELAY_DONE    = "relay_done"
+        /** The creator's answer to an accept: the other members' own accepts and leaves. */
+        const val STATUS        = "status"
     }
 
     private val selfHex: String get() = selfDestHash.toHex()
@@ -105,18 +107,57 @@ class GroupChatManager(
      *
      * Called by the recipient after accepting an invite. Every listed member
      * will add the acceptor to their "accepted" set and start including them
-     * in future fanouts.
+     * in future fanouts. Every accept carries the user's own key
+     * ([GroupEnvelopes], RFed-spec Group.md "The sender's key", James
+     * 2026-10-06), so a member that never heard of this device can verify it,
+     * and the creator answers it with a `status`.
      */
     fun sendAccept(
         groupId: String,
         members: List<String>,
     ) {
+        val ownKey = ownKeyEntry()
         members.filter { it != selfHex }.forEach { target ->
             send(target) { handle ->
-                GroupFields.set(handle, GroupEntry.ID,     groupId)
-                GroupFields.set(handle, GroupEntry.ACTION, Action.ACCEPT)
-                GroupFields.set(handle, GroupEntry.SENDER, selfHex)
+                GroupEnvelopes.write(handle, GroupEnvelopes.accept(groupId, selfHex, ownKey))
             }
+        }
+    }
+
+    /**
+     * The user's own GROUP_MEMBER_KEYS entry, `hash:base64-public-key`: the
+     * form an invite chunk uses. Read from the identity, not the router, so a
+     * leave sent with no connection carries it too. Null, and logged, when the
+     * identity's key cannot be read (it is always held): the accept or leave
+     * then goes without it, as a build from before this change sent it, rather
+     * than not at all.
+     */
+    private fun ownKeyEntry(): String? {
+        val publicKey = RetichatBridge.identityPublicKey(identityHandle)
+        if (publicKey == null || publicKey.size != 64) {
+            Log.w(TAG, "own key not readable, the accept/leave carries none: ${RetichatBridge.lastError()}")
+            return null
+        }
+        return GroupEnvelopes.ownKeyEntry(selfHex, publicKey)
+    }
+
+    // ---- Status (the creator's answer to an accept) ---------------------
+
+    /**
+     * The creator's answer to an accept that counted and carried its sender's
+     * key (RFed-spec Group.md, "The creator's answer: status"): one `status`
+     * to [memberHex] alone, [statuses] being every OTHER listed member's
+     * newest counted accept or leave exactly as this device received it, by
+     * member hash ascending (the caller chose them; an empty list is a valid
+     * answer). It goes like every group control message: DIRECT, with the
+     * propagated fallback, and as a Resource when too large for a packet. Once
+     * per accept received: nothing here sends it again (DESIGN_PRINCIPLES §3).
+     * A status that cannot be built is not sent.
+     */
+    fun sendStatus(groupId: String, memberHex: String, statuses: List<ByteArray>) {
+        sendChecked(memberHex, "") { handle ->
+            GroupEnvelopes.write(handle, GroupEnvelopes.status(groupId, selfHex))
+            GroupFields.setStatuses(handle, statuses)
         }
     }
 
@@ -144,17 +185,18 @@ class GroupChatManager(
      * left). Each copy goes like any group control message: DIRECT, with the
      * propagated fallback. Until 2026-10-05 nothing called this: a leave was
      * a plain post "left the group" with no action (audit L5), and a decline
-     * sent nothing.
+     * sent nothing. Like an accept it carries the user's own key
+     * ([GroupEnvelopes]), so a member that never heard of this device can
+     * verify it before it makes the leave final.
      */
     fun sendLeave(
         groupId: String,
         members: List<String>,
     ) {
+        val ownKey = ownKeyEntry()
         members.filter { it != selfHex }.forEach { target ->
             send(target, "") { handle ->
-                GroupFields.set(handle, GroupEntry.ID,     groupId)
-                GroupFields.set(handle, GroupEntry.ACTION, Action.LEAVE)
-                GroupFields.set(handle, GroupEntry.SENDER, selfHex)
+                GroupEnvelopes.write(handle, GroupEnvelopes.leave(groupId, selfHex, ownKey))
             }
         }
     }
@@ -274,7 +316,14 @@ class GroupChatManager(
     // ---- Private helpers ------------------------------------------------
 
     /** Create, configure, and send a single LXMF message to [targetHex]. */
-    private fun send(targetHex: String, content: String = "", configure: (Long) -> Unit) {
+    private fun send(targetHex: String, content: String = "", configure: (Long) -> Unit) =
+        sendChecked(targetHex, content) { handle -> configure(handle); true }
+
+    /**
+     * [send], for a message that must not leave unless [configure] built it:
+     * a false from it releases the message, and nothing is sent.
+     */
+    private fun sendChecked(targetHex: String, content: String = "", configure: (Long) -> Boolean) {
         scope.launch(Dispatchers.IO) {
             val destBytes = targetHex.hexToBytes() ?: run {
                 Log.w(TAG, "send: bad hex $targetHex")
@@ -297,7 +346,11 @@ class GroupChatManager(
                 Log.w(TAG, "send: messageCreate failed for $targetHex: ${RetichatBridge.lastError()}")
                 return@launch
             }
-            configure(handle)
+            if (!configure(handle)) {
+                Log.w(TAG, "send: the message for $targetHex could not be built, not sent")
+                destroyAfterDelay(handle)
+                return@launch
+            }
             val ok = RetichatBridge.messageSendViaAppLinks(handle)
             if (!ok) {
                 Log.w(TAG, "send: messageSend failed for $targetHex: ${RetichatBridge.lastError()}")

@@ -66,6 +66,7 @@ class RetichatApp : Application() {
             chatDao = database.chatDao(),
             messageDao = database.messageDao(),
             contactDao = database.contactDao(),
+            groupStatusDao = database.groupStatusDao(),
             attachmentDir = File(filesDir, "attachments").also { it.mkdirs() },
             scope = applicationScope,
         )

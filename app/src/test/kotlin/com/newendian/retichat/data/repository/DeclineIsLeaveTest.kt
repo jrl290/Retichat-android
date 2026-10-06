@@ -57,10 +57,13 @@ class DeclineIsLeaveTest {
         assertTrue(quit.contains("groupChatManager?.sendLeave(groupIdHex, targets)"))
         assertTrue(quit.indexOf("sendLeave(") < quit.indexOf("deleteChatLocal(chat)"))
         // The leave is the web's and iOS's: GROUP_ACTION leave, no content (audit L5).
+        // and carries the user's own key, as an accept does (GroupEnvelopes: GROUP_ID, the
+        // action, GROUP_SENDER the user, GROUP_MEMBER_KEYS the user's own key).
         val leave = body(gcm, "sendLeave")
         assertTrue(leave.contains("send(target, \"\")"))
-        assertTrue(leave.contains("GroupFields.set(handle, GroupEntry.ACTION, Action.LEAVE)"))
-        assertTrue(leave.contains("GroupFields.set(handle, GroupEntry.SENDER, selfHex)"))
+        assertTrue(leave.contains("GroupEnvelopes.write(handle, GroupEnvelopes.leave(groupId, selfHex, ownKey))"))
+        val envelope = File("src/main/kotlin/com/newendian/retichat/service/GroupEnvelopes.kt").readText()
+        assertTrue(envelope.contains("control(groupId, GroupChatManager.Action.LEAVE, selfHex, ownKey)"))
         // Nothing sends the old plain "left the group" post.
         assertFalse(repo.contains("content = \"left the group\",\n                    method"))
     }
