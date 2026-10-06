@@ -620,7 +620,7 @@ class RfedChannelClient(
                 // DISPLAY_NAMES.md §4.2: whether this post carries the
                 // Channel Display Name, decided once for the post (the retry
                 // below sends the same decision).
-                val postName = withContext(Dispatchers.IO) { channelPostName(channel.id) }
+                val postName = withContext(Dispatchers.IO) { channelPostName(channel.id, ownHashHex) }
 
                 if (trySend(liveChannel, content, optimisticId, ownHashHex, identityHandle, postName)) {
                     return@withLock true
@@ -673,12 +673,13 @@ class RfedChannelClient(
      * hours have passed; an empty 0xD1 once after it was unset; otherwise
      * nothing.
      */
-    private suspend fun channelPostName(channelId: String): NameField {
+    private suspend fun channelPostName(channelId: String, postingHex: String): NameField {
+        adoptLegacyNameState()
         val stored = UserPreferences.getChannelDisplayName(appContext)
         // Stored cleaned since 2026-09-27; clean again for a value saved before.
         val name = stored.takeIf { it.isNotEmpty() }?.let { DisplayNameSettings.clean(it, DisplayNameSettings.Kind.CHANNEL) }
             ?.takeIf { it.isNotEmpty() }
-        val state = channelDao.nameState(channelId)
+        val state = channelDao.nameState(channelId, postingHex)
         val newSender = state != null && channelDao.countSendersSeenAfter(channelId, state.lastIncludedAt) > 0
         return DisplayNames.channelPostName(
             name = name,
@@ -690,13 +691,29 @@ class RfedChannelClient(
     }
 
     /** The post carrying [postName] was handed to RFed: remember what the readers got (§4.2). */
-    private suspend fun recordPostName(channelId: String, postName: NameField) {
+    private suspend fun recordPostName(channelId: String, postingHex: String, postName: NameField) {
         val digest = when (postName) {
             NameField.Absent -> return
             NameField.Clear -> DisplayNames.EMPTY_DIGEST_HEX
             is NameField.Name -> DisplayNames.digestHex(postName.name)
         }
-        channelDao.upsertNameState(ChannelNameStateEntity(channelId, digest, System.currentTimeMillis()))
+        channelDao.upsertNameState(ChannelNameStateEntity(channelId, postingHex, digest, System.currentTimeMillis()))
+    }
+
+    /**
+     * The name state rows from before database 13 were the device's, the only
+     * posting identity then: the device takes them as its own, once per
+     * process, before it first reads its state ([ChannelDao.adoptLegacyNameState]).
+     */
+    @Volatile private var legacyNameStateAdopted = false
+
+    private suspend fun adoptLegacyNameState() {
+        if (legacyNameStateAdopted) return
+        val deviceHex = StackRuntime.selfDestHash.toHex()
+        if (deviceHex.isEmpty()) return
+        channelDao.adoptLegacyNameState(deviceHex)
+        channelDao.dropLegacyNameState()
+        legacyNameStateAdopted = true
     }
 
     private suspend fun trySend(
@@ -754,7 +771,7 @@ class RfedChannelClient(
             return@withContext false
         }
         Log.i(TAG, "SEND ok: channel='${channel.channelName}' id=${channel.id} rfedDest=${rfedChannelDest.toHex()} payload=${finalPayload.size}B stamp=${(channel.stampCost ?: 0)} name=${postName.state}")
-        recordPostName(channel.id, postName)
+        recordPostName(channel.id, ownHashHex, postName)
 
         // Upgrade optimistic row → canonical id (same as echo will use)
         val canonicalId = canonicalMessageId(ownHashHex, tsMs)

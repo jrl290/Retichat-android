@@ -131,9 +131,12 @@ class ContactsMigrationTest {
     @Test
     fun theMigrationIsRegistered() {
         val database = File("src/main/kotlin/com/newendian/retichat/data/db/RetichatDatabase.kt").readText()
-        assertTrue(database.contains("version = ContactsMigration.TO,"))
+        // Database 13 followed it (DistroChannelsMigrationTest pins that one):
+        // this step stays in the chain, and the version is no longer 12.
         assertTrue(database.contains("MIGRATION_11_12"))
-        assertTrue(Regex("addMigrations\\([^)]*MIGRATION_11_12\\)").containsMatchIn(database))
+        assertTrue(Regex("addMigrations\\([^)]*MIGRATION_11_12[^)]*\\)").containsMatchIn(database))
+        assertFalse(database.contains("version = ContactsMigration.TO,"))
         assertFalse(database.contains("version = NamesMigration.TO,"))
+        assertEquals(12, ContactsMigration.TO)
     }
 }

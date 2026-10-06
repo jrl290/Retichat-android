@@ -9,6 +9,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import com.newendian.retichat.data.db.dao.ChannelDao
 import com.newendian.retichat.data.db.dao.ChatDao
 import com.newendian.retichat.data.db.dao.ContactDao
+import com.newendian.retichat.data.db.dao.DistroOutboxDao
 import com.newendian.retichat.data.db.dao.InterfaceConfigDao
 import com.newendian.retichat.data.db.dao.MessageDao
 import com.newendian.retichat.data.db.entity.*
@@ -26,8 +27,10 @@ import com.newendian.retichat.data.db.entity.*
         ChannelMessageEntity::class,
         ChannelSenderEntity::class,
         ChannelNameStateEntity::class,
+        ChannelMembershipEntity::class,
+        DistroOutboxEntity::class,
     ],
-    version = ContactsMigration.TO,
+    version = DistroChannelsMigration.TO,
     exportSchema = false,
 )
 abstract class RetichatDatabase : RoomDatabase() {
@@ -36,6 +39,7 @@ abstract class RetichatDatabase : RoomDatabase() {
     abstract fun messageDao(): MessageDao
     abstract fun interfaceConfigDao(): InterfaceConfigDao
     abstract fun channelDao(): ChannelDao
+    abstract fun distroOutboxDao(): DistroOutboxDao
 
     companion object {
         @Volatile private var INSTANCE: RetichatDatabase? = null
@@ -63,6 +67,13 @@ abstract class RetichatDatabase : RoomDatabase() {
             }
         }
 
+        /** Migration 12 → 13: channels and the distro, RFed SPEC §17.12 ([DistroChannelsMigration]). */
+        private val MIGRATION_12_13 = object : Migration(DistroChannelsMigration.FROM, DistroChannelsMigration.TO) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                DistroChannelsMigration.STATEMENTS.forEach(db::execSQL)
+            }
+        }
+
         fun getInstance(context: Context): RetichatDatabase =
             INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -70,7 +81,7 @@ abstract class RetichatDatabase : RoomDatabase() {
                     RetichatDatabase::class.java,
                     "retichat.db"
                 )
-                    .addMigrations(MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12)
+                    .addMigrations(MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13)
                     .fallbackToDestructiveMigration()
                     .build().also { INSTANCE = it }
             }

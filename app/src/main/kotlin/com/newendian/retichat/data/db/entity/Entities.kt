@@ -219,13 +219,68 @@ data class ChannelSenderEntity(
 )
 
 /**
- * The channel send rule's persisted state (DISPLAY_NAMES.md §4.2): the digest
- * of the Channel Display Name last included in a post here (hex; the empty
- * name's digest after a clear), and when.
+ * The channel send rule's persisted state (DISPLAY_NAMES.md §4.2), kept per
+ * channel and posting identity ([postingHex]: the `lxmf.delivery` hash the
+ * posts are signed with, the distro's when the device holds one, otherwise
+ * the device's; RFed SPEC §17.12): the digest of the Channel Display Name last
+ * included in a post as that identity (hex; the empty name's digest after a
+ * clear), and when. Readers have never had a name from a new posting
+ * identity, so one this device has no row for starts from none and its first
+ * post carries the name.
+ *
+ * A row from before database 13 has `postingHex` empty: it was made when the
+ * device posted as itself, the only posting identity then, and is the
+ * device's from the first time the device looks for its own state
+ * ([com.newendian.retichat.data.db.dao.ChannelDao.adoptLegacyNameState]).
  */
-@Entity(tableName = "channel_name_state")
+@Entity(tableName = "channel_name_state", primaryKeys = ["channelId", "postingHex"])
 data class ChannelNameStateEntity(
-    @PrimaryKey val channelId: String,
+    val channelId: String,
+    val postingHex: String,
     val lastDigestHex: String,
     val lastIncludedAt: Long,
+)
+
+/**
+ * RFed SPEC §17.12 rule 5's record: per channel, the last membership action
+ * ([op], `"join"` or `"leave"`) this device made or applied, with its time
+ * ([atMs], the action's own milliseconds since the epoch). Persisted, and kept
+ * after a leave: a leave's record is what stops an older join from coming
+ * back. Written for every join and leave the user makes here, whether or not
+ * the device holds a distro.
+ */
+@Entity(tableName = "channel_membership")
+data class ChannelMembershipEntity(
+    @PrimaryKey val channelId: String,
+    val op: String,
+    val atMs: Long,
+)
+
+/**
+ * One message this device owes its distro (RFed SPEC §17.12 "On the sending
+ * device", §17.11): kept here until the propagation node proves the upload.
+ * [id] is `channel:<channel hash>` for a membership message (one per channel:
+ * a later action replaces it) or `sent:<LXMF message hash>` for a sent-copy.
+ * [packed] is the LXMF message as the distro packed and signed it when the
+ * user acted, never packed again; [msgHash] is its LXMF message hash, which is
+ * what tells one message from another under the same [id]. [distro] is the
+ * distro's `lxmf.delivery` hash and [distroKey] its public key, so a sent-copy
+ * is still encrypted to its own distro after the device gives that distro up.
+ * A channel entry adds [op], [name] and [atMs]; a sent entry adds [toHex].
+ * [seq] orders what is owed, oldest first.
+ */
+@Entity(tableName = "distro_outbox")
+data class DistroOutboxEntity(
+    @PrimaryKey val id: String,
+    val kind: String,
+    val distro: String,
+    val distroKey: String,
+    val msgHash: String,
+    val packed: ByteArray,
+    val label: String,
+    val op: String? = null,
+    val name: String? = null,
+    val atMs: Long? = null,
+    val toHex: String? = null,
+    val seq: Long,
 )

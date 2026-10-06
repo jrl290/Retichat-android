@@ -5,7 +5,9 @@ import androidx.room.Delete
 import androidx.room.Query
 import androidx.room.Upsert
 import com.newendian.retichat.data.db.NameSql
+import com.newendian.retichat.data.db.NameStateSql
 import com.newendian.retichat.data.db.entity.ChannelEntity
+import com.newendian.retichat.data.db.entity.ChannelMembershipEntity
 import com.newendian.retichat.data.db.entity.ChannelMessageEntity
 import com.newendian.retichat.data.db.entity.ChannelNameStateEntity
 import com.newendian.retichat.data.db.entity.ChannelSenderEntity
@@ -94,12 +96,33 @@ interface ChannelDao {
     @Query("DELETE FROM channel_senders WHERE channelId = :channelId")
     suspend fun deleteSendersForChannel(channelId: String)
 
-    @Query("SELECT * FROM channel_name_state WHERE channelId = :channelId LIMIT 1")
-    suspend fun nameState(channelId: String): ChannelNameStateEntity?
+    /** The send rule's state for posts to [channelId] signed as [postingHex] (§4.2, per posting identity). */
+    @Query("SELECT * FROM channel_name_state WHERE channelId = :channelId AND postingHex = :postingHex LIMIT 1")
+    suspend fun nameState(channelId: String, postingHex: String): ChannelNameStateEntity?
 
     @Upsert
     suspend fun upsertNameState(state: ChannelNameStateEntity)
 
+    /** A channel's state for every posting identity goes with the channel. */
     @Query("DELETE FROM channel_name_state WHERE channelId = :channelId")
     suspend fun deleteNameState(channelId: String)
+
+    /**
+     * Rows from before database 13 (empty `postingHex`) were the device's, the
+     * only posting identity then: they become [deviceHex]'s where it has no
+     * row of its own yet. [dropLegacyNameState] then removes what is left.
+     */
+    @Query(NameStateSql.ADOPT_LEGACY)
+    suspend fun adoptLegacyNameState(deviceHex: String): Int
+
+    @Query(NameStateSql.DROP_LEGACY)
+    suspend fun dropLegacyNameState(): Int
+
+    // ---- Membership record (RFed SPEC §17.12 rule 5) ----
+
+    @Query("SELECT * FROM channel_membership WHERE channelId = :channelId LIMIT 1")
+    suspend fun membership(channelId: String): ChannelMembershipEntity?
+
+    @Upsert
+    suspend fun upsertMembership(record: ChannelMembershipEntity)
 }
