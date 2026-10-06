@@ -757,9 +757,11 @@ dependencies = [
 name = "retichat-jni"
 version = "0.1.0"
 dependencies = [
+ "app_links",
  "jni",
  "lxmf_rust",
  "reticulum_rust",
+ "rmpv",
  "sha2 0.10.9",
 ]
 

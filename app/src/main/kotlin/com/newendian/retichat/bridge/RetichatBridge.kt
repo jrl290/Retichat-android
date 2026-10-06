@@ -92,6 +92,31 @@ interface AppLinkSendCallback {
 }
 
 /**
+ * Every APP_LINK status change, with the link it is about: [RetichatBridge.propagationLinkEventsRegister].
+ * `status` is a [RetichatBridge.AppLinkStatus]; `linkId` is the link's id for
+ * ESTABLISHING and ACTIVE (a new link's establishment is its ACTIVE) and null
+ * for the rest. Fires on a Rust thread already attached to the JVM and must
+ * not block: hand the work to a coroutine and return.
+ */
+@Keep
+interface PropagationLinkCallback {
+    fun onLink(destHash: ByteArray, status: Int, linkId: ByteArray?)
+}
+
+/**
+ * The outcome of one upload on the held propagation link
+ * ([RetichatBridge.propagationUpload]): [onProved] when the node proves the
+ * packet (or the Resource completes), [onLost] when the packet receipt times
+ * out or the Resource fails. Each is called at most once, on a Rust thread, and
+ * a proof can follow a loss (a late proof). Must not block.
+ */
+@Keep
+interface PropagationUploadCallback {
+    fun onProved()
+    fun onLost()
+}
+
+/**
  * The Bluetooth engine (Reticulum-rust `interfaces::prns_ble`) asking the
  * radio for something: see [com.newendian.retichat.service.RTNodeBluetooth].
  * Called on Rust and Binder threads; implementations hand the work to their
@@ -598,6 +623,91 @@ object RetichatBridge {
      * to LxmfFields.decode, as a direct message's fields do.
      */
     fun distroUnwrap(distroHandle: Long, blob: ByteArray): String? = nativeDistroUnwrap(distroHandle, blob)
+
+    // ── What a device owes its distro (RFed SPEC §17.12, §17.11) ──
+    // The outbox itself is service/DistroOutbox.kt; these are what it cannot
+    // make from Kotlin. rust/retichat-jni/src/distro_outbox.rs has the parts
+    // that do not need a JVM.
+
+    /**
+     * Write the membership message C's fields on an outbound message
+     * ([messageCreate]): 0x0C an empty bin, 0xFB `rfed.distro.channel`, 0xFC
+     * the native array `[op, name, at_ms]`, 0xFD [deviceHex]. False with
+     * [lastError] when [op] is not join or leave, [name] is empty, [atMs] is
+     * not 0..2^53-1 or [deviceHex] is not 32 hex.
+     */
+    fun messageSetDistroChannelSync(handle: Long, op: String, name: String, atMs: Long, deviceHex: String): Boolean =
+        nativeMessageSetDistroChannelSync(handle, op, name, atMs, deviceHex) == 0
+
+    /**
+     * Pack and sign an outbound message once and return its LXMF bytes
+     * (`dest | src | signature | payload`); [messageGetHash] is then its hash.
+     * What the outbox keeps: never packed again, so every upload is one message.
+     */
+    fun messagePack(handle: Long): ByteArray? = nativeMessagePack(handle)
+
+    /**
+     * The propagation upload of the packed message [packed] for the node [node]:
+     * encrypted to [distroPublicKey] and to no other key, stamped for the
+     * node's cost. Blocks while the stamp is mined: off the main thread. Null
+     * with [lastError] when it cannot be built; nothing has left.
+     */
+    fun propagationBuildUpload(distroPublicKey: ByteArray, packed: ByteArray, node: ByteArray): ByteArray? =
+        nativePropagationBuildUpload(distroPublicKey, packed, node)
+
+    /** Link states, `LinkHandle::status()`: [PropagationLink.state]. */
+    object LinkState {
+        const val PENDING   = 0
+        const val HANDSHAKE = 1
+        const val ACTIVE    = 2
+        const val STALE     = 3
+        const val CLOSED    = 4
+    }
+
+    /** The link AppLinks holds for the propagation node: its id (hex) and [LinkState]. */
+    data class PropagationLink(val id: String, val state: Int) {
+        val active: Boolean get() = state == LinkState.ACTIVE
+    }
+
+    /** The link held for [node] as it is now, or null when none is held. A read, never a wait. */
+    fun propagationLink(node: ByteArray): PropagationLink? {
+        val raw = nativePropagationLink(node) ?: return null
+        if (raw.size < 2) return null
+        return PropagationLink(raw.copyOfRange(1, raw.size).joinToString("") { "%02x".format(it) }, raw[0].toInt() and 0xff)
+    }
+
+    /** An upload that left: how (1 a packet, 2 a Resource) and the link (hex) it went on. */
+    data class UploadStart(val resource: Boolean, val linkId: String)
+
+    /**
+     * Hand [upload] ([propagationBuildUpload]) to the ACTIVE link held for
+     * [node]. Null with [lastError] when it did not leave (no active link
+     * held, or it could not be queued): [callback] is then never called. Once
+     * it has left, [callback] hears the node's proof or the loss, and on a loss
+     * the link the upload went on has already been torn down (the receipt's
+     * timeout, as LXMF does). Nothing here resends or times anything.
+     */
+    fun propagationUpload(node: ByteArray, upload: ByteArray, callback: PropagationUploadCallback): UploadStart? {
+        val raw = nativePropagationUpload(node, upload, callback) ?: return null
+        if (raw.size < 2) return null
+        return UploadStart(raw[0].toInt() == 2, raw.copyOfRange(1, raw.size).joinToString("") { "%02x".format(it) })
+    }
+
+    /**
+     * Register [callback] for every APP_LINK status change, with the link each
+     * is about. The stack's shutdown drops it: register again after each start.
+     */
+    fun propagationLinkEventsRegister(callback: PropagationLinkCallback): Boolean =
+        nativePropagationLinkEventsRegister(callback) == 0
+
+    private external fun nativeMessageSetDistroChannelSync(
+        handle: Long, op: String, name: String, atMs: Long, deviceHex: String,
+    ): Int
+    private external fun nativeMessagePack(handle: Long): ByteArray?
+    private external fun nativePropagationBuildUpload(distroPublicKey: ByteArray, packed: ByteArray, node: ByteArray): ByteArray?
+    private external fun nativePropagationLink(node: ByteArray): ByteArray?
+    private external fun nativePropagationUpload(node: ByteArray, upload: ByteArray, callback: PropagationUploadCallback): ByteArray?
+    private external fun nativePropagationLinkEventsRegister(callback: PropagationLinkCallback): Int
 
     private external fun nativeDistroGenerate(): ByteArray?
     private external fun nativeDistroPrivateKey(handle: Long): ByteArray?

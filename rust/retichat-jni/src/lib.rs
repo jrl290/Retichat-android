@@ -18,6 +18,9 @@
 //! thread-safe.  The delivery callback is dispatched from a Rust background
 //! thread, so it attaches to the JVM before calling Kotlin.
 
+mod distro_outbox;
+
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use jni::objects::{GlobalRef, JByteArray, JClass, JObject, JString, JValue};
@@ -2436,6 +2439,329 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeD
             std::ptr::null_mut()
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// What a device owes its distro (RFed SPEC §17.12 "On the sending device", §17.11)
+//
+// The Kotlin outbox (service/DistroOutbox.kt) keeps what is owed and decides
+// when to upload. These wrappers give it what it cannot make itself: C's
+// fields, a message packed once, an upload built for a distro's key, the
+// propagation link as it is now and as it changes, and an upload on the held
+// link that says when the node proves it and when it is lost. The pure parts
+// are in `distro_outbox.rs`. Nothing here sends on a timer or sends again.
+// ---------------------------------------------------------------------------
+
+use app_links::{link_representation, AppLinks, LinkRepresentation};
+use reticulum_rust::link::{LinkHandle, STATE_ACTIVE};
+
+/// Call a no-argument Kotlin method on a callback from whatever thread this
+/// runs on. A Kotlin exception must not stay pending on a Rust thread: it is
+/// described in logcat and cleared.
+fn call_kotlin(jvm: &JavaVM, callback: &GlobalRef, method: &str, sig: &str, args: &[JValue]) {
+    let mut env = match jvm.attach_current_thread() {
+        Ok(env) => env,
+        Err(_) => return,
+    };
+    let _ = env.call_method(callback.as_obj(), method, sig, args);
+    if env.exception_check().unwrap_or(false) {
+        let _ = env.exception_describe();
+        let _ = env.exception_clear();
+    }
+}
+
+/// `RetichatBridge.nativeMessageSetDistroChannelSync(handle: Long, op: String,
+/// name: String, atMs: Long, deviceHex: String): Int`
+///
+/// RFed SPEC §17.12: write the membership message C's fields on the outbound
+/// message `handle` (0x0C an empty bin, 0xFB `"rfed.distro.channel"`, 0xFC the
+/// native array `[op, name, at_ms]`, 0xFD the sending device's own address).
+/// 0 on success, -1 with `nativeLastError` and the message unchanged.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeMessageSetDistroChannelSync(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    op: JString,
+    name: JString,
+    at_ms: jlong,
+    device_hex: JString,
+) -> jint {
+    let op = jstring_to_string(&mut env, &op);
+    let name = jstring_to_string(&mut env, &name);
+    let device = jstring_to_string(&mut env, &device_hex);
+    if at_ms < 0 {
+        rns::set_error(format!("at_ms {at_ms} is negative"));
+        return -1;
+    }
+    let Some(msg) = rns::get_handle::<Arc<Mutex<lxmf_rust::lx_message::LXMessage>>>(handle as u64) else {
+        rns::set_error("invalid message handle".to_string());
+        return -1;
+    };
+    let result = match msg.lock() {
+        Ok(mut m) => distro_outbox::set_channel_sync_fields(&mut m, &op, &name, at_ms as u64, &device),
+        Err(e) => Err(e.to_string()),
+    };
+    ok_or_neg(result)
+}
+
+/// `RetichatBridge.nativeMessagePack(handle: Long): ByteArray?`
+///
+/// Pack and sign the outbound message once and return its packed bytes
+/// (`dest | src | signature | payload`), which the outbox keeps and uploads as
+/// they are, never packed again. The message's hash (`nativeMessageGetHash`) is
+/// then set. Null with `nativeLastError` when it cannot be packed.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeMessagePack(
+    env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) -> jbyteArray {
+    let Some(msg) = rns::get_handle::<Arc<Mutex<lxmf_rust::lx_message::LXMessage>>>(handle as u64) else {
+        rns::set_error("invalid message handle".to_string());
+        return std::ptr::null_mut();
+    };
+    bytes_or_null(&env, distro_outbox::pack_message(&msg))
+}
+
+/// `RetichatBridge.nativePropagationBuildUpload(distroPublicKey: ByteArray,
+/// packed: ByteArray, node: ByteArray): ByteArray?`
+///
+/// Build the propagation upload of the packed message `packed` for the node
+/// `node`: encrypted to `distroPublicKey` and no other key, stamped for the
+/// node's stamp cost (read from its announce; unknown is an error, and the
+/// node's path is requested so its announce can be heard). Blocks while the
+/// stamp is mined: call it off the main thread. Null with `nativeLastError`
+/// when it cannot be built, with nothing sent.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativePropagationBuildUpload(
+    env: JNIEnv,
+    _class: JClass,
+    distro_public_key: JByteArray,
+    packed: JByteArray,
+    node: JByteArray,
+) -> jbyteArray {
+    let key = jbytes_to_vec(&env, &distro_public_key);
+    let packed = jbytes_to_vec(&env, &packed);
+    let node = jbytes_to_vec(&env, &node);
+    let cost = match distro_outbox::node_stamp_cost(Identity::recall_app_data(&node).as_deref()) {
+        Ok(cost) => cost,
+        Err(e) => {
+            // As the router does when it has no cost (LXMRouter::get_outbound_propagation_cost):
+            // ask for the announce that carries it. The upload waits for the next coming-up.
+            Transport::request_path(&node, None, None, None, None);
+            rns::set_error(e);
+            return std::ptr::null_mut();
+        }
+    };
+    bytes_or_null(&env, distro_outbox::build_propagation_upload(&key, &packed, cost))
+}
+
+/// `RetichatBridge.nativePropagationLink(node: ByteArray): ByteArray?`
+///
+/// The outbound link AppLinks holds for the propagation node, as it is now:
+/// `[state u8 | link id]`, where state is the link's own (0 pending, 1
+/// handshake, 2 ACTIVE, 3 STALE, 4 closed). Null when none is held. A read of
+/// the registry, never a wait.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativePropagationLink(
+    env: JNIEnv,
+    _class: JClass,
+    node: JByteArray,
+) -> jbyteArray {
+    let node = jbytes_to_vec(&env, &node);
+    match AppLinks::get_handle(&node) {
+        Some(link) => {
+            let mut out = vec![link.status()];
+            out.extend_from_slice(&link.link_id());
+            vec_to_jbytes(&env, &out)
+        }
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// What reports an upload to Kotlin's `PropagationUploadCallback`: each of
+/// `onProved` and `onLost` at most once, from whatever thread the stack decides
+/// it on. A proof can follow a loss (the receipt stays listed, and a late proof
+/// still concludes it): both are told, in the order they happen.
+struct UploadReport {
+    jvm: JavaVM,
+    callback: GlobalRef,
+    proved: AtomicBool,
+    lost: AtomicBool,
+}
+
+impl UploadReport {
+    fn proved(&self) {
+        if !self.proved.swap(true, Ordering::SeqCst) {
+            call_kotlin(&self.jvm, &self.callback, "onProved", "()V", &[]);
+        }
+    }
+
+    fn lost(&self) {
+        if !self.lost.swap(true, Ordering::SeqCst) {
+            call_kotlin(&self.jvm, &self.callback, "onLost", "()V", &[]);
+        }
+    }
+}
+
+/// The receipt's timeout tears the propagation link down (LXMF/LXMessage.py
+/// `__link_packet_timed_out`: `packet_receipt.destination.teardown()`), and the
+/// phones do the same (DESIGN_PRINCIPLES §3, what a device owes its distro).
+/// It is the link the upload went on that is torn down. That link, while it is
+/// still the one AppLinks holds, goes through `teardown_held_link`, which keeps
+/// the registration so the persistent link re-opens under its normal
+/// close-triggered policy: the new link's establishment is what carries what is
+/// owed. A link already replaced by a newer one is torn down alone, and the
+/// newer link, which did nothing wrong, is left up.
+fn tear_down_link_of_upload(node: &[u8], link: &LinkHandle) {
+    match AppLinks::get_handle(node) {
+        Some(held) if held.same_link(link) => {
+            AppLinks::teardown_held_link(node);
+        }
+        _ => link.teardown(),
+    }
+}
+
+/// `RetichatBridge.nativePropagationUpload(node: ByteArray, upload: ByteArray,
+/// callback: PropagationUploadCallback): ByteArray?`
+///
+/// Hand `upload` (a `nativePropagationBuildUpload` result) to the link AppLinks
+/// holds for the propagation node, which must be ACTIVE: one packet, or a
+/// Resource over the link MDU. Returns `[how u8 | link id]` (how 1 a packet, 2 a
+/// Resource; the link id the upload went on), or null with `nativeLastError`
+/// when it did not leave (no active link held, or the packet could not be
+/// queued): then no callback is ever called.
+///
+/// Once it has left, `callback.onProved()` is called when the node proves the
+/// packet (or the Resource completes), and `callback.onLost()` when the packet
+/// receipt times out or the Resource fails. Nothing here raced, resends or
+/// times anything: the stack's own receipt timeout is the clock. On a loss the
+/// link the upload went on is torn down (`tear_down_link_of_upload`) before
+/// `onLost` is called, so the close that follows is what the loss is.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativePropagationUpload(
+    env: JNIEnv,
+    _class: JClass,
+    node: JByteArray,
+    upload: JByteArray,
+    callback: JObject,
+) -> jbyteArray {
+    let node = jbytes_to_vec(&env, &node);
+    let data = jbytes_to_vec(&env, &upload);
+    let jvm = match env.get_java_vm() {
+        Ok(vm) => vm,
+        Err(e) => { rns::set_error(format!("Failed to get JavaVM: {e}")); return std::ptr::null_mut(); }
+    };
+    let callback = match env.new_global_ref(&callback) {
+        Ok(r) => r,
+        Err(e) => { rns::set_error(format!("Failed to create global ref: {e}")); return std::ptr::null_mut(); }
+    };
+    let Some(before) = AppLinks::get_handle(&node).filter(|link| link.status() == STATE_ACTIVE) else {
+        rns::set_error("no active link is held for the propagation node".to_string());
+        return std::ptr::null_mut();
+    };
+    let how: u8 = match link_representation(data.len()) {
+        LinkRepresentation::Packet => 1,
+        LinkRepresentation::Resource => 2,
+    };
+
+    let report = Arc::new(UploadReport {
+        jvm,
+        callback,
+        proved: AtomicBool::new(false),
+        lost: AtomicBool::new(false),
+    });
+    // The link the upload goes on: `before`, unless the held link changed
+    // between reading it and the send (a replacement is then the newer one).
+    let used: Arc<Mutex<LinkHandle>> = Arc::new(Mutex::new(before.clone()));
+
+    let proved_report = report.clone();
+    let on_delivered: Arc<dyn Fn() + Send + Sync + 'static> = Arc::new(move || proved_report.proved());
+    let lost_report = report.clone();
+    let lost_node = node.clone();
+    let lost_used = used.clone();
+    let on_failed: Arc<dyn Fn() + Send + Sync + 'static> = Arc::new(move || {
+        let link = lost_used.lock().map(|l| l.clone());
+        if let Ok(link) = link {
+            tear_down_link_of_upload(&lost_node, &link);
+        }
+        lost_report.lost();
+    });
+
+    match AppLinks::send_on_held_link(&node, data, true, on_delivered, on_failed, None) {
+        Ok(()) => {
+            let link = match AppLinks::get_handle(&node) {
+                Some(after) if !after.same_link(&before) => after,
+                _ => before,
+            };
+            if let Ok(mut slot) = used.lock() {
+                *slot = link.clone();
+            }
+            let mut out = vec![how];
+            out.extend_from_slice(&link.link_id());
+            vec_to_jbytes(&env, &out)
+        }
+        Err(e) => {
+            rns::set_error(e);
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// `RetichatBridge.nativePropagationLinkEventsRegister(callback: PropagationLinkCallback): Int`
+///
+/// Register a second AppLinks status callback that also says which link an
+/// event is about: `callback.onLink(destHash, status, linkId)` for every status
+/// change of every app-link (0 none, 1 path requested, 2 establishing, 3 ACTIVE,
+/// 4 disconnected), with the link's id for establishing and ACTIVE and null
+/// otherwise. A new propagation link's establishment is its ACTIVE event.
+/// The existing `nativeAppLinkRegisterStatusCallback` is left as it is. The
+/// stack's shutdown drops every callback, so register again after each start.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativePropagationLinkEventsRegister(
+    env: JNIEnv,
+    _class: JClass,
+    callback: JObject,
+) -> jint {
+    let jvm = match env.get_java_vm() {
+        Ok(vm) => vm,
+        Err(e) => { rns::set_error(format!("Failed to get JavaVM: {e}")); return -1; }
+    };
+    let callback = match env.new_global_ref(&callback) {
+        Ok(r) => r,
+        Err(e) => { rns::set_error(format!("Failed to create global ref: {e}")); return -1; }
+    };
+    AppLinks::register_status_callback(Arc::new(
+        move |dest: &[u8], status: u8, link: Option<LinkHandle>| {
+            let mut env = match jvm.attach_current_thread() {
+                Ok(env) => env,
+                Err(_) => return,
+            };
+            let j_dest = match env.byte_array_from_slice(dest) {
+                Ok(d) => d,
+                Err(_) => return,
+            };
+            let j_link = match link {
+                Some(link) => match env.byte_array_from_slice(&link.link_id()) {
+                    Ok(id) => JObject::from(id),
+                    Err(_) => return,
+                },
+                None => JObject::null(),
+            };
+            let _ = env.call_method(
+                callback.as_obj(),
+                "onLink",
+                "([BI[B)V",
+                &[JValue::Object(&j_dest), JValue::Int(status as jint), JValue::Object(&j_link)],
+            );
+            if env.exception_check().unwrap_or(false) {
+                let _ = env.exception_describe();
+                let _ = env.exception_clear();
+            }
+        },
+    ));
+    0
 }
 
 // ---------------------------------------------------------------------------
