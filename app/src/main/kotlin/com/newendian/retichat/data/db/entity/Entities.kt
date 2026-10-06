@@ -65,6 +65,15 @@ data class ChatEntity(
     val currentRelayerHex: String? = null,
     val createdAt: Long = System.currentTimeMillis(),
     val isArchived: Boolean = false,
+    /**
+     * A group's creator (database 14; RFed-spec Group.md, "Member statuses and
+     * keys", James 2026-10-06): this device's own hash for a group it created,
+     * the invite's authenticated source for one it was invited into. A `status`
+     * counts only from it, and only the creator answers an accept with one.
+     * Null for a direct chat and for a group held before database 14: it
+     * neither answers an accept nor counts a status.
+     */
+    val creatorHex: String? = null,
 )
 
 @Entity(tableName = "messages")
@@ -283,4 +292,43 @@ data class DistroOutboxEntity(
     val atMs: Long? = null,
     val toHex: String? = null,
     val seq: Long,
+)
+
+/**
+ * The creator's copy of a member's answer (database 14; RFed-spec Group.md,
+ * "The creator's answer: status"): per group ([chatId]) and member
+ * ([memberHex]), the packed LXMF message ([packed]: `destination | source |
+ * signature | payload`, exactly as received) of the newest accept or leave
+ * that counted ([action]). A leave is kept for good: nothing replaces it. The
+ * creator answers each keyed accept with the other members' copies. Only the
+ * creator keeps any, only for a listed member that has not left, and none over
+ * 2144 bytes; they go with the group.
+ */
+@Entity(tableName = "group_statuses", primaryKeys = ["chatId", "memberHex"])
+data class GroupStatusEntity(
+    val chatId: String,
+    val memberHex: String,
+    val action: String,
+    val packed: ByteArray,
+)
+
+/**
+ * An accept or leave held until its source's key is here (database 14;
+ * RFed-spec Group.md, "Verifying an accept or leave": from the switch, around
+ * 2026-10-26, a message no key can verify is not counted yet). [packed] is the
+ * message exactly as received; it is checked again, with [GroupStatusEntity]'s
+ * bound, when a key arrives (an invite, the user's accept, an announce, a
+ * verified message of the member's, a key an accept or status element carries)
+ * and counted, dropped or kept. [msgHash] is its LXMF message hash, so one
+ * message is held once. Bounded (128 in all, 4 for one member of a group), as
+ * anyone can send one for a member whose key is not here; they go with the group.
+ */
+@Entity(tableName = "group_held")
+data class GroupHeldEntity(
+    @PrimaryKey(autoGenerate = true) val rowId: Long = 0,
+    val chatId: String,
+    val srcHex: String,
+    val action: String,
+    val msgHash: String,
+    val packed: ByteArray,
 )
