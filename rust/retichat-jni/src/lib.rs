@@ -2771,6 +2771,65 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeP
     0
 }
 
+/// `RetichatBridge.nativeInterfaceOnlineRegister(callback: InterfaceOnlineCallback): Int`
+///
+/// Tell `callback.onInterfaceOnline(name)` whenever a Reticulum interface comes
+/// online: Transport's up-edge (`set_interface_online` false to true), told once
+/// per edge with the interface's name, the same edge AppLinks re-attempts its
+/// links on. It is how the distro outbox hears that an interface it needs is
+/// back (James, 2026-10-06): an upload that never left the device, because no
+/// interface could carry it, is no failure and goes then. One callback at a
+/// time; a later register replaces it. Nothing here waits, polls or times.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeInterfaceOnlineRegister(
+    env: JNIEnv,
+    _class: JClass,
+    callback: JObject,
+) -> jint {
+    let jvm = match env.get_java_vm() {
+        Ok(vm) => vm,
+        Err(e) => { rns::set_error(format!("Failed to get JavaVM: {e}")); return -1; }
+    };
+    let callback = match env.new_global_ref(&callback) {
+        Ok(r) => r,
+        Err(e) => { rns::set_error(format!("Failed to create global ref: {e}")); return -1; }
+    };
+    distro_outbox::INTERFACE_UP.set(Arc::new(move |name: &str| {
+        let mut env = match jvm.attach_current_thread() {
+            Ok(env) => env,
+            Err(_) => return,
+        };
+        let j_name = match env.new_string(name) {
+            Ok(n) => n,
+            Err(_) => return,
+        };
+        let _ = env.call_method(
+            callback.as_obj(),
+            "onInterfaceOnline", "(Ljava/lang/String;)V",
+            &[JValue::Object(&j_name)],
+        );
+        if env.exception_check().unwrap_or(false) {
+            let _ = env.exception_describe();
+            let _ = env.exception_clear();
+        }
+    }));
+    distro_outbox::hook_interface_up();
+    0
+}
+
+/// `RetichatBridge.nativeInterfaceOnlineUnregister(): Int`
+///
+/// Stop telling the callback `nativeInterfaceOnlineRegister` set (the stack is
+/// stopping). Transport keeps its one listener, which then tells no one.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeInterfaceOnlineUnregister(
+    _env: JNIEnv,
+    _class: JClass,
+) -> jint {
+    distro_outbox::INTERFACE_UP.clear();
+    0
+}
+
 // ---------------------------------------------------------------------------
 // RTNode over Bluetooth (Reticulum-rust interfaces::prns_ble, central only)
 // ---------------------------------------------------------------------------

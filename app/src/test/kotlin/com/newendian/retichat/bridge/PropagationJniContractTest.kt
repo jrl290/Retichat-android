@@ -26,6 +26,7 @@ class PropagationJniContractTest {
         for (name in listOf(
             "nativeMessageSetDistroChannelSync", "nativeMessagePack", "nativePropagationBuildUpload",
             "nativePropagationLink", "nativePropagationUpload", "nativePropagationLinkEventsRegister",
+            "nativeInterfaceOnlineRegister", "nativeInterfaceOnlineUnregister",
         )) assertTrue(name, name in externals)
     }
 
@@ -37,6 +38,9 @@ class PropagationJniContractTest {
         assertTrue(bridge.contains("fun onLost()"))
         assertTrue(rust.contains("\"onProved\", \"()V\""))
         assertTrue(rust.contains("\"onLost\", \"()V\""))
+        // The interface's up-edge (James, 2026-10-06): the name, as a string.
+        assertTrue(bridge.contains("fun onInterfaceOnline(name: String)"))
+        assertTrue(rust.contains("\"onInterfaceOnline\", \"(Ljava/lang/String;)V\""))
     }
 
     @Test
@@ -56,7 +60,7 @@ class PropagationJniContractTest {
 
     @Test
     fun r8KeepsTheNewCallbacksAndTheirImplementations() {
-        for (callback in listOf("PropagationLinkCallback", "PropagationUploadCallback")) {
+        for (callback in listOf("PropagationLinkCallback", "PropagationUploadCallback", "InterfaceOnlineCallback")) {
             assertTrue(callback, rules.contains("-keep interface com.newendian.retichat.bridge.$callback { *; }"))
             assertTrue(callback, rules.contains("-keep class * implements com.newendian.retichat.bridge.$callback { *; }"))
             assertTrue(callback, Regex("@Keep\\s+interface $callback").containsMatchIn(bridge))

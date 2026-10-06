@@ -153,6 +153,34 @@ class DistroOutboxWiringTest {
     }
 
     @Test
+    fun anInterfaceComingOnlineIsTransportsUpEdgeTheOutboxHearsThroughOneCallbackAndNothingElse() {
+        // James, 2026-10-06: an upload that never left the device goes when an interface comes back
+        // online, not on Android's "network available" alone (it says only that the system has a network).
+        val callback = body(runtime, "private val interfaceCallback = object : InterfaceOnlineCallback {", "// ---- What the user's actions owe ----")
+        assertTrue(callback.contains("scope.launch { outbox.onInterfaceOnline(name) }"))
+        assertFalse(callback.contains("runBlocking"))
+        assertFalse(callback.contains("delay("))
+        // The outbox's only caller of that method is the callback; the runtime registers it at each start and clears it at the stop.
+        assertEquals(1, Regex("outbox\\.onInterfaceOnline\\(").findAll(runtime).count())
+        assertEquals(1, Regex("RetichatBridge\\.interfaceOnlineRegister\\(").findAll(runtime).count())
+        assertTrue(body(runtime, "fun stop() {", "private val linkCallback").contains("RetichatBridge.interfaceOnlineUnregister()"))
+        // The system's own network events reach neither the runtime nor the outbox.
+        val outbox = read("service/DistroOutbox.kt")
+        for ((name, text) in listOf("runtime" to runtime, "outbox" to outbox)) {
+            for (network in listOf("ConnectivityManager", "NetworkCallback", "onAvailable", "NetworkCapabilities")) {
+                assertFalse("$name $network", text.contains(network))
+            }
+        }
+        // Nothing else in the app calls it.
+        for ((name, text) in listOf("stack" to stack, "channel client" to channelClient, "distro client" to distroClient, "repository" to repository)) {
+            assertFalse(name, text.contains("onInterfaceOnline("))
+        }
+        // The Rust side tells Transport's up-edge, the one AppLinks re-attempts its links on, not a network event.
+        val rust = File("../rust/retichat-jni/src/distro_outbox.rs").readText()
+        assertTrue(rust.contains("Transport::add_interface_up_listener("))
+    }
+
+    @Test
     fun aStaleLinksRecoveryIsTheLinkCallbacksRecoveredEventForTheNodesLinkOnly() {
         val callback = body(runtime, "private val linkCallback = object : PropagationLinkCallback {", "// ---- What the user's actions owe ----")
         // The same guards for both events: only the propagation node's link, and only with the link's id.
