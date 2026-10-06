@@ -50,6 +50,14 @@ import kotlinx.coroutines.launch
  *  - When the device forgets or replaces its distro, the membership messages it
  *    owed that distro are dropped. Its sent-copies are still owed, and still
  *    uploaded to that distro, the same bytes.
+ *  - An upload that never left the device, because no interface could carry it
+ *    (the packet could not be queued on the link), is not a failure: nothing was
+ *    sent. It goes when an interface comes back online ([onInterfaceOnline]), an
+ *    event like the others, as well as at the next coming-up. A loss after the
+ *    packet left still waits for the next coming-up, as above (James,
+ *    2026-10-06: on staging a short network drop left the propagation link up,
+ *    so no coming-up followed, and such an upload waited 35 s for an unrelated
+ *    close). Mirrors Retichat-js 80c74ad and 136d13d (`_sendDistroNeverLeft`).
  *
  * At most one upload of an entry is in flight at a time: while one has left and
  * is not decided, no flush uploads it, on its link or on a newer one.
@@ -138,9 +146,11 @@ interface PropagationPort {
 
     /**
      * Hand [upload] to the held ACTIVE link. Null when it did not leave (no
-     * active link, or it could not be queued): [sink] is then never called.
-     * Otherwise [sink] hears its proof or its loss, each at most once, and a
-     * proof can follow a loss.
+     * active link, or it could not be queued, which is what no interface being
+     * able to carry it comes to): [sink] is then never called, and the outbox
+     * takes that for an upload that never left the device, which is no failure
+     * ([DistroOutbox.onInterfaceOnline]). Otherwise [sink] hears its proof or its
+     * loss, each at most once, and a proof can follow a loss.
      */
     fun upload(upload: ByteArray, sink: UploadSink): UploadLeft?
 }
@@ -169,9 +179,20 @@ interface OutboxLog {
  * is this process's alone (its coming-up counts start at zero): it lives in
  * memory, never in storage, and the first coming-up after a start sends
  * everything owed.
+ *
+ * Apart from those failures, and held here so that [forget] ends both, the
+ * messages whose last upload never left the device (James, 2026-10-06; the
+ * ruling in [DistroOutbox]): nothing was sent, so that is no failure, no
+ * coming-up is recorded for it, and a flush at a coming-up sends it like a
+ * message not yet uploaded. An interface coming back online sends it too
+ * ([DistroOutbox.onInterfaceOnline]), and only while the record stands: an
+ * upload begun for the message ends it ([clearNeverLeft]), whatever becomes of
+ * that upload, a loss being then a failure's record and waiting for the next
+ * coming-up.
  */
 class UnprovedUploads {
     private val byId = HashMap<String, HashMap<String, Long>>()
+    private val neverLeftById = HashMap<String, HashSet<String>>()
 
     /** The upload of the message [entry] was decided not proved at coming-up [at]. */
     fun record(entry: OwedEntry, at: Long) {
@@ -187,14 +208,41 @@ class UnprovedUploads {
         return at >= comingUp
     }
 
-    /** [entry] is owed no more (proved, replaced by a later action, dropped with its distro): its record goes, and only its own. */
+    /**
+     * [entry] is owed no more (proved, replaced by a later action, dropped with
+     * its distro): its records go, the failure's and the never-left one, and
+     * only its own.
+     */
     fun forget(entry: OwedEntry) {
+        clearNeverLeft(entry)
         val messages = byId[entry.id] ?: return
         if (messages.remove(entry.msgHash) == null) return
         if (messages.isEmpty()) byId.remove(entry.id)
     }
 
+    /** How many messages have a failure record. */
     val size: Int get() = byId.values.sumOf { it.size }
+
+    /**
+     * The last upload of the message [entry] never left the device: nothing was
+     * sent, so it is no failure and no coming-up is recorded for it ([record] is
+     * for a failure, and is not called).
+     */
+    fun recordNeverLeft(entry: OwedEntry) {
+        neverLeftById.getOrPut(entry.id) { HashSet() }.add(entry.msgHash)
+    }
+
+    /** Whether the last upload of the message [entry] never left the device. */
+    fun neverLeft(entry: OwedEntry): Boolean = neverLeftById[entry.id]?.contains(entry.msgHash) == true
+
+    /** An upload of the message [entry] begins: its last one is no longer the one that never left. Only that message's record. */
+    fun clearNeverLeft(entry: OwedEntry) {
+        val messages = neverLeftById[entry.id] ?: return
+        if (messages.remove(entry.msgHash) && messages.isEmpty()) neverLeftById.remove(entry.id)
+    }
+
+    /** How many messages have a never-left record. */
+    val neverLeftSize: Int get() = neverLeftById.values.sumOf { it.size }
 }
 
 class DistroOutbox(
@@ -223,6 +271,18 @@ class DistroOutbox(
         var onLost: (() -> Unit)? = null
         var onOutcomeProved: (() -> Unit)? = null
         var onOutcomeLost: ((String) -> Unit)? = null
+    }
+
+    /** What came of handing a built upload to the link ([uploadFor]). */
+    private sealed class Handoff {
+        /** It left; its proof or its loss decides it. */
+        class Left(val upload: Upload) : Handoff()
+
+        /** [uploadFor]'s link is no longer the propagation link, or no longer up: nothing was handed over, and nothing is decided. */
+        object LinkGone : Handoff()
+
+        /** The link was up and the port did not take the packet (it could not be queued): it never left the device. */
+        object NeverLeft : Handoff()
     }
 
     /** An attempt at an entry, from its build until it is decided. */
@@ -416,6 +476,55 @@ class DistroOutbox(
         }
     }
 
+    // ---- An interface comes back online ----
+
+    /**
+     * An interface came online ([name]: Transport's up-edge, an interface that
+     * was offline is online; James, 2026-10-06, DESIGN_PRINCIPLES §3, what a
+     * device owes its distro): upload on the propagation link, if it is up, what
+     * is owed to the distro and never left the device, because no interface
+     * could carry its packet ([unproved], [Handoff.NeverLeft]). Nothing was
+     * sent, so it was no failure and waits for no coming-up. A short outage
+     * leaves the propagation link up, so none would follow (on staging the
+     * upload waited 35 s for an unrelated close). It is an event like the
+     * others: no timer, and only the runtime's interface callback calls it
+     * ([DistroOutboxContractTest] and [DistroOutboxWiringTest] pin that).
+     *
+     * It is not a coming-up and counts none ([propComingUps]), so no failure is
+     * released by it: it sends only what is recorded as never left, and a loss
+     * after the packet left still waits for the next coming-up. With the
+     * propagation link not up (down, STALE, or coming up) there is nothing to
+     * do: its coming-up sends these with everything else owed ([sendDistroOutbox]:
+     * a never-left message has no failure record). Each is checked again when its
+     * turn comes, as a flush's are (a build yields): a flush at a coming-up that
+     * began meanwhile may have uploaded it, or another up-edge begun before this
+     * one ended it ([uploadOwed] ends the record when an upload of the message
+     * begins), so none goes twice, and one with an attempt open is left to it
+     * ([distroAttemptOpen]). Never throws.
+     */
+    suspend fun onInterfaceOnline(name: String) {
+        if (stopped) return
+        val held = port.held()
+        if (held == null || !held.active) return
+        try {
+            val owed = entries.values.filter { unproved.neverLeft(it) }
+            if (owed.isEmpty()) return
+            log.info("Interface $name came online: ${owed.size} upload(s) that never left the device go now (§17.11, §17.12)")
+            for (entry in owed) {
+                if (stopped || !linkUp(held.id)) {
+                    log.info("Propagation link gone mid-flush: what never left the device waits for the next coming-up or the next interface to come online")
+                    return
+                }
+                if (!unproved.neverLeft(entry) || !stillOwed(entry) || distroAttemptOpen(entry, held.id)) continue
+                uploadOwed(held.id, entry)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            log.warn("Sending what never left the device failed: ${e.message}")
+        }
+    }
+
     private fun linkUp(linkId: String): Boolean = port.held()?.let { it.id == linkId && it.active } == true
 
     /**
@@ -462,15 +571,25 @@ class DistroOutbox(
      * event. A failure of that upload is like any other. Each outcome is said
      * ([distroOwedOutcome]).
      *
-     * Its callers are three and no other: the coming-up pass
-     * ([sendDistroOutbox]), the user's own action ([owe]) and that send on a
-     * replaced link's decision, below. Called without a coming-up it reads no
-     * failure record, so any other caller would send an upload again on its own
-     * failure ([DistroOutboxContractTest] pins them).
+     * Its callers are four and no other: the coming-up pass
+     * ([sendDistroOutbox]), the user's own action ([owe]), that send on a
+     * replaced link's decision, below, and an interface coming back online,
+     * which sends what never left the device ([onInterfaceOnline]; James,
+     * 2026-10-06: nothing was sent, so no failure is retried). Called without a
+     * coming-up it reads no failure record, so any other caller would send an
+     * upload again on its own failure; the interface's reads none because it
+     * sends only a message whose last upload never left, and an upload made
+     * after a failure was made only on an event that let that failure go
+     * ([DistroOutboxContractTest] pins them).
      */
     private suspend fun uploadOwed(linkId: String, entry: OwedEntry, comingUp: Long? = null) {
         val flight = Flight(linkId, entry.msgHash)
         inFlight[entry.id] = flight
+        // An upload of this message begins, so that its last one never left the
+        // device decides nothing from now on (James, 2026-10-06): what this one
+        // comes to is what is recorded then, a failure's record, its proof, or
+        // the never-left record again.
+        unproved.clearNeverLeft(entry)
         fun landed() {
             if (inFlight[entry.id] === flight) inFlight.remove(entry.id)
         }
@@ -488,7 +607,7 @@ class DistroOutbox(
         // Proved (late, too): owed no more, its record goes, and only its own.
         fun forgetUnproved() = unproved.forget(entry)
 
-        val upload: Upload?
+        val handoff: Handoff
         try {
             val bytes = port.build(entry)
             // Building it yielded: a later action on the same channel may have
@@ -506,7 +625,7 @@ class DistroOutbox(
                 log.info("${entry.label} was not proved since this flush began: built, not sent; it waits for the propagation link's next coming-up")
                 return
             }
-            upload = uploadFor(linkId, bytes, entry.label)
+            handoff = uploadFor(linkId, bytes, entry.label)
         } catch (e: CancellationException) {
             landed()
             throw e
@@ -518,13 +637,28 @@ class DistroOutbox(
             distroOwedOutcome(entry, null, e.message ?: e.toString())
             return
         }
-        if (upload == null) {
-            // Building the upload (its stamp) yields, and can take seconds: the
-            // link went down meanwhile. Nothing left, so nothing is decided: it
-            // stays owed and goes when the link is next up.
-            landed()
-            log.info("The propagation link went down while ${entry.label} was built: nothing left, and it goes when the link is next up")
-            return
+        val upload = when (handoff) {
+            is Handoff.Left -> handoff.upload
+            Handoff.LinkGone -> {
+                // Building the upload (its stamp) yields, and can take seconds: the
+                // link went down meanwhile. Nothing left, so nothing is decided: it
+                // stays owed and goes when the link is next up.
+                landed()
+                log.info("The propagation link went down while ${entry.label} was built: nothing left, and it goes when the link is next up")
+                return
+            }
+            Handoff.NeverLeft -> {
+                // The link was up and the packet could not be queued on it: nothing
+                // was sent, so this is no failure and records no coming-up. The record
+                // only says which message that is, while it is the one owed under its
+                // id, as a failure's does. An interface coming back online
+                // ([onInterfaceOnline]) or the next coming-up sends it. It takes no
+                // part in the third ruling's send on a newer link: no upload is open.
+                landed()
+                if (entries[entry.id]?.msgHash == entry.msgHash) unproved.recordNeverLeft(entry)
+                distroOwedNeverLeft(entry)
+                return
+            }
         }
         // It left: until it is decided, no flush uploads this entry again, on this
         // link or on one that replaces it.
@@ -578,14 +712,17 @@ class DistroOutbox(
     }
 
     /**
-     * Hand [bytes] to the propagation link [linkId], never started here. Null
-     * when [linkId] is no longer the propagation link or no longer up: nothing
-     * left. Otherwise the upload, decided by the node's proof or by its loss.
-     * A packet's proof has a §1 watch: a proof later than 5 s is logged as the
-     * violation it is, and it settles the entry all the same.
+     * Hand [bytes] to the propagation link [linkId], never started here.
+     * [Handoff.LinkGone] when [linkId] is no longer the propagation link or no
+     * longer up: nothing left, nothing decided. [Handoff.NeverLeft] when the
+     * link was up and the port did not take the packet: it could not be queued,
+     * nothing was sent, and that is no failure. Otherwise the upload, decided by
+     * the node's proof or by its loss. A packet's proof has a §1 watch: a proof
+     * later than 5 s is logged as the violation it is, and it settles the entry
+     * all the same.
      */
-    private fun uploadFor(linkId: String, bytes: ByteArray, label: String): Upload? {
-        if (!linkUp(linkId)) return null
+    private fun uploadFor(linkId: String, bytes: ByteArray, label: String): Handoff {
+        if (!linkUp(linkId)) return Handoff.LinkGone
         val upload = Upload(label, linkId, "packet")
         val sink = object : UploadSink {
             override fun proved() { uploadProved(upload) }
@@ -600,14 +737,14 @@ class DistroOutbox(
         }
         if (left == null) {
             open.remove(upload)
-            return null
+            return Handoff.NeverLeft
         }
         upload.linkId = left.linkId
         upload.how = if (left.resource) "resource" else "packet"
         // Its proof has its own §1 watch for a Resource (its progress is watched
         // in the stack); a packet's clock starts when it has left.
         if (!left.resource && upload.settled == null) upload.leftAt = now()
-        return upload
+        return Handoff.Left(upload)
     }
 
     /** The node proved the packet of [upload]. True when this decided it. */
@@ -725,6 +862,25 @@ class DistroOutbox(
     fun onDistroChanged() = dropMembershipOwedToOtherDistros()
 
     // ---- Saying how it ended ----
+
+    /**
+     * Say that the upload of the owed [entry] never left the device (the link was
+     * up and the packet could not be queued on it): nothing was sent, so this is
+     * no failure. The log says so, as a line and not a warning or an error: the
+     * client shows the user an error only for an upload that failed, and none is
+     * due. The entry stays owed, and goes when an interface comes back online
+     * ([onInterfaceOnline]) or at the propagation link's next coming-up, whichever
+     * is first (James, 2026-10-06, DESIGN_PRINCIPLES §3, what a device owes its
+     * distro). One owed no more by now (proved by another upload, replaced by a
+     * later action, or dropped with its distro) says that instead.
+     */
+    private fun distroOwedNeverLeft(entry: OwedEntry) {
+        if (!stillOwed(entry)) {
+            log.info("An upload of ${entry.label} never left the device, and it is owed no more (proved by another upload, replaced by a later action, or dropped with its distro): nothing goes again")
+            return
+        }
+        log.info("${entry.label} never left the device (its packet could not be queued on the propagation link): nothing was sent, so it is no failure — it goes when an interface comes back online, or when the propagation link next comes up, whichever is first (DESIGN_PRINCIPLES §3, the distro exception)")
+    }
 
     /**
      * Say how the upload of the owed [entry] ended: proved ([error] null, sent

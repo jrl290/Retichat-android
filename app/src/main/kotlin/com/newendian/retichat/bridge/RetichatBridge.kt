@@ -119,6 +119,19 @@ interface PropagationLinkCallback {
 }
 
 /**
+ * A Reticulum interface came online: [RetichatBridge.interfaceOnlineRegister].
+ * Transport's own up-edge (an interface that was offline is online: a TCP
+ * reconnect, a radio that came back), told once per edge with the interface's
+ * name. It is not Android's "network available", which says only that the
+ * system has a network. Fires on a Rust thread already attached to the JVM and
+ * must not block: hand the work to a coroutine and return.
+ */
+@Keep
+interface InterfaceOnlineCallback {
+    fun onInterfaceOnline(name: String)
+}
+
+/**
  * The outcome of one upload on the held propagation link
  * ([RetichatBridge.propagationUpload]): [onProved] when the node proves the
  * packet (or the Resource completes), [onLost] when the packet receipt times
@@ -740,6 +753,21 @@ object RetichatBridge {
      */
     fun propagationLinkEventsRegister(callback: PropagationLinkCallback): Boolean =
         nativePropagationLinkEventsRegister(callback) == 0
+
+    /**
+     * Be told whenever a Reticulum interface comes online (Transport's
+     * up-edge: an interface that was offline is online, whichever interface it
+     * is). One callback at a time: a later register replaces it. Register again
+     * after each start; [interfaceOnlineUnregister] ends it at the stop.
+     */
+    fun interfaceOnlineRegister(callback: InterfaceOnlineCallback): Boolean =
+        nativeInterfaceOnlineRegister(callback) == 0
+
+    /** Stop telling the callback [interfaceOnlineRegister] set. */
+    fun interfaceOnlineUnregister() { nativeInterfaceOnlineUnregister() }
+
+    private external fun nativeInterfaceOnlineRegister(callback: InterfaceOnlineCallback): Int
+    private external fun nativeInterfaceOnlineUnregister(): Int
 
     private external fun nativeMessageSetDistroChannelSync(
         handle: Long, op: String, name: String, atMs: Long, deviceHex: String,

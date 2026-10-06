@@ -14,13 +14,71 @@
 //!   `LXMessage::pack` builds `propagation_packed` for a PROPAGATED message.
 //!   Built anew for every upload from the same packed message.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
 
 use lxmf_rust::lx_message::LXMessage;
 use lxmf_rust::lx_stamper::{generate_stamp, WORKBLOCK_EXPAND_ROUNDS_PN};
 use reticulum_rust::destination::{Destination, DestinationType};
 use reticulum_rust::identity::{self, Identity};
+use reticulum_rust::transport::Transport;
 use rmpv::Value;
+
+/// Where a Reticulum interface's up-edge goes (James, 2026-10-06, DESIGN_PRINCIPLES
+/// §3, what a device owes its distro). An owed upload whose packet could not
+/// leave the device, because no interface could carry it, is not a failure and
+/// goes when an interface comes back online; the Kotlin outbox
+/// (`DistroOutbox.onInterfaceOnline`) is told here. The edge is Transport's own
+/// (`Transport::set_interface_online` false to true, the one AppLinks reacts to
+/// when it re-attempts its links), not Android's "network available".
+///
+/// Transport can add a listener and never remove one, so the one listener is
+/// added once per process ([`hook_interface_up`]) and what it tells is set and
+/// cleared here: the JNI registers at each start and clears at each stop.
+pub struct InterfaceUpRelay {
+    sink: Mutex<Option<Arc<dyn Fn(&str) + Send + Sync>>>,
+}
+
+impl InterfaceUpRelay {
+    pub const fn new() -> Self {
+        Self { sink: Mutex::new(None) }
+    }
+
+    /// Tell `sink` of every up-edge from now on, in place of any earlier one.
+    pub fn set(&self, sink: Arc<dyn Fn(&str) + Send + Sync>) {
+        if let Ok(mut slot) = self.sink.lock() {
+            *slot = Some(sink);
+        }
+    }
+
+    /// Tell no one.
+    pub fn clear(&self) {
+        if let Ok(mut slot) = self.sink.lock() {
+            *slot = None;
+        }
+    }
+
+    /// Hand the interface `name`'s up-edge to the sink, if there is one. The sink
+    /// is cloned out of the lock, so what it does (a call into Kotlin) never holds it.
+    pub fn tell(&self, name: &str) {
+        let sink = self.sink.lock().ok().and_then(|slot| slot.clone());
+        if let Some(sink) = sink {
+            sink(name);
+        }
+    }
+}
+
+/// The relay the JNI sets and clears.
+pub static INTERFACE_UP: InterfaceUpRelay = InterfaceUpRelay::new();
+
+/// Subscribe [`INTERFACE_UP`] to Transport's interface up-edge, once per process.
+/// Transport runs its listeners on a thread of their own, never on the
+/// interface's, so the sink may call into Kotlin.
+pub fn hook_interface_up() {
+    static HOOKED: Once = Once::new();
+    HOOKED.call_once(|| {
+        Transport::add_interface_up_listener(Arc::new(|name: &str| INTERFACE_UP.tell(name)));
+    });
+}
 
 /// `FIELD_TICKET`: an empty bin in C, so that clients older than §17.12 take C
 /// for a delivery notification and drop it. It is no ticket.
@@ -476,5 +534,52 @@ mod tests {
             assert!(kotlin.contains(&declaration), "Kotlin lacks `{declaration}`");
         }
         assert_eq!(app_links::APP_LINK_RECOVERED, 5);
+    }
+
+    /// The up-edge Kotlin's outbox hears is Transport's own: a real false-to-true transition of a
+    /// registered interface reaches the relay once, an interface that is already online or goes
+    /// offline tells nothing, hooking twice adds no second listener, and a cleared relay tells no
+    /// one. (James, 2026-10-06: an owed upload that never left the device goes when an interface
+    /// comes back online.)
+    #[test]
+    fn an_interfaces_up_edge_reaches_the_relay_once_per_edge_and_a_cleared_relay_tells_no_one() {
+        use reticulum_rust::transport::{InterfaceStub, InterfaceStubConfig};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let name = "jni-up-edge-test";
+        let mut config = InterfaceStubConfig::default();
+        config.name = name.to_string();
+        config.online = Some(false);
+        config.out = true;
+        config.mode = InterfaceStub::MODE_FULL;
+        Transport::register_interface_stub_config(config);
+
+        let (tx, rx) = mpsc::channel::<String>();
+        let tx = Mutex::new(tx);
+        INTERFACE_UP.set(Arc::new(move |up: &str| {
+            if up == name {
+                let _ = tx.lock().unwrap().send(up.to_string());
+            }
+        }));
+        hook_interface_up();
+        hook_interface_up(); // once per process: a second call adds no second listener
+
+        Transport::set_interface_online(name, true);
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).as_deref(), Ok(name), "the up-edge is told with the interface's name");
+        // A told edge would arrive at once; the bound only ends the wait.
+        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "told once, not twice");
+
+        Transport::set_interface_online(name, true); // already online: no edge
+        Transport::set_interface_online(name, false); // a down-edge
+        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "no up-edge, nothing told");
+
+        Transport::set_interface_online(name, true);
+        assert!(rx.recv_timeout(Duration::from_secs(5)).is_ok(), "each up-edge is told");
+
+        INTERFACE_UP.clear();
+        Transport::set_interface_online(name, false);
+        Transport::set_interface_online(name, true);
+        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "a cleared relay tells no one");
     }
 }

@@ -56,6 +56,10 @@ class DistroOutboxTest {
         var held: HeldLink? = null
         /** Uploads go as a Resource (over the link MDU) rather than one packet. */
         var resource = false
+        /** The link is up and no interface can carry the packet: the port does not take it (it could not be queued). */
+        var cannotQueue = false
+        /** How many uploads the port did not take while the link was up. */
+        var refused = 0
         val builds = mutableListOf<OwedEntry>()
         val sent = mutableListOf<Sent>()
         private val gates = ArrayDeque<CompletableDeferred<Unit>>()
@@ -80,6 +84,7 @@ class DistroOutboxTest {
         override fun upload(upload: ByteArray, sink: UploadSink): UploadLeft? {
             val link = held ?: return null
             if (!link.active) return null
+            if (cannotQueue) { refused++; return null }
             val (id, hash, key) = String(upload).split("|")
             sent += Sent(link.id, id, hash, key, sink)
             return UploadLeft(link.id, resource = resource)
@@ -1049,5 +1054,289 @@ class DistroOutboxTest {
         yield()
         assertTrue(rig.port.builds.isEmpty())
         assertTrue(rig.lines.error.isEmpty())
+    }
+
+    // ---- an upload that never left the device (James, 2026-10-06) ----
+    //
+    // Mirrors Retichat-js 80c74ad / 136d13d (distro_channels, distro_outbox and exchange_truth tests). The port
+    // not taking the packet while the link is up is "it could not be queued": nothing was sent, which is no
+    // failure. The event is an interface coming back online, never a timer and never a failure.
+
+    /** The owed [entry] was handed over while no interface could carry it: refused, recorded never left, nothing said as a failure. */
+    private suspend fun neverLeft(rig: Rig, entry: OwedEntry) {
+        rig.link("L1")
+        rig.port.cannotQueue = true
+        rig.outbox.owe(entry)
+        yield()
+    }
+
+    @Test
+    fun anUploadWhosePacketCouldNotBeQueuedIsNoFailureAndGoesOnceWhenAnInterfaceComesBackOnline() = run { rig ->
+        val join = channel("join", "public.x", "join")
+        neverLeft(rig, join)
+        // Nothing left, and it is no failure: no error, no warning, no failure record, no §1 watch to speak of.
+        assertEquals(1, rig.port.refused)
+        assertTrue(rig.port.sent.isEmpty())
+        assertTrue(rig.lines.error.isEmpty())
+        assertTrue(rig.lines.warn.isEmpty())
+        assertEquals(0, rig.outbox.unproved.size)
+        assertTrue(rig.outbox.unproved.neverLeft(join))
+        assertTrue(rig.lines.info.any { it.contains("never left the device") && it.contains("no failure") })
+        assertEquals(listOf(join), rig.outbox.owed())
+        // Owed, and nothing carries it by itself: no timer, no poll.
+        repeat(5) { yield() }
+        assertTrue(rig.port.sent.isEmpty())
+        // The interface comes back online: it goes, once, the same message, on the link that is up.
+        rig.port.cannotQueue = false
+        rig.outbox.onInterfaceOnline("tcp0")
+        assertEquals(listOf("L1"), rig.port.sent.map { it.linkId })
+        assertEquals(listOf("join"), rig.port.sent.map { it.msgHash })
+        // An upload of it began, so it is no longer recorded never left, and it is no failure either.
+        assertEquals(0, rig.outbox.unproved.neverLeftSize)
+        rig.port.sent[0].proved()
+        yield()
+        assertEquals(emptyList<OwedEntry>(), rig.outbox.owed())
+        assertTrue(rig.store.rows.isEmpty())
+        // Proved and owed no more: the next edge sends nothing.
+        rig.outbox.onInterfaceOnline("tcp0")
+        assertEquals(1, rig.port.sent.size)
+        assertTrue(rig.lines.error.isEmpty())
+    }
+
+    @Test
+    fun aLossAfterThePacketLeftDoesNotGoOnTheInterfacesReturnAndGoesAtTheNextComingUp() = run { rig ->
+        rig.link("L1")
+        rig.outbox.owe(channel("join", "public.x", "join"))
+        yield()
+        rig.port.sent[0].lost()
+        yield()
+        assertTrue(rig.lines.error.any { it.contains("was not proved") && it.contains("still owed") })
+        assertEquals(1, rig.outbox.unproved.size)
+        assertEquals(0, rig.outbox.unproved.neverLeftSize)
+        // The packet left and was lost: an interface coming online sends nothing of it (mutation: the edge uploads every owed entry).
+        rig.outbox.onInterfaceOnline("tcp0")
+        assertEquals(1, rig.port.sent.size)
+        // The next coming-up carries it.
+        rig.link("L2")
+        rig.outbox.onLinkEstablished("L2")
+        assertEquals(listOf("L1", "L2"), rig.port.sent.map { it.linkId })
+    }
+
+    @Test
+    fun theInterfacesReturnSendsOnlyWhatNeverLeftAndReleasesNoFailure() = run { rig ->
+        rig.link("L1")
+        val failed = sentCopy("failed")
+        rig.outbox.owe(failed)
+        yield()
+        rig.port.sent[0].lost()
+        yield()
+        val never = sentCopy("never")
+        rig.port.cannotQueue = true
+        rig.outbox.owe(never)
+        yield()
+        rig.port.cannotQueue = false
+        val ups = rig.outbox.propComingUps
+        rig.outbox.onInterfaceOnline("tcp0")
+        // Only the one that never left; the failed one waits for a coming-up. It is no coming-up, and counts none.
+        assertEquals(listOf("failed", "never"), rig.port.sent.map { it.msgHash })
+        assertEquals(ups, rig.outbox.propComingUps)
+        assertEquals(1, rig.outbox.unproved.size)
+        rig.port.sent[1].proved()
+        yield()
+        assertEquals(listOf(failed), rig.outbox.owed())
+    }
+
+    @Test
+    fun aNeverLeftUploadGoesAtAComingUpTooAndTheInterfacesReturnAfterThatSendsNothing() = run { rig ->
+        val join = channel("join", "public.x", "join")
+        neverLeft(rig, join)
+        rig.port.cannotQueue = false
+        // No failure record holds it back: a flush at any coming-up sends it, like a message never uploaded.
+        rig.outbox.onLinkRecovered("L1")
+        assertEquals(listOf("join"), rig.port.sent.map { it.msgHash })
+        assertEquals(0, rig.outbox.unproved.neverLeftSize)
+        // And the edge that follows finds nothing recorded never left, and no second upload.
+        rig.outbox.onInterfaceOnline("tcp0")
+        assertEquals(1, rig.port.sent.size)
+    }
+
+    @Test
+    fun aLossAfterANeverLeftUploadLeftIsAFailureAgainThatWaitsForTheNextComingUp() = run { rig ->
+        neverLeft(rig, sentCopy("copy"))
+        rig.port.cannotQueue = false
+        rig.outbox.onInterfaceOnline("tcp0")
+        assertEquals(1, rig.port.sent.size)
+        // This time the packet left and was lost: the record of its never leaving ended when the upload began (mutation: kept).
+        rig.port.sent[0].lost()
+        yield()
+        assertTrue(rig.lines.error.any { it.contains("was not proved") })
+        assertEquals(1, rig.outbox.unproved.size)
+        rig.outbox.onInterfaceOnline("tcp0")
+        assertEquals(1, rig.port.sent.size)
+        rig.link("L2")
+        rig.outbox.onLinkEstablished("L2")
+        assertEquals(listOf("L1", "L2"), rig.port.sent.map { it.linkId })
+    }
+
+    @Test
+    fun twoInterfaceReturnsInARowAndAFlushAlreadyUnderWayCarryOneUpload() = runBlocking {
+        val rig = Rig(this)
+        rig.outbox.start()
+        neverLeft(rig, channel("join", "public.x", "join"))
+        rig.port.cannotQueue = false
+        val gate = rig.port.gateNextBuild()
+        val first = launch { rig.outbox.onInterfaceOnline("tcp0") }
+        yield()
+        // The first return's upload is being built; a second return and a coming-up flush find it taken.
+        val second = launch { rig.outbox.onInterfaceOnline("backbone") }
+        val flush = launch { rig.outbox.onLinkEstablished("L1") }
+        yield()
+        gate.complete(Unit)
+        listOf(first, second, flush).forEach { it.join() }
+        assertEquals(1, rig.port.sent.size)
+        assertEquals(listOf("join"), rig.port.sent.map { it.msgHash })
+    }
+
+    @Test
+    fun aMessageReplacedOrDroppedWithItsDistroLeavesNoNeverLeftRecordAndSendsNothing() = run { rig ->
+        val join = channel("join", "public.x", "join")
+        neverLeft(rig, join)
+        assertEquals(1, rig.outbox.unproved.neverLeftSize)
+        // Replaced by a later action under the same id: the join's record goes with it, the leave's stands.
+        val leave = channel("leave", "public.x", "leave")
+        rig.outbox.owe(leave)
+        yield()
+        assertFalse(rig.outbox.unproved.neverLeft(join))
+        assertTrue(rig.outbox.unproved.neverLeft(leave))
+        assertEquals(1, rig.outbox.unproved.neverLeftSize)
+        // The distro is given up: the membership message is dropped, and with it the record.
+        rig.distro = null
+        rig.outbox.onDistroChanged()
+        assertEquals(0, rig.outbox.unproved.neverLeftSize)
+        rig.port.cannotQueue = false
+        rig.outbox.onInterfaceOnline("tcp0")
+        assertTrue(rig.port.sent.isEmpty())
+    }
+
+    @Test
+    fun noLinkAStaleLinkAndAStoppedStackSendNothingOnTheInterfacesReturnAndTheRecordStands() = run { rig ->
+        val copy = sentCopy("copy")
+        neverLeft(rig, copy)
+        rig.port.cannotQueue = false
+        // No link held: its coming-up sends it with everything owed.
+        rig.port.held = null
+        rig.outbox.onInterfaceOnline("tcp0")
+        // A STALE (or coming-up) link: the same.
+        rig.link("L1", active = false)
+        rig.outbox.onInterfaceOnline("tcp0")
+        assertTrue(rig.port.sent.isEmpty())
+        assertTrue(rig.outbox.unproved.neverLeft(copy))
+        // The stack stopped: nothing is sent.
+        rig.link("L1")
+        rig.outbox.onStop()
+        rig.outbox.onInterfaceOnline("tcp0")
+        assertTrue(rig.port.sent.isEmpty())
+        // Running again, with the link up: it goes.
+        rig.outbox.start()
+        rig.outbox.onInterfaceOnline("tcp0")
+        assertEquals(listOf("copy"), rig.port.sent.map { it.msgHash })
+    }
+
+    @Test
+    fun aSentCopyGoesTheSameWayAsAMembershipMessage() = run { rig ->
+        val copy = sentCopy("copy")
+        neverLeft(rig, copy)
+        assertTrue(rig.lines.error.isEmpty())
+        assertEquals(0, rig.outbox.unproved.size)
+        rig.port.cannotQueue = false
+        rig.outbox.onInterfaceOnline("tcp0")
+        assertEquals(listOf(copy.id), rig.port.sent.map { it.entryId })
+        rig.port.sent[0].proved()
+        yield()
+        assertEquals(emptyList<OwedEntry>(), rig.outbox.owed())
+    }
+
+    @Test
+    fun anInterfaceThatStillCannotCarryItRefusesAgainWithNoLoopAndNoFailure() = run { rig ->
+        val join = channel("join", "public.x", "join")
+        neverLeft(rig, join)
+        // The edge comes while the packet still cannot be queued: refused again, recorded again, no loop.
+        rig.outbox.onInterfaceOnline("tcp0")
+        repeat(5) { yield() }
+        assertEquals(2, rig.port.refused)
+        assertTrue(rig.outbox.unproved.neverLeft(join))
+        assertTrue(rig.lines.error.isEmpty())
+        assertTrue(rig.lines.warn.isEmpty())
+        assertEquals(0, rig.outbox.unproved.size)
+        // The next edge, with the interface carrying it, sends it.
+        rig.port.cannotQueue = false
+        rig.outbox.onInterfaceOnline("tcp0")
+        assertEquals(1, rig.port.sent.size)
+    }
+
+    @Test
+    fun aBuildAbandonedBecauseTheLinkWentDownIsNotRecordedNeverLeft() = runBlocking {
+        val rig = Rig(this)
+        rig.outbox.start()
+        rig.link("L1")
+        val gate = rig.port.gateNextBuild()
+        val owing = launch { rig.outbox.owe(sentCopy("copy")) }
+        yield()
+        rig.port.held = null
+        gate.complete(Unit)
+        owing.join()
+        repeat(3) { yield() }
+        // Nothing was handed to a link, so nothing never left: the link's coming-up carries it (§17.12).
+        assertEquals(0, rig.outbox.unproved.neverLeftSize)
+        assertTrue(rig.port.sent.isEmpty())
+        rig.link("L2")
+        rig.outbox.onInterfaceOnline("tcp0")
+        assertTrue(rig.port.sent.isEmpty())
+        rig.outbox.onLinkEstablished("L2")
+        assertEquals(1, rig.port.sent.size)
+    }
+
+    // ---- UnprovedUploads' never-left records ----
+
+    @Test
+    fun aNeverLeftRecordIsOneMessagesHasNoComingUpAndHoldsBackNoFlush() {
+        val unproved = UnprovedUploads()
+        val join = channel("join", "public.x", "AAAA")
+        val leave = channel("leave", "public.x", "CCCC")
+        val other = sentCopy("AAAA")
+        assertFalse(unproved.neverLeft(leave))
+        unproved.recordNeverLeft(leave)
+        assertEquals(listOf(true, false, false), listOf(unproved.neverLeft(leave), unproved.neverLeft(join), unproved.neverLeft(other)))
+        // No coming-up is recorded, so no flush leaves it for the next one.
+        assertEquals(listOf(null, false, 0), listOf(unproved.at(leave), unproved.since(leave, 0), unproved.size))
+        unproved.recordNeverLeft(leave)
+        unproved.recordNeverLeft(join)
+        unproved.recordNeverLeft(other)
+        assertEquals(3, unproved.neverLeftSize)
+        unproved.clearNeverLeft(join)
+        assertEquals(listOf(false, true, true, 2), listOf(unproved.neverLeft(join), unproved.neverLeft(leave), unproved.neverLeft(other), unproved.neverLeftSize))
+        unproved.clearNeverLeft(join)
+        assertEquals(2, unproved.neverLeftSize)
+        unproved.forget(other)
+        assertEquals(listOf(true, false, 1), listOf(unproved.neverLeft(leave), unproved.neverLeft(other), unproved.neverLeftSize))
+        unproved.forget(leave)
+        assertEquals(0, unproved.neverLeftSize)
+    }
+
+    @Test
+    fun forgetEndsAMessagesFailureRecordAndItsNeverLeftRecordTogetherAndClearNeverLeftEndsTheSecondAlone() {
+        val unproved = UnprovedUploads()
+        val message = channel("join", "public.x", "AAAA")
+        unproved.record(message, 3)
+        unproved.recordNeverLeft(message)
+        unproved.clearNeverLeft(message)
+        assertEquals(listOf(false, 3L, 1), listOf(unproved.neverLeft(message), unproved.at(message), unproved.size))
+        unproved.recordNeverLeft(message)
+        unproved.forget(message)
+        assertEquals(listOf(false, null, 0, 0), listOf(unproved.neverLeft(message), unproved.at(message), unproved.size, unproved.neverLeftSize))
+        // A message with only a never-left record is forgotten too.
+        unproved.recordNeverLeft(message)
+        unproved.forget(message)
+        assertEquals(0, unproved.neverLeftSize)
     }
 }

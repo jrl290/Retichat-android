@@ -57,14 +57,55 @@ class DistroOutboxContractTest {
     }
 
     @Test
-    fun anOwedUploadIsMadeByThreePathsAndNoOther() {
-        // The coming-up pass, which reads the failure record with its coming-up, and uploadOwedAtOnce,
-        // which reads none: the user's own action (owe) and the third ruling's send (inside uploadOwed's
-        // loss handler). Anything else calling either would send an upload again on its own failure.
-        assertEquals(listOf("sendDistroOutbox", "uploadOwedAtOnce"), callersOf("uploadOwed"))
+    fun anOwedUploadIsMadeByFourPathsAndNoOther() {
+        // The coming-up pass, which reads the failure record with its coming-up; the interface's return,
+        // which sends only what never left the device (James, 2026-10-06: nothing was sent, so no failure
+        // is retried); and uploadOwedAtOnce, which reads none: the user's own action (owe) and the third
+        // ruling's send (inside uploadOwed's loss handler). Anything else calling either would send an
+        // upload again on its own failure.
+        assertEquals(listOf("sendDistroOutbox", "onInterfaceOnline", "uploadOwedAtOnce"), callersOf("uploadOwed"))
         assertEquals(listOf("owe", "uploadOwed"), callersOf("uploadOwedAtOnce"))
         // The upload it makes has one caller too.
         assertEquals(listOf("uploadOwed"), callersOf("uploadFor"))
+    }
+
+    @Test
+    fun theInterfacesReturnIsCalledByNoOneInTheOutboxAndSendsOnlyWhatNeverLeftOnTheLinkThatIsUp() {
+        // An event the runtime tells (DistroOutboxWiringTest pins its one caller): nothing in the outbox calls it.
+        assertEquals(emptyList<String>(), callersOf("onInterfaceOnline"))
+        val start = code.indexOf("suspend fun onInterfaceOnline(")
+        val edge = code.substring(start, code.indexOf("private fun linkUp("))
+        // One upload call, with no coming-up: it reads no failure record.
+        assertEquals(1, Regex("uploadOwed\\(").findAll(edge).count())
+        assertTrue(edge.contains("uploadOwed(held.id, entry)"))
+        // Only the stack running, only the propagation link while it is ACTIVE, only what is recorded never left,
+        // still owed, with no attempt open, each checked again when its turn comes.
+        for (guard in listOf("if (stopped) return", "held.active", "unproved.neverLeft(it)", "!unproved.neverLeft(entry)",
+            "!stillOwed(entry)", "distroAttemptOpen(entry, held.id)", "linkUp(held.id)")) {
+            assertTrue(guard, edge.contains(guard))
+        }
+        // It is no coming-up and no failure's release: it names neither the pass, the count nor a failure record.
+        for (name in listOf("sendDistroOutbox", "propComingUps", "unprovedSince", "unproved.record(", "unproved.since(", "comingUp")) {
+            assertFalse(name, edge.contains(name))
+        }
+    }
+
+    @Test
+    fun aNeverLeftUploadIsDecidedAndRecordedInOnePlaceAndNeverAsAFailure() {
+        // The record is made where the port did not take the packet, and nowhere else.
+        assertEquals(1, Regex("unproved\\.recordNeverLeft\\(").findAll(code).count())
+        val never = code.substring(code.indexOf("Handoff.NeverLeft -> {"), code.indexOf("flight.upload = upload"))
+        assertTrue(never.contains("unproved.recordNeverLeft(entry)"))
+        // No failure record, no coming-up, no error the client shows, no Resource decision: nothing was sent.
+        for (name in listOf("recordUnproved", "unproved.record(", "propComingUps", "log.error", "log.warn", "upload.on")) {
+            assertFalse(name, never.contains(name))
+        }
+        // An upload beginning ends the record, before anything can yield.
+        val uploadOwed = code.substring(code.indexOf("private suspend fun uploadOwed("))
+        assertTrue(uploadOwed.indexOf("unproved.clearNeverLeft(entry)") in 0 until uploadOwed.indexOf("port.build(entry)"))
+        // forget() ends both records, so every place that forgets an owed message ends both.
+        val forget = code.substring(code.indexOf("fun forget(entry: OwedEntry)"), code.indexOf("val size: Int"))
+        assertTrue(forget.contains("clearNeverLeft(entry)"))
     }
 
     @Test

@@ -3,6 +3,7 @@ package com.newendian.retichat.service
 import android.content.Context
 import android.util.Log
 import com.newendian.retichat.RetichatApp
+import com.newendian.retichat.bridge.InterfaceOnlineCallback
 import com.newendian.retichat.bridge.PropagationLinkCallback
 import com.newendian.retichat.bridge.PropagationUploadCallback
 import com.newendian.retichat.bridge.RetichatBridge
@@ -52,6 +53,16 @@ import java.util.concurrent.atomic.AtomicBoolean
  * new one, or that times out and is re-opened, is an establishment as before; the
  * outbox itself runs a recovery only while that link is still the propagation
  * link ([DistroOutbox.onLinkRecovered]).
+ *
+ * A third event sends only what never left the device (James, 2026-10-06,
+ * DESIGN_PRINCIPLES §3, what a device owes its distro): a Reticulum interface
+ * coming online ([DistroOutbox.onInterfaceOnline]). An upload whose packet could
+ * not be queued on the link is no failure, and a short drop leaves the
+ * propagation link up, so no coming-up follows; Transport's own up-edge
+ * (`Transport::set_interface_online` false to true, the edge AppLinks re-attempts
+ * its links on, told by [RetichatBridge.interfaceOnlineRegister]) is the event.
+ * It is never Android's "network available", which says only that the system
+ * has a network: the interface answers it, and its up-edge, if it does, is this.
  */
 object DistroOutboxRuntime {
     private const val TAG = "DistroOutbox"
@@ -69,6 +80,7 @@ object DistroOutboxRuntime {
     @Volatile private var box: DistroOutbox? = null
     @Volatile private var port: JniPropagationPort? = null
     @Volatile private var linkEventsRegistered = false
+    @Volatile private var interfaceEventsRegistered = false
     private var distroWatch = false
 
     private object AndroidLog : OutboxLog {
@@ -112,6 +124,10 @@ object DistroOutboxRuntime {
             if (RetichatBridge.propagationLinkEventsRegister(linkCallback)) linkEventsRegistered = true
             else Log.e(TAG, "link events not registered: ${RetichatBridge.lastError()}")
         }
+        if (!interfaceEventsRegistered) {
+            if (RetichatBridge.interfaceOnlineRegister(interfaceCallback)) interfaceEventsRegistered = true
+            else Log.e(TAG, "interface events not registered: ${RetichatBridge.lastError()}")
+        }
         val held = port?.held()
         if (held != null && held.active) scope.launch { outbox.onLinkEstablished(held.id) }
     }
@@ -123,6 +139,8 @@ object DistroOutboxRuntime {
      */
     fun stop() {
         linkEventsRegistered = false
+        interfaceEventsRegistered = false
+        if (RetichatBridge.isLoaded) RetichatBridge.interfaceOnlineUnregister()
         val outbox = box ?: return
         scope.launch { outbox.onStop() }
     }
@@ -143,6 +161,14 @@ object DistroOutboxRuntime {
                 val outbox = box ?: return
                 scope.launch { outbox.onLinkRecovered(id) }
             }
+        }
+    }
+
+    /** A Reticulum interface came online (Transport's up-edge): what never left the device goes, if the propagation link is up. */
+    private val interfaceCallback = object : InterfaceOnlineCallback {
+        override fun onInterfaceOnline(name: String) {
+            val outbox = box ?: return
+            scope.launch { outbox.onInterfaceOnline(name) }
         }
     }
 
@@ -295,7 +321,9 @@ object DistroOutboxRuntime {
             }
             val started = RetichatBridge.propagationUpload(node, upload, callback)
             if (started == null) {
-                Log.w(TAG, "upload did not leave: ${RetichatBridge.lastError()}")
+                // Said as a line, not a warning: nothing was sent, which is no failure (James, 2026-10-06);
+                // the outbox says what becomes of it.
+                Log.i(TAG, "upload did not leave: ${RetichatBridge.lastError()}")
                 return null
             }
             if (!started.resource) {
