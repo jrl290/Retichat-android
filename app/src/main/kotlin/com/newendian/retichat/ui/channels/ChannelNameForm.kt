@@ -112,6 +112,28 @@ object ChannelNameForm {
         return "$root.$n"
     }
 
+    /**
+     * RFed SPEC §17.12 rule 4: whether the join of a channel named [name] that
+     * a sibling device made is one this client's own join accepts: the rules a
+     * typed name must pass in the New Channel form, exactly, with nothing
+     * trimmed, lowercased or filtered. So [name] is already lowercase and NFC,
+     * its root (up to the first ".") is non-empty and holds only letters,
+     * digits and "-", the root "public" is the public channel's and any other
+     * root a private channel's, and the name part is non-empty and holds only
+     * letters, digits, "." and "-". A leave's name is not held to this: a
+     * channel joined before these rules can still be left.
+     */
+    fun joinNameAccepted(name: String): Boolean {
+        val dot = name.indexOf('.')
+        if (dot <= 0) return false
+        val root = name.substring(0, dot)
+        val rest = name.substring(dot + 1)
+        if (root != filterRoot(root) || rest != filterName(rest)) return false
+        // The very name the form would build from these parts; this is what
+        // refuses an empty name part and the root a private channel may not have.
+        return fullChannelName(isPrivate = root != PUBLIC_ROOT, root = root, name = rest) == name
+    }
+
     /** A fresh private root: [PRIVATE_ROOT_HEX_CHARS] lowercase hex from [random]. */
     fun randomPrivateRoot(random: SecureRandom = SecureRandom()): String {
         val bytes = ByteArray(PRIVATE_ROOT_HEX_CHARS / 2)

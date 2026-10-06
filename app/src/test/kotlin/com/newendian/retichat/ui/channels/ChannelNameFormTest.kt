@@ -229,4 +229,48 @@ class ChannelNameFormTest {
         }
         assertEquals("636166c3a9", hex(ChannelNameForm.filterRoot("Cafe\u0301.")))
     }
+
+    // --- RFed SPEC §17.12 rule 4: the join a sibling made ---
+
+    @Test
+    fun aSiblingsJoinIsAcceptedOnlyForANameTheFormWouldBuild() {
+        assertTrue(ChannelNameForm.joinNameAccepted("public.general"))
+        assertTrue(ChannelNameForm.joinNameAccepted("public.team.ops-1"))
+        assertTrue(ChannelNameForm.joinNameAccepted("0123456789abcdef.nametest-096499"))
+        assertTrue(ChannelNameForm.joinNameAccepted("public.café"))
+        assertTrue(ChannelNameForm.joinNameAccepted("4cdc4115.nametest"))
+    }
+
+    @Test
+    fun aNameTheFormWouldHaveChangedIsRefused() {
+        // Nothing is trimmed, lowercased, normalized or filtered: the channel is
+        // derived from these bytes, so a different name is a different channel.
+        assertEquals(false, ChannelNameForm.joinNameAccepted("public.Test"))
+        assertEquals(false, ChannelNameForm.joinNameAccepted("Public.test"))
+        assertEquals(false, ChannelNameForm.joinNameAccepted(" public.test"))
+        assertEquals(false, ChannelNameForm.joinNameAccepted("public.test "))
+        assertEquals(false, ChannelNameForm.joinNameAccepted("public.te st"))
+        assertEquals(false, ChannelNameForm.joinNameAccepted("public.te_st"))
+        // A decomposed é is not the NFC name the form builds.
+        assertEquals(false, ChannelNameForm.joinNameAccepted("public.cafe\u0301"))
+        // Only the first "." ends the root: "pub" is a private root here.
+        assertTrue(ChannelNameForm.joinNameAccepted("pub.lic.test"))
+    }
+
+    @Test
+    fun aNameWithNoRootOrNoNameIsRefused() {
+        assertEquals(false, ChannelNameForm.joinNameAccepted(""))
+        assertEquals(false, ChannelNameForm.joinNameAccepted("general"))
+        assertEquals(false, ChannelNameForm.joinNameAccepted(".general"))
+        assertEquals(false, ChannelNameForm.joinNameAccepted("public."))
+        assertEquals(false, ChannelNameForm.joinNameAccepted("0123456789abcdef."))
+    }
+
+    @Test
+    fun theRootRulesHoldForAPrivateRoot() {
+        // A private root is letters, digits and "-" (never "_" or a dot).
+        assertTrue(ChannelNameForm.joinNameAccepted("my-team.ops"))
+        assertEquals(false, ChannelNameForm.joinNameAccepted("my_team.ops"))
+        assertEquals(false, ChannelNameForm.joinNameAccepted("MY-team.ops"))
+    }
 }
