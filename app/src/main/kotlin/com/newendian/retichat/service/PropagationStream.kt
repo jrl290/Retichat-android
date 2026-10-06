@@ -98,6 +98,16 @@ object PropagationStream {
         )
         if (openAccepted(response)) {
             Log.i(TAG, "propagation.stream open for ${current.selfDestHash.toHex().take(8)}")
+            // What rfed pushed down this device's previous link while it was
+            // dead went unproven and waits in its queue for /rfed/pull, and
+            // without a wake nothing fetches it. Pull once per fresh link, as
+            // the web does after its binding (Retichat-js
+            // _bindRfedLinkForDistroPush, then /distro/pull): an event, not a
+            // timer. Found on staging 2026-10-06: a sibling's channel leave,
+            // pushed in the seconds before the re-open, never arrived.
+            if (DistroManager.deliveryHashHex != null) {
+                Log.i(TAG, "pulled ${RfedDistroClient.pull(app)} blob(s) after the open")
+            }
         } else {
             Log.w(TAG, "propagation.stream open rejected resp=${response?.toHex() ?: "null"}")
         }
