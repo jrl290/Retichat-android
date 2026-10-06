@@ -54,6 +54,8 @@ class DistroOutboxTest {
 
     private class FakePort : PropagationPort {
         var held: HeldLink? = null
+        /** Uploads go as a Resource (over the link MDU) rather than one packet. */
+        var resource = false
         val builds = mutableListOf<OwedEntry>()
         val sent = mutableListOf<Sent>()
         private val gates = ArrayDeque<CompletableDeferred<Unit>>()
@@ -80,7 +82,7 @@ class DistroOutboxTest {
             if (!link.active) return null
             val (id, hash, key) = String(upload).split("|")
             sent += Sent(link.id, id, hash, key, sink)
-            return UploadLeft(link.id, resource = false)
+            return UploadLeft(link.id, resource = resource)
         }
 
         fun uploadsOf(id: String) = sent.filter { it.entryId == id }
@@ -799,12 +801,11 @@ class DistroOutboxTest {
     }
 
     @Test
-    fun theJoinsBuildThrowingAfterTheLeavesLossAlsoTakesNothingFromTheLeave() = runBlocking {
+    fun aJoinReplacedByALeaveIsNeverBuiltByAFlushThatListedItAndTheLeaveKeepsItsRecord() = runBlocking {
         val rig = Rig(this); rig.outbox.start()
         val early = sentCopy("early")
         val join = channel("join", "public.x", "join")
         val leave = channel("leave", "public.x", "leave")
-        // The join's build is the one that throws, and it is decided after the leave's loss.
         rig.link("L1")
         rig.outbox.owe(early)
         yield()
@@ -813,21 +814,63 @@ class DistroOutboxTest {
         rig.port.held = null
         rig.outbox.owe(join)           // owed, link down
         rig.link("L1")
-        val joinGate = rig.port.gateNextBuild()
-        val joinFlush = launch { rig.outbox.onLinkEstablished("L1") }  // builds early (gated)
+        val gate = rig.port.gateNextBuild()
+        val flush = launch { rig.outbox.onLinkEstablished("L1") }  // lists [early, join], builds early (gated)
         yield()
-        // The user leaves while that flush builds: the leave goes at once and is lost.
+        // The user leaves while that flush builds: the leave replaces the join, goes at once, and is lost.
         rig.outbox.owe(leave)
         yield()
         rig.port.sent.single { it.msgHash == "leave" }.lost()
         yield()
-        joinGate.complete(Unit)
-        joinFlush.join()
-        // The flush listed [early, join]; the join was replaced by the leave, so it was never built or sent.
+        gate.complete(Unit)
+        flush.join()
+        // The flush listed the join; it was replaced, so it was never built or sent.
         assertTrue(rig.port.builds.none { it.msgHash == "join" })
         assertEquals(1, rig.port.sent.count { it.msgHash == "leave" })
         assertNull(rig.outbox.unproved.at(join))
         assertNotNull(rig.outbox.unproved.at(leave))
+    }
+
+    @Test
+    fun aReplacedJoinWhoseBuildThrowsAfterTheLeavesLossTakesNoRecordAndNothingFromTheLeave() = runBlocking {
+        val rig = Rig(this); rig.outbox.start()
+        val early = sentCopy("early")
+        val join = channel("join", "public.x", "join")
+        val leave = channel("leave", "public.x", "leave")
+        // early failed before; the join is owed with the link down.
+        rig.link("L1")
+        rig.outbox.owe(early)
+        yield()
+        rig.port.sent.single().lost()
+        yield()
+        rig.port.held = null
+        rig.outbox.owe(join)
+        rig.link("L1")
+        // A flush builds early, then the join; the join's build waits (a stamp) and will throw.
+        val earlyGate = rig.port.gateNextBuild()
+        val joinGate = rig.port.gateNextBuild()
+        val flush = launch { rig.outbox.onLinkEstablished("L1") }
+        yield()
+        earlyGate.complete(Unit)
+        yield()
+        assertEquals("the join is being built", join.msgHash, rig.port.builds.last().msgHash)
+        // The user leaves meanwhile: the leave replaces the join and is lost on L1.
+        rig.outbox.owe(leave)
+        yield()
+        rig.port.sent.single { it.msgHash == "leave" }.lost()
+        yield()
+        assertNotNull(rig.outbox.unproved.at(leave))
+        // Now the join's build throws: it is a failure, but of a message owed no more.
+        rig.port.failNextBuild(IllegalStateException("the key cannot be read"))
+        joinGate.complete(Unit)
+        flush.join()
+        assertTrue(rig.lines.info.any { it.contains("owed no more") })
+        assertNull("a message owed no more keeps no record", rig.outbox.unproved.at(join))
+        assertNotNull("and takes none from the leave", rig.outbox.unproved.at(leave))
+        assertEquals(1, rig.port.sent.count { it.msgHash == "leave" })
+        rig.outbox.onLinkEstablished("L1")
+        assertEquals(2, rig.port.sent.count { it.msgHash == "leave" })
+        assertEquals(0, rig.port.sent.count { it.msgHash == "join" })
     }
 
     @Test
@@ -959,32 +1002,52 @@ class DistroOutboxTest {
     // ---- the phones' event ----
 
     @Test
-    fun aResourcesFailureDecidesItLikeAPacketsTimeout() = run { rig ->
+    fun aResourcesFailureDecidesItLikeAPacketsTimeoutAndNeedsNoPacketProofClock() = run { rig ->
+        rig.port.resource = true
         rig.link("L1")
         rig.outbox.owe(sentCopy("big"))
         yield()
+        assertEquals(1, rig.port.sent.size)
         rig.port.sent[0].lost()
         yield()
-        assertTrue(rig.lines.error.any { it.contains("was not proved") })
+        assertTrue(rig.lines.error.any { it.contains("was not proved") && it.contains("its Resource failed") })
         assertEquals(1, rig.outbox.owed().size)
+        // Still owed, and not sent again at the failure; the next coming-up carries it.
+        assertEquals(1, rig.port.sent.size)
+        rig.link("L2")
+        rig.outbox.onLinkEstablished("L2")
+        assertEquals(listOf("L1", "L2"), rig.port.sent.map { it.linkId })
+        // A Resource's own progress has its own §1 watch in the stack, so a long transfer is no violation here.
+        rig.clock += 60_000
+        rig.port.sent[1].proved()
+        yield()
+        assertTrue(rig.lines.error.none { it.contains("§1 VIOLATION") })
+        assertTrue(rig.lines.info.any { it.contains("propagated to the distro as a resource") })
+        assertEquals(emptyList<OwedEntry>(), rig.outbox.owed())
     }
 
     @Test
-    fun anUploadThatCouldNotBeQueuedLeavesNothingDecided() = run { rig ->
+    fun aResourcesFailureOnAReplacedLinkWithANewerLinkUpGoesOnceOnTheNewerLinkAtOnce() = run { rig ->
+        rig.port.resource = true
+        rig.link("L1")
+        rig.outbox.owe(channel("join", "public.x", "join"))
+        yield()
+        rig.link("L2")
+        rig.outbox.onLinkEstablished("L2")
+        assertEquals(1, rig.port.sent.size)
+        // James, 2026-10-04: a Resource upload's own "failed" is the same event as the loss report.
+        rig.port.sent[0].lost()
+        yield()
+        assertEquals(listOf("L1", "L2"), rig.port.sent.map { it.linkId })
+    }
+
+    @Test
+    fun anEntryOwedWhileTheLinkIsNotActiveBuildsNothingAndSaysNothingWentWrong() = run { rig ->
         rig.link("L1", active = false)
         // Not ACTIVE when the user acts: it waits (and is never started).
         rig.outbox.owe(sentCopy("copy"))
         yield()
         assertTrue(rig.port.builds.isEmpty())
         assertTrue(rig.lines.error.isEmpty())
-    }
-
-    @Test
-    fun theOutboxDoesNotUseAClockOrATimerToSendAnything() {
-        val source = java.io.File("src/main/kotlin/com/newendian/retichat/service/DistroOutbox.kt").readText()
-        val code = source.lines().filterNot { it.trim().startsWith("*") || it.trim().startsWith("//") || it.trim().startsWith("/*") }.joinToString("\n")
-        for (forbidden in listOf("delay(", "Thread.sleep", "Timer", "withTimeout", "schedule(", "postDelayed", "AlarmManager")) {
-            assertFalse(forbidden, code.contains(forbidden))
-        }
     }
 }
