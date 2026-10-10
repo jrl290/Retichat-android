@@ -189,20 +189,31 @@ object RfedDistroClient {
 
     /** [pull], with how it ended. Never throws for a round that got no answer. */
     suspend fun pullOutcome(context: Context): PullOutcome = withContext(Dispatchers.IO) {
+        // A Settings restart stops the stack under a round still waiting: its
+        // round then gets no answer, which is that restart's doing, not a
+        // failure (the truth rule; Retichat-js says the same of reconnect()).
+        // Read when the pull is asked for, before it waits its turn: a stop
+        // while it waited on pullLock is a stop under this pull too.
+        val stops = StackRuntime.stops
         if (DistroManager.identityHandle == 0L) return@withContext PullOutcome(0, "no distro held")
         val dest = destHash(context, "register") ?: run {
             Log.w(TAG, "pull: $NO_NODE")
             return@withContext PullOutcome(0, NO_NODE)
         }
         pullLock.withLock {
-            // A Settings restart stops the stack under a round still waiting: its
-            // round then gets no answer, which is that restart's doing, not a
-            // failure (the truth rule; Retichat-js says the same of reconnect()).
-            val stops = StackRuntime.stops
             var drained = 0
             var unfinished: String? = null
             var lastMore = false
             val total = DistroPullRounds.drain(PULL_ROUNDS_MAX, warn = { Log.w(TAG, it) }) {
+                // A round that cannot go is never sent, and never said as RFed's
+                // silence: with no router, appLinkSend returns null at once.
+                DistroPullRounds.unsent(
+                    stoppedSince = StackRuntime.stops != stops,
+                    stackUp = ConnectionStateManager.isRegistered,
+                )?.let {
+                    unfinished = it
+                    return@drain null
+                }
                 val resp = ConnectionStateManager.appLinkSend(dest, "rfed", "distro.register", "/rfed/pull", DistroCodec.MSGPACK_NIL)
                 if (resp == null) {
                     unfinished = DistroPullRounds.noAnswer(stoppedSince = StackRuntime.stops != stops)
@@ -222,8 +233,13 @@ object RfedDistroClient {
                 _status.value = _status.value.copy(lastPullCount = drained)
                 DistroPullRounds.Page(pairs.size, more)
             }
-            if (unfinished == null) Log.i(TAG, "pull drained $total blob(s)")
-            else Log.w(TAG, "pull stopped after $total blob(s): $unfinished")
+            // "drained" only when RFed's last page said nothing more was queued:
+            // until 2026-10-10 a pull its round cap stopped said "drained" too.
+            when {
+                unfinished != null -> Log.w(TAG, "pull stopped after $total blob(s): $unfinished")
+                lastMore -> Log.w(TAG, "pull stopped at its round cap after $total blob(s); RFed has more")
+                else -> Log.i(TAG, "pull drained $total blob(s)")
+            }
             PullOutcome(total, unfinished, morePending = unfinished == null && lastMore)
         }
     }
@@ -460,6 +476,19 @@ internal object DistroPullRounds {
     fun noAnswer(stoppedSince: Boolean): String =
         if (stoppedSince) "cancelled: the stack was stopped (StackRuntime.restart) while the round waited for RFed"
         else "no answer from RFed (no link inside 5 s, or the request went unanswered)"
+
+    /**
+     * Why a round is not sent, or null when it can go. A stop since the pull
+     * was asked for (it may have waited its turn behind another pull) cancels
+     * it: the restarted stack's start pulls on its own. With no stack running
+     * (ConnectionStateManager has no router) appLinkSend returns null at once:
+     * until 2026-10-10 that read "no answer from RFed", with nothing sent.
+     */
+    fun unsent(stoppedSince: Boolean, stackUp: Boolean): String? = when {
+        stoppedSince -> "cancelled: the stack was stopped (StackRuntime.restart) before the round was sent"
+        !stackUp -> "the stack is not running: no request was sent"
+        else -> null
+    }
 
     suspend fun drain(maxRounds: Int, warn: (String) -> Unit, round: suspend () -> Page?): Int {
         var total = 0

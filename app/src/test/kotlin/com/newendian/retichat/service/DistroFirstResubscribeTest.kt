@@ -36,8 +36,11 @@ class DistroFirstResubscribeTest {
             for (c in channels) wire += "/rfed/subscribe #$c"
         }
 
-        suspend fun start(hasDistro: Boolean, pull: suspend () -> RfedDistroClient.PullOutcome) =
-            DistroFirst.thenResubscribe(hasDistro, pull, { line, warning -> said += line to warning }) { resubscribe() }
+        suspend fun start(
+            hasDistro: Boolean,
+            stopped: () -> Boolean = { false },
+            pull: suspend () -> RfedDistroClient.PullOutcome,
+        ) = DistroFirst.thenResubscribe(hasDistro, pull, stopped, { line, warning -> said += line to warning }) { resubscribe() }
     }
 
     @Test
@@ -49,7 +52,7 @@ class DistroFirstResubscribeTest {
             listOf("/rfed/pull", "/rfed/unsubscribe #b", "/rfed/subscribe #a"),
             d.wire,
         )
-        assertEquals(listOf("Distro queue pulled and applied first (1 blob(s)): re-subscribing persisted channels" to false), d.said)
+        assertEquals(listOf("Distro queue pulled and applied first (1 blob(s)): persisted channels may be re-subscribed now" to false), d.said)
     }
 
     @Test
@@ -69,7 +72,7 @@ class DistroFirstResubscribeTest {
         assertEquals(
             listOf(
                 "Distro pull before re-subscribing stopped after 0 blob(s): no answer from RFed (no link inside 5 s, " +
-                    "or the request went unanswered); re-subscribing persisted channels now; a sibling's leave still " +
+                    "or the request went unanswered); persisted channels may be re-subscribed now; a sibling's leave still " +
                     "queued at RFed, if any, is applied when a later pull brings it" to true,
             ),
             d.said,
@@ -82,7 +85,7 @@ class DistroFirstResubscribeTest {
         d.start(hasDistro = true) { throw IllegalStateException("boom") }
         assertEquals(listOf("/rfed/subscribe #a"), d.wire)
         assertEquals(1, d.said.size)
-        assertTrue(d.said[0].first.startsWith("Distro pull before re-subscribing threw (boom): re-subscribing persisted channels now"))
+        assertTrue(d.said[0].first.startsWith("Distro pull before re-subscribing threw (boom): persisted channels may be re-subscribed now"))
         assertTrue(d.said[0].second)
     }
 
@@ -93,9 +96,90 @@ class DistroFirstResubscribeTest {
         assertEquals(listOf("/rfed/subscribe #a"), d.wire)
         assertEquals(
             "Distro pull before re-subscribing applied 24 blob(s) and stopped at its round cap with more pending: " +
-                "re-subscribing persisted channels now; the rest is applied when a later pull brings it",
+                "persisted channels may be re-subscribed now; the rest is applied when a later pull brings it",
             d.said.single().first,
         )
+    }
+
+    @Test
+    fun aRestartUnderTheStartsPullEndsThatStartAndTheRestartedStacksStartReSubscribes() = runBlocking {
+        // Review of 0670af8: a Settings restart (StackRuntime.restart) cancelled the start's
+        // round, and the old start then re-subscribed every channel on the NEW stack, racing
+        // that stack's own pull: #b, left on a sibling, could be subscribed before the leave.
+        var stops = 0L
+        val d = Device("a", "b")
+        val first = stops
+        d.start(hasDistro = true, stopped = { stops != first }) {
+            stops++ // shutdownNow counts the stop first; the round then comes back cancelled
+            RfedDistroClient.PullOutcome(0, DistroPullRounds.noAnswer(stoppedSince = true))
+        }
+        assertTrue("the superseded start subscribes nothing", d.wire.isEmpty())
+        assertEquals(
+            listOf(
+                "Distro pull before re-subscribing ended with the stack stopped under it (StackRuntime.restart) after 0 blob(s): " +
+                    "this start re-subscribes nothing; the stack's next start runs its own distro pull before its re-subscription" to false,
+            ),
+            d.said,
+        )
+        // The restarted stack's start: its own pull applies the leave, then the rest is subscribed.
+        val second = stops
+        d.start(hasDistro = true, stopped = { stops != second }) { d.pullApplyingLeaveOfB() }
+        assertEquals(listOf("/rfed/pull", "/rfed/unsubscribe #b", "/rfed/subscribe #a"), d.wire)
+    }
+
+    @Test
+    fun aPullThatThrowsUnderARestartEndsTheStartToo() = runBlocking {
+        var stops = 0L
+        val d = Device("a")
+        d.start(hasDistro = true, stopped = { stops != 0L }) { stops++; throw IllegalStateException("link closed") }
+        assertTrue(d.wire.isEmpty())
+        assertEquals(
+            "Distro pull before re-subscribing ended with the stack stopped under it (StackRuntime.restart): " +
+                "this start re-subscribes nothing; the stack's next start runs its own distro pull before its re-subscription",
+            d.said.single().first,
+        )
+    }
+
+    @Test
+    fun anErrorFromThePullIsAnOutcomeTooNotASilentEndOfTheStart() = runBlocking {
+        // Review of 0670af8: only Exception was caught, so an Error (an OutOfMemoryError on a
+        // large page, a LinkageError from the native unwrap) skipped both the push
+        // re-registration and the re-subscription; the runCatching calls it replaced caught it.
+        val d = Device("a")
+        d.start(hasDistro = true) { throw LinkageError("unwrap") }
+        assertEquals(listOf("/rfed/subscribe #a"), d.wire)
+        assertTrue(d.said.single().first.startsWith("Distro pull before re-subscribing threw (unwrap): persisted channels may be re-subscribed now"))
+        assertTrue(d.said.single().second)
+    }
+
+    @Test
+    fun aRoundThatCannotGoIsNeverSentAndNeverSaidAsRfedsSilence() {
+        // Review of 0670af8: a pull that waited on pullLock while a restart tore the stack
+        // down read the stop count only after the lock, then sent through a router of 0
+        // (appLinkSend returns null at once) and said "no answer from RFed".
+        assertEquals(null, DistroPullRounds.unsent(stoppedSince = false, stackUp = true))
+        assertEquals("the stack is not running: no request was sent", DistroPullRounds.unsent(stoppedSince = false, stackUp = false))
+        val cancelled = "cancelled: the stack was stopped (StackRuntime.restart) before the round was sent"
+        assertEquals(cancelled, DistroPullRounds.unsent(stoppedSince = true, stackUp = true))
+        assertEquals("a stop is said as the stop", cancelled, DistroPullRounds.unsent(stoppedSince = true, stackUp = false))
+        val client = src("service/RfedDistroClient.kt")
+        val body = client.substring(client.indexOf("suspend fun pullOutcome("), client.indexOf("suspend fun handleBlob("))
+        assertTrue("the stop count is read before the pull waits its turn", body.indexOf("val stops = StackRuntime.stops") in 0 until body.indexOf("pullLock.withLock {"))
+        val check = body.indexOf("DistroPullRounds.unsent(")
+        assertTrue("checked before each round is sent", check > body.indexOf("DistroPullRounds.drain(") && check < body.indexOf("ConnectionStateManager.appLinkSend("))
+        assertTrue(body.contains("stackUp = ConnectionStateManager.isRegistered"))
+        assertTrue(src("service/ConnectionStateManager.kt").contains("get() = routerHandle != 0L"))
+    }
+
+    @Test
+    fun aPullItsRoundCapStoppedIsNeverSaidDrained() {
+        // Review of 0670af8: "pull drained N blob(s)" followed the round cap's warning.
+        val client = src("service/RfedDistroClient.kt")
+        val body = client.substring(client.indexOf("suspend fun pullOutcome("), client.indexOf("suspend fun handleBlob("))
+        val cap = body.indexOf("lastMore -> Log.w(TAG, \"pull stopped at its round cap after \$total blob(s); RFed has more\")")
+        val drained = body.indexOf("else -> Log.i(TAG, \"pull drained \$total blob(s)\")")
+        assertTrue(cap >= 0 && drained > cap)
+        assertEquals(1, Regex("pull drained").findAll(body).count())
     }
 
     @Test
@@ -133,12 +217,17 @@ class DistroFirstResubscribeTest {
         val block = runtime.substring(gate, runtime.indexOf("val hashHex = selfDestHash", gate))
         assertTrue(block.contains("hasDistro = DistroManager.hasDistro"))
         assertTrue(block.contains("pull = { RfedDistroClient.pullOutcome(app) }"))
+        assertTrue("a stop under the start ends it (review of 0670af8)", block.contains("stopped = stopped,"))
         val pull = block.indexOf("pull = {")
         assertTrue("push registration waits for the pull", block.indexOf("reregisterChannelPushOnStart()") > pull)
-        assertTrue("the re-subscription waits for the pull", block.indexOf("scheduleResubscribeOnRfedChannelActive()") > pull)
+        assertTrue("the re-subscription waits for the pull", block.indexOf("scheduleResubscribeOnRfedChannelActive(superseded = stopped)") > pull)
         assertTrue(block.contains("// NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1"))
+        // The start's stop count is read before the gate is launched, under initLock (bootstrap).
+        val before = runtime.substring(runtime.lastIndexOf("app.applicationScope.launch(Dispatchers.IO)", gate) - 200, gate)
+        assertTrue(before.contains("val stopsAtStart = stops"))
+        assertTrue(before.contains("val stopped = { stops != stopsAtStart }"))
         // Nothing else re-subscribes at start, outside the gate.
-        assertEquals(1, Regex("scheduleResubscribeOnRfedChannelActive\\(\\)").findAll(runtime).count())
+        assertEquals(1, Regex("scheduleResubscribeOnRfedChannelActive\\(").findAll(runtime).count())
         assertEquals(1, Regex("reregisterChannelPushOnStart\\(\\)").findAll(runtime).count())
     }
 
@@ -153,14 +242,34 @@ class DistroFirstResubscribeTest {
     }
 
     @Test
-    fun anUnreachableNodeAtTheReSubscriptionIsSaidNotSilent() {
+    fun everyReturnOfTheReSubscriptionIsSaidNotSilent() {
+        // The gate's line only lets the re-subscription run (review of 0670af8: it read
+        // "re-subscribing persisted channels" and the function could then return without a word).
         val channels = src("service/RfedChannelClient.kt")
         val body = channels.substring(
-            channels.indexOf("suspend fun scheduleResubscribeOnRfedChannelActive()"),
+            channels.indexOf("suspend fun scheduleResubscribeOnRfedChannelActive("),
             channels.indexOf("suspend fun resubscribePersistedChannels()"),
         )
         assertTrue(body.contains("Log.w(TAG, \"RFed node not reachable within 5 s: \${channels.size} persisted channel(s) not re-subscribed at this start\")"))
+        assertTrue(body.contains("Log.w(TAG, \"Persisted channels not re-subscribed at this start: the stack is not running\")"))
+        assertTrue(body.contains("Log.i(TAG, \"No persisted channels to re-subscribe at this start\")"))
+        assertEquals("both checks of the once-per-process flag say it", 2, Regex("Log\\.i\\(TAG, ALREADY_RESUBSCRIBED\\)").findAll(body).count())
+        assertTrue(body.contains("The stack was stopped while this start waited for RFed: \${channels.size} persisted channel(s) not re-subscribed by it"))
         assertFalse(body.contains("waitForRfedReachable(timeoutMs = 5_000L)) return@withContext"))
+        assertFalse("no bare return: each is said", Regex("\\) return@withContext\\s*\\n").containsMatchIn(body))
+        // A stop while it waited for RFed: the restarted stack's start re-subscribes, not this one.
+        assertTrue(body.indexOf("if (superseded())") > body.indexOf("waitForRfedReachable("))
+        assertTrue(body.indexOf("if (superseded())") < body.indexOf("didResubscribeOnActive = true"))
+        assertEquals(
+            "The persisted channels' re-subscription ran already in this process: it does not run again at this start",
+            RfedChannelClient.ALREADY_RESUBSCRIBED,
+        )
+        // One line per channel under "Re-subscribing to N": a hash that cannot be used is said.
+        val loop = channels.substring(channels.indexOf("suspend fun resubscribePersistedChannels()"), channels.indexOf("private suspend fun reconfigureChannelStreams("))
+        assertFalse(loop.contains("hexToBytes(channel.id) ?: continue"))
+        assertFalse(loop.contains("legacyChannelDest(channel.rfedNodeIdentityHashHex) ?: continue"))
+        assertTrue(loop.contains("Re-subscribe failed for '\${channel.channelName}': its stored channel hash is not hex"))
+        assertTrue(loop.contains("Re-subscribe failed for '\${channel.channelName}': its stored RFed node identity hash is not 32 hex characters"))
     }
 
     @Test

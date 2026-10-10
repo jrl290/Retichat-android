@@ -17,58 +17,91 @@ import kotlinx.coroutines.CancellationException
  *
  * The pull's outcome is the event the re-subscription waits for, whatever the
  * outcome is: drained, stopped at its round cap, no answer (no interface, no
- * link inside 5 s), a malformed answer, a stack restart under it, or a throw.
- * Each is said, and the re-subscription goes on: the gate never waits on a
- * timer, never forever, and never drops the re-subscription silently. A device
- * with no distro re-subscribes at once, as before.
+ * link inside 5 s), a malformed answer, or a throw. Each is said, and the
+ * re-subscription may run: the gate never waits on a timer, never forever, and
+ * never drops the re-subscription silently. A device with no distro
+ * re-subscribes at once, as before.
+ *
+ * One outcome ends the start instead: the stack stopped under its pull
+ * (StackRuntime.restart, [stopped]). That start's stack is gone, and the
+ * restarted stack's own start runs its own pull before its own
+ * re-subscription; this one re-subscribing would race that pull on the new
+ * stack and could subscribe a channel the distro left before the leave is
+ * applied (review of 0670af8, 2026-10-10). It is said, and nothing is
+ * re-subscribed by it.
  */
 internal object DistroFirst {
     /** The log tag of the re-subscription it gates (RfedChannelClient). */
     const val TAG = "RfedChannel"
 
-    /** A line for the log; [warning] when the pull did not get RFed's whole answer. */
-    class Said(val line: String, val warning: Boolean)
+    private const val LATER = "a sibling's leave still queued at RFed, if any, is applied when a later pull brings it"
+
+    /**
+     * A line for the log; [warning] when the pull did not get RFed's whole
+     * answer; [ends] when the start ends here and re-subscribes nothing.
+     */
+    class Said(val line: String, val warning: Boolean, val ends: Boolean = false)
 
     suspend fun thenResubscribe(
         hasDistro: Boolean,
         pull: suspend () -> RfedDistroClient.PullOutcome,
+        stopped: () -> Boolean,
         say: (line: String, warning: Boolean) -> Unit,
         resubscribe: suspend () -> Unit,
     ) {
         if (hasDistro) {
-            val said = pullFirst(pull)
+            val said = pullFirst(pull, stopped)
             say(said.line, said.warning)
+            if (said.ends) return
         }
         resubscribe()
     }
 
-    /** The pull, run to its outcome; a throw is an outcome too (cancellation is not). */
-    internal suspend fun pullFirst(pull: suspend () -> RfedDistroClient.PullOutcome): Said =
-        try {
-            said(pull())
+    /**
+     * The pull, run to its outcome. A throw is an outcome too, an Error as much
+     * as an Exception (the runCatching calls this replaced caught every
+     * Throwable); a cancellation is not, and propagates.
+     */
+    internal suspend fun pullFirst(
+        pull: suspend () -> RfedDistroClient.PullOutcome,
+        stopped: () -> Boolean,
+    ): Said {
+        val o = try {
+            pull()
         } catch (e: CancellationException) {
             throw e
-        } catch (e: Exception) {
-            Said(
-                "Distro pull before re-subscribing threw (${e.message ?: e.javaClass.simpleName}): " +
-                    "re-subscribing persisted channels now; a sibling's leave still queued at RFed, if any, " +
-                    "is applied when a later pull brings it",
-                warning = true,
-            )
+        } catch (t: Throwable) {
+            return if (stopped()) superseded(null) else threw(t)
         }
+        return if (stopped()) superseded(o.blobs) else said(o)
+    }
+
+    /** The stack stopped under the start's pull: this start ends, and re-subscribes nothing. */
+    fun superseded(blobs: Int?): Said = Said(
+        "Distro pull before re-subscribing ended with the stack stopped under it (StackRuntime.restart)" +
+            (blobs?.let { " after $it blob(s)" } ?: "") +
+            ": this start re-subscribes nothing; the stack's next start runs its own distro pull before its re-subscription",
+        warning = false,
+        ends = true,
+    )
+
+    fun threw(t: Throwable): Said = Said(
+        "Distro pull before re-subscribing threw (${t.message ?: t.javaClass.simpleName}): " +
+            "persisted channels may be re-subscribed now; $LATER",
+        warning = true,
+    )
 
     fun said(o: RfedDistroClient.PullOutcome): Said = when {
         o.unfinished != null -> Said(
             "Distro pull before re-subscribing stopped after ${o.blobs} blob(s): ${o.unfinished}; " +
-                "re-subscribing persisted channels now; a sibling's leave still queued at RFed, if any, " +
-                "is applied when a later pull brings it",
+                "persisted channels may be re-subscribed now; $LATER",
             warning = true,
         )
         o.morePending -> Said(
             "Distro pull before re-subscribing applied ${o.blobs} blob(s) and stopped at its round cap " +
-                "with more pending: re-subscribing persisted channels now; the rest is applied when a later pull brings it",
+                "with more pending: persisted channels may be re-subscribed now; the rest is applied when a later pull brings it",
             warning = true,
         )
-        else -> Said("Distro queue pulled and applied first (${o.blobs} blob(s)): re-subscribing persisted channels", warning = false)
+        else -> Said("Distro queue pulled and applied first (${o.blobs} blob(s)): persisted channels may be re-subscribed now", warning = false)
     }
 }

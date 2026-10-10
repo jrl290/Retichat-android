@@ -67,6 +67,9 @@ class RfedChannelClient(
 
     companion object {
         private const val TAG = "RfedChannel"
+        /** didResubscribeOnActive is once per process: a start after a Settings restart says so. */
+        internal const val ALREADY_RESUBSCRIBED =
+            "The persisted channels' re-subscription ran already in this process: it does not run again at this start"
 
         /**
          * Derive the 16-byte channel hash from a channel name: the channel
@@ -576,17 +579,40 @@ class RfedChannelClient(
      * always applies to a link that is already up.  No fail-state in code,
      * no app-level retries.
      */
-    suspend fun scheduleResubscribeOnRfedChannelActive() = withContext(Dispatchers.IO) {
+    suspend fun scheduleResubscribeOnRfedChannelActive(superseded: () -> Boolean = { false }) = withContext(Dispatchers.IO) {
+        // Every return is said (the truth rule): the start's gate (DistroFirst)
+        // only lets this run, and until 2026-10-10 each return below but the
+        // last was silent, so the log could show the gate's release and then
+        // no re-subscription with no word why.
         val identityHandle = StackRuntime.identityHandle
-        if (identityHandle == 0L) return@withContext
+        if (identityHandle == 0L) {
+            Log.w(TAG, "Persisted channels not re-subscribed at this start: the stack is not running")
+            return@withContext
+        }
+        if (didResubscribeOnActive) {
+            Log.i(TAG, ALREADY_RESUBSCRIBED)
+            return@withContext
+        }
         val channels = channelDao.activeChannels()
-        if (channels.isEmpty()) return@withContext
+        if (channels.isEmpty()) {
+            Log.i(TAG, "No persisted channels to re-subscribe at this start")
+            return@withContext
+        }
         if (!ConnectionStateManager.waitForRfedReachable(timeoutMs = 5_000L)) {
             // Said, never silent: until 2026-10-10 this returned without a word.
             Log.w(TAG, "RFed node not reachable within 5 s: ${channels.size} persisted channel(s) not re-subscribed at this start")
             return@withContext
         }
-        if (didResubscribeOnActive) return@withContext
+        if (superseded()) {
+            // The stack was restarted while this waited: the new stack's start
+            // pulls the distro queue first and re-subscribes on its own (DistroFirst).
+            Log.i(TAG, "The stack was stopped while this start waited for RFed: ${channels.size} persisted channel(s) not re-subscribed by it; the stack's next start runs its own distro pull before its re-subscription")
+            return@withContext
+        }
+        if (didResubscribeOnActive) {
+            Log.i(TAG, ALREADY_RESUBSCRIBED)
+            return@withContext
+        }
         didResubscribeOnActive = true
         Log.i(TAG, "rfed reachable — re-subscribing persisted channels")
         resubscribePersistedChannels()
@@ -611,9 +637,17 @@ class RfedChannelClient(
         val channels = channelDao.activeChannels()
         if (channels.isEmpty()) return@withContext
         Log.i(TAG, "Re-subscribing to ${channels.size} persisted channel(s) after restart")
+        // One line per channel, each said: until 2026-10-10 a stored hash that
+        // could not be used was skipped without a word under the count above.
         for (channel in channels) {
-            val channelHashBytes = FcmTokenRegistrar.hexToBytes(channel.id) ?: continue
-            val rfedChannelDest = legacyChannelDest(channel.rfedNodeIdentityHashHex) ?: continue
+            val channelHashBytes = FcmTokenRegistrar.hexToBytes(channel.id) ?: run {
+                Log.w(TAG, "Re-subscribe failed for '${channel.channelName}': its stored channel hash is not hex")
+                null
+            } ?: continue
+            val rfedChannelDest = legacyChannelDest(channel.rfedNodeIdentityHashHex) ?: run {
+                Log.w(TAG, "Re-subscribe failed for '${channel.channelName}': its stored RFed node identity hash is not 32 hex characters")
+                null
+            } ?: continue
             runCatching {
                 val stampCost = subscribeOnServer(channelHashBytes, rfedChannelDest, identityHandle)
                 channelDao.updateStampCost(channel.id, stampCost)

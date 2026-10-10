@@ -92,6 +92,10 @@ object ConnectionStateManager {
 
     @Volatile private var routerHandle: Long = 0L
 
+    /** A started stack's router is registered: with none, [appLinkSend] returns null without sending. */
+    val isRegistered: Boolean
+        get() = routerHandle != 0L
+
     // Reactive view of rfed.node reachability, consumed by the Settings
     // status pill. We reuse the app-link status constants for color mapping:
     // NONE=no config, ACTIVE=path present, DISCONNECTED=no path.

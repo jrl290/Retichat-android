@@ -66,7 +66,8 @@ object StackRuntime {
     /**
      * How many times the stack has been stopped in this process ([restart]).
      * A request that saw no answer reads it to tell the stop's doing from a
-     * failure (RfedDistroClient.pullOutcome).
+     * failure (RfedDistroClient.pullOutcome), and a start's re-subscription
+     * reads it to know its stack was stopped under it (DistroFirst).
      */
     @Volatile var stops: Long = 0L
         private set
@@ -344,10 +345,16 @@ object StackRuntime {
         // reached a device whose distro had left the channel. The pull's outcome,
         // whatever it is, is the event the re-subscription waits for: never a
         // timer, and each round of the pull is bounded by its own 5 s budget.
+        // A stop under it (restart) ends this start instead: the restarted
+        // stack's start pulls and re-subscribes on its own, and this one must
+        // not race it on the new stack (stopped, read under initLock here).
+        val stopsAtStart = stops
+        val stopped = { stops != stopsAtStart }
         app.applicationScope.launch(Dispatchers.IO) {
             DistroFirst.thenResubscribe(
                 hasDistro = DistroManager.hasDistro,
                 pull = { RfedDistroClient.pullOutcome(app) },
+                stopped = stopped,
                 say = { line, warning -> if (warning) Log.w(DistroFirst.TAG, line) else Log.i(DistroFirst.TAG, line) },
             ) {
                 // Re-register per-channel rfed.notify subscriptions so push wakeups resume
@@ -361,7 +368,7 @@ object StackRuntime {
                 // cold start; the right shape is to defer the send until the
                 // link is observed up.  No timeout, no retry, no fail-state.
                 // // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1
-                runCatching { app.rfedChannelClient.scheduleResubscribeOnRfedChannelActive() }
+                runCatching { app.rfedChannelClient.scheduleResubscribeOnRfedChannelActive(superseded = stopped) }
                     .onFailure { Log.e(TAG, "scheduleResubscribeOnRfedChannelActive failed", it) }
             }
         }
