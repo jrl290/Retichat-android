@@ -1103,8 +1103,10 @@ class RfedChannelClient(
                 }
                 val (pairs, morePending) = decoded
                 Log.i(TAG, "PULL decoded: ${pairs.size} blob(s) morePending=$morePending")
-                for ((channelHashBytes, blob) in pairs) {
-                    dispatchBlob(channelHashBytes.toHex(), blob)
+                // RFed drained this page as it served it: a post that throws
+                // is dropped, and the rest of the page is still handled (PullPage).
+                PullPage.handleEach(pairs, { channelHashBytes, blob -> dispatchBlob(channelHashBytes.toHex(), blob) }) { id, e ->
+                    Log.w(TAG, "PULL: blob $id unreadable, dropped", e)
                 }
                 _canPullMore.value = _canPullMore.value + (channelKey to morePending)
                 pairs.size to morePending

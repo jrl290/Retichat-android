@@ -15,6 +15,7 @@ import com.newendian.retichat.service.NetworkMonitor
 import com.newendian.retichat.service.PropagationSync
 import com.newendian.retichat.service.RfedChannelClient
 import com.newendian.retichat.service.StackRuntime
+import com.newendian.retichat.service.logEscapedExceptions
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -56,7 +57,10 @@ class RetichatApp : Application() {
             private set
     }
 
-    val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // The repository and the channel client handle received messages, posts
+    // and blobs in its launches: what escapes one is logged, never the
+    // process's end (service/RemoteInput.kt).
+    val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO + logEscapedExceptions(TAG))
 
     val database: RetichatDatabase by lazy { RetichatDatabase.getInstance(this) }
 

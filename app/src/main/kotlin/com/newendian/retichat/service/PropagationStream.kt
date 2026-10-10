@@ -4,6 +4,7 @@ import android.util.Log
 import com.newendian.retichat.RetichatApp
 import com.newendian.retichat.bridge.AppLinkPacketCallback
 import com.newendian.retichat.bridge.RetichatBridge
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -27,7 +28,11 @@ object PropagationStream {
 
     private const val TAG = "PropStream"
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // Its launches handle pushes and, after an open, a distro pull: what escapes
+    // one is logged, never the process's end (RemoteInput.kt). Until 2026-10-09
+    // the ACTIVE handler's launch had no guard, and one malformed distro blob
+    // in the pull after an open killed the app.
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + logEscapedExceptions(TAG))
 
     private class Session(
         val destHash: ByteArray,
@@ -69,7 +74,15 @@ object PropagationStream {
         )
         ConnectionStateManager.setAppLinkStatusHandler(destHash) { status ->
             if (status != RetichatBridge.AppLinkStatus.ACTIVE) return@setAppLinkStatusHandler
-            scope.launch { sendOpen(app, current) }
+            scope.launch {
+                try {
+                    sendOpen(app, current)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.e(TAG, "propagation.stream open or the pull after it failed", e)
+                }
+            }
         }
         if (ConnectionStateManager.appLinkStatus(destHash) == RetichatBridge.AppLinkStatus.ACTIVE) {
             sendOpen(app, current)

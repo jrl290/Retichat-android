@@ -36,7 +36,9 @@ object RfedDistroClient {
     private const val TAG = "Distro"
     private const val PULL_ROUNDS_MAX = 8
     private const val PULL_AFTER_REGISTER_MS = 7_000L
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // Its launches pull and handle distro blobs (register's pull): what escapes
+    // one is logged, never the process's end (RemoteInput.kt).
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + logEscapedExceptions(TAG))
 
     data class Status(
         val registered: Boolean = false,
@@ -160,10 +162,12 @@ object RfedDistroClient {
                 Log.w(TAG, "pull: malformed response (${resp.size} bytes)")
                 return@withContext total
             }
-            for ((_, blob) in pairs) {
-                handleBlob(context, blob)
-                total++
+            // RFed drained this page as it served it: a blob that throws is
+            // dropped, and the rest of the page is still handled (PullPage).
+            PullPage.handleEach(pairs, { _, blob -> handleBlob(context, blob) }) { id, e ->
+                Log.w(TAG, "pull: blob $id unreadable, dropped", e)
             }
+            total += pairs.size
             _status.value = _status.value.copy(lastPullCount = total)
             if (!more) break
         }
