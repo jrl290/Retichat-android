@@ -50,6 +50,8 @@ class DistroOutboxTest {
     private class Sent(val linkId: String, val entryId: String, val msgHash: String, val key: String, val sink: UploadSink) {
         fun proved() = sink.proved()
         fun lost() = sink.lost()
+        /** The stack found its Resource's first advertisement uncarried, cancelled it and kept the link. */
+        fun neverLeft() = sink.neverLeft()
     }
 
     private class FakePort : PropagationPort {
@@ -60,6 +62,14 @@ class DistroOutboxTest {
         var cannotQueue = false
         /** How many uploads the port did not take while the link was up. */
         var refused = 0
+        /** Told each time the port does not take an upload (an interface may come back then). */
+        var onRefused: (() -> Unit)? = null
+        /** Transport's count of interface up-edges, which an [UpEdgeMark] reads. */
+        var upEdges = 0L
+        /** An interface comes up while the next upload is handed over: after its mark, before the port answers. */
+        var upEdgeDuringNextUpload = false
+        /** The count each mark was taken at, in order. */
+        val marks = mutableListOf<Long>()
         val builds = mutableListOf<OwedEntry>()
         val sent = mutableListOf<Sent>()
         private val gates = ArrayDeque<CompletableDeferred<Unit>>()
@@ -81,10 +91,17 @@ class DistroOutboxTest {
             return "${entry.id}|${entry.msgHash}|${entry.distroKey.take(4)}".toByteArray()
         }
 
+        override fun upEdgeMark(): UpEdgeMark {
+            val at = upEdges
+            marks += at
+            return UpEdgeMark { upEdges != at }
+        }
+
         override fun upload(upload: ByteArray, sink: UploadSink): UploadLeft? {
+            if (upEdgeDuringNextUpload) { upEdgeDuringNextUpload = false; upEdges++ }
             val link = held ?: return null
             if (!link.active) return null
-            if (cannotQueue) { refused++; return null }
+            if (cannotQueue) { refused++; onRefused?.invoke(); return null }
             val (id, hash, key) = String(upload).split("|")
             sent += Sent(link.id, id, hash, key, sink)
             return UploadLeft(link.id, resource = resource)
@@ -1294,6 +1311,294 @@ class DistroOutboxTest {
         assertTrue(rig.port.sent.isEmpty())
         rig.outbox.onLinkEstablished("L2")
         assertEquals(1, rig.port.sent.size)
+    }
+
+
+    // ---- Stage 0: a Resource upload that never left (DISTRO-SYNC-PROOF-DESIGN.md §5.3, §13.1) ----
+    //
+    // DESIGN_PRINCIPLES §3, James 2026-10-06, and for a Resource 2026-10-10: a Resource upload whose first
+    // advertisement no interface could carry never left the device. The stack cancels it there and keeps the
+    // link (rust/retichat-jni nativePropagationUpload; PropagationJniContractTest pins that no teardown comes
+    // with it) and tells onNeverLeft. Every proven upload is a Resource (its claim puts it over the link MDU),
+    // so the 2026-10-06 short drop now happens to Resources.
+
+    /** The owed [entry] went as a Resource on L1, which the stack then found never left. */
+    private suspend fun resourceNeverLeft(rig: Rig, entry: OwedEntry): Sent {
+        rig.link("L1")
+        rig.port.resource = true
+        rig.outbox.owe(entry)
+        yield()
+        val first = rig.port.uploadsOf(entry.id).single()
+        first.neverLeft()
+        yield()
+        return first
+    }
+
+    @Test
+    fun theShortDropForAResourceUploadIsNeverLeftWithNoTeardownAndGoesOnceAtTheInterfacesUpEdge() = run { rig ->
+        val copy = sentCopy("copy")
+        val first = resourceNeverLeft(rig, copy)
+        // Nothing was sent, so it is no failure: no error the client shows, no warning, no failure record.
+        assertTrue(rig.lines.error.isEmpty())
+        assertTrue(rig.lines.warn.isEmpty())
+        assertEquals(0, rig.outbox.unproved.size)
+        assertTrue(rig.outbox.unproved.neverLeft(copy))
+        assertTrue(rig.lines.info.any { it.contains("never left the device") && it.contains("Resource") && it.contains("no failure") })
+        // The link is kept: the outbox asks for no teardown and the link it went on is still the one held.
+        assertEquals(HeldLink("L1", true), rig.port.held)
+        assertEquals(listOf(copy), rig.outbox.owed())
+        // Nothing carries it by itself: no timer, no poll.
+        repeat(5) { yield() }
+        assertEquals(1, rig.port.sent.size)
+        // The interface comes back online: it goes once, on the link that is up, with no coming-up.
+        rig.port.upEdges++
+        rig.outbox.onInterfaceOnline("tcp0")
+        assertEquals(listOf("L1", "L1"), rig.port.sent.map { it.linkId })
+        assertEquals(0, rig.outbox.unproved.neverLeftSize)
+        assertEquals(0L, rig.outbox.propComingUps)
+        // The cancelled Resource's own conclusion, should one still come, decides nothing.
+        first.lost()
+        first.proved()
+        yield()
+        assertTrue(rig.lines.error.isEmpty())
+        assertEquals(listOf(copy), rig.outbox.owed())
+        rig.port.sent[1].proved()
+        yield()
+        assertEquals(emptyList<OwedEntry>(), rig.outbox.owed())
+        rig.outbox.onInterfaceOnline("tcp0")
+        assertEquals(2, rig.port.sent.size)
+    }
+
+    @Test
+    fun aResourceThatLeftAndThenFailsIsStillLostAndWaitsForTheNextComingUp() = run { rig ->
+        rig.link("L1")
+        rig.port.resource = true
+        val copy = sentCopy("copy")
+        rig.outbox.owe(copy)
+        yield()
+        // Its advertisement left; then the Resource failed (ruling of 2026-10-04): a loss.
+        rig.port.sent.single().lost()
+        yield()
+        assertTrue(rig.lines.error.any { it.contains("its Resource failed") })
+        assertEquals(1, rig.outbox.unproved.size)
+        assertFalse(rig.outbox.unproved.neverLeft(copy))
+        // An interface's up-edge is no coming-up: a loss is not sent on it.
+        rig.port.upEdges++
+        rig.outbox.onInterfaceOnline("tcp0")
+        assertEquals(1, rig.port.sent.size)
+        // The next coming-up sends it.
+        rig.link("L2")
+        rig.outbox.onLinkEstablished("L2")
+        assertEquals(listOf("L1", "L2"), rig.port.sent.map { it.linkId })
+    }
+
+    @Test
+    fun anUpEdgeThatCameBeforeTheResourcesNeverLeftWasRecordedIsNotMissed() = run { rig ->
+        rig.link("L1")
+        rig.port.resource = true
+        val copy = sentCopy("copy")
+        rig.outbox.owe(copy)
+        yield()
+        assertEquals(listOf(0L), rig.port.marks)
+        // The interface comes back while the never-left is on its way to the outbox: its up-edge finds nothing
+        // recorded, and the link is still up, so no coming-up follows.
+        rig.port.upEdges++
+        rig.outbox.onInterfaceOnline("tcp0")
+        assertEquals(1, rig.port.sent.size)
+        // Then never-left is told: recorded first, then the mark asked. An interface came up since: that up-edge
+        // was this upload's, and it goes now, once, on the link that is up.
+        rig.port.sent[0].neverLeft()
+        yield()
+        assertEquals(listOf("L1", "L1"), rig.port.sent.map { it.linkId })
+        assertEquals(listOf(0L, 1L), rig.port.marks)
+        assertEquals(0, rig.outbox.unproved.neverLeftSize)
+        assertTrue(rig.lines.info.any { it.contains("that up-edge was its own") })
+        assertTrue(rig.lines.error.isEmpty())
+        // While that upload is open no later edge sends it again.
+        rig.port.upEdges++
+        rig.outbox.onInterfaceOnline("tcp0")
+        assertEquals(2, rig.port.sent.size)
+    }
+
+    @Test
+    fun withNoUpEdgeSinceItsMarkANeverLeftUploadWaitsAndAnUpEdgeAlreadyHeardDoesNotSendItTwice() = run { rig ->
+        rig.link("L1")
+        rig.port.resource = true
+        val copy = sentCopy("copy")
+        rig.outbox.owe(copy)
+        yield()
+        rig.port.sent[0].neverLeft()
+        yield()
+        // No interface came up since the mark: it waits for the next up-edge.
+        assertEquals(1, rig.port.sent.size)
+        assertTrue(rig.outbox.unproved.neverLeft(copy))
+        // The up-edge and its listener: one send. The mark of that send is the new count.
+        rig.port.upEdges++
+        rig.outbox.onInterfaceOnline("tcp0")
+        assertEquals(2, rig.port.sent.size)
+        assertEquals(listOf(0L, 1L), rig.port.marks)
+        // That one never leaves either, with no edge since its mark: it waits again, no loop.
+        rig.port.sent[1].neverLeft()
+        repeat(5) { yield() }
+        assertEquals(2, rig.port.sent.size)
+        assertTrue(rig.outbox.unproved.neverLeft(copy))
+    }
+
+    @Test
+    fun anUpEdgeWhileAPacketIsRefusedIsNotMissedAndEachSendAnswersOneUpEdge() = run { rig ->
+        rig.link("L1")
+        rig.port.cannotQueue = true
+        // The interface comes back after the mark and before the port's answer: refused, and its up-edge was
+        // this upload's. It goes again at once, and is carried.
+        rig.port.upEdgeDuringNextUpload = true
+        rig.port.onRefused = { rig.port.cannotQueue = false }
+        val join = channel("join", "public.x", "join")
+        rig.outbox.owe(join)
+        yield()
+        assertEquals(1, rig.port.refused)
+        assertEquals(listOf("join"), rig.port.sent.map { it.msgHash })
+        assertEquals(0, rig.outbox.unproved.neverLeftSize)
+        assertTrue(rig.lines.error.isEmpty())
+        rig.port.sent[0].proved()
+        yield()
+        assertTrue(rig.outbox.owed().isEmpty())
+    }
+
+    @Test
+    fun anUpEdgeThatStillCannotCarryAPacketSendsItOnceMoreAndNoLoopFollows() = run { rig ->
+        rig.link("L1")
+        rig.port.cannotQueue = true
+        rig.port.upEdgeDuringNextUpload = true
+        val join = channel("join", "public.x", "join")
+        rig.outbox.owe(join)
+        repeat(5) { yield() }
+        // The up-edge since the first mark sent it once more; that send's mark saw no edge, so it waits.
+        assertEquals(2, rig.port.refused)
+        assertEquals(listOf(0L, 1L), rig.port.marks)
+        assertTrue(rig.outbox.unproved.neverLeft(join))
+        assertTrue(rig.port.sent.isEmpty())
+        assertTrue(rig.lines.error.isEmpty())
+        assertTrue(rig.lines.warn.isEmpty())
+    }
+
+    @Test
+    fun aNeverLeftAfterTheStackStoppedDecidesNothing() = run { rig ->
+        rig.link("L1")
+        rig.port.resource = true
+        val copy = sentCopy("copy")
+        rig.outbox.owe(copy)
+        yield()
+        rig.outbox.onStop()
+        yield()
+        rig.port.upEdges++
+        rig.port.sent[0].neverLeft()
+        yield()
+        // The stop decided it (cut): no never-left record, nothing sent, the failure's record stands.
+        assertEquals(0, rig.outbox.unproved.neverLeftSize)
+        assertEquals(1, rig.outbox.unproved.size)
+        assertEquals(1, rig.port.sent.size)
+    }
+
+    // ---- Stage 1: the distro sync proof (RFed SPEC §17.13; DISTRO-SYNC-PROOF-DESIGN.md §5, §13.1) ----
+
+    private val rfedNode = "a1".repeat(16)
+    private val overrideNode = "b2".repeat(16)
+
+    private fun sealed(entry: OwedEntry, tag: Int = 1) = OwedEntry(
+        id = entry.id, kind = entry.kind, distro = entry.distro, distroKey = entry.distroKey, msgHash = entry.msgHash,
+        packed = entry.packed, label = entry.label, op = entry.op, name = entry.name, atMs = entry.atMs, toHex = entry.toHex,
+        sealed = ByteArray(200) { (it + tag).toByte() }, syncSig = ByteArray(64) { (tag * 3).toByte() },
+    )
+
+    @Test
+    fun bothKindsAreKeptWithTheirSealedBytesAndSignatureBeforeAnythingCanYield() = runBlocking {
+        val rig = Rig(this)
+        rig.outbox.start()
+        rig.link("L1")
+        for (entry in listOf(sealed(sentCopy("copy")), sealed(channel("join", "public.x", "join"), tag = 2))) {
+            val gate = rig.port.gateNextBuild()
+            val owing = launch { rig.outbox.owe(entry) }
+            yield()
+            // Written, with the proof, while its build waits: nothing has been uploaded yet.
+            val row = rig.store.rows[entry.id]!!
+            assertTrue(row.isSealed)
+            assertTrue(row.sealed!!.contentEquals(entry.sealed))
+            assertTrue(row.syncSig!!.contentEquals(entry.syncSig))
+            assertTrue(rig.port.uploadsOf(entry.id).isEmpty())
+            gate.complete(Unit)
+            owing.join()
+            repeat(3) { yield() }
+            // The build is handed the same entry, proof and all.
+            assertTrue(rig.port.builds.last().sealed!!.contentEquals(entry.sealed))
+            assertEquals(1, rig.port.uploadsOf(entry.id).size)
+        }
+    }
+
+    @Test
+    fun afterTheDistroIsForgottenASentCopyStillBuildsWithItsClaim() = run { rig ->
+        val copy = sealed(sentCopy("copy"))
+        val join = sealed(channel("join", "public.x", "join"), tag = 2)
+        rig.outbox.owe(copy)
+        rig.outbox.owe(join)
+        // The device forgets its distro: the membership message goes, the sent-copy is still owed (James, 2026-10-03).
+        rig.distro = null
+        rig.outbox.onDistroChanged()
+        assertEquals(listOf(copy), rig.outbox.owed())
+        rig.link("L1")
+        rig.outbox.onLinkEstablished("L1")
+        val built = rig.port.builds.single()
+        assertEquals(copy, built)
+        assertTrue(built.sealed!!.contentEquals(copy.sealed))
+        assertTrue(built.syncSig!!.contentEquals(copy.syncSig))
+        // Its proof does not depend on the distro held now: for the RFed node it carries the claim.
+        assertEquals(SyncProofGate.Build.Sealed(withClaim = true), SyncProofGate.buildFor(built, rfedNode, rfedNode))
+    }
+
+    @Test
+    fun theClaimGoesOnlyToTheRfedNodesOwnPropagationDestination() {
+        val copy = sealed(sentCopy("copy"))
+        assertEquals(SyncProofGate.Build.Sealed(withClaim = true), SyncProofGate.buildFor(copy, rfedNode, rfedNode))
+        assertEquals(SyncProofGate.Build.Sealed(withClaim = true), SyncProofGate.buildFor(copy, rfedNode.uppercase(), " $rfedNode "))
+        // An override (an RFed override or a manual hash): LXMF's two-element envelope, the same sealed bytes.
+        assertEquals(SyncProofGate.Build.Sealed(withClaim = false), SyncProofGate.buildFor(copy, overrideNode, rfedNode))
+        // No RFed node configured, or one that is not a hash: no claim.
+        assertEquals(SyncProofGate.Build.Sealed(withClaim = false), SyncProofGate.buildFor(copy, rfedNode, null))
+        assertEquals(SyncProofGate.Build.Sealed(withClaim = false), SyncProofGate.buildFor(copy, "", ""))
+        assertEquals(SyncProofGate.Build.Sealed(withClaim = false), SyncProofGate.buildFor(copy, "a1", "a1"))
+        // A membership message the same way (James, 2026-10-10: both kinds carry the proof).
+        assertEquals(SyncProofGate.Build.Sealed(withClaim = true), SyncProofGate.buildFor(sealed(channel("leave", "public.x", "l")), rfedNode, rfedNode))
+    }
+
+    @Test
+    fun aLegacyEntryUsesTheOldBuilderForEveryNode() {
+        val legacy = sentCopy("copy")
+        assertFalse(legacy.isSealed)
+        for (node in listOf(rfedNode, overrideNode)) {
+            assertEquals(SyncProofGate.Build.Legacy, SyncProofGate.buildFor(legacy, node, rfedNode))
+        }
+        // One of the two alone is no proof.
+        val half = OwedEntry(
+            id = legacy.id, kind = legacy.kind, distro = legacy.distro, distroKey = legacy.distroKey,
+            msgHash = legacy.msgHash, packed = legacy.packed, label = legacy.label, toHex = legacy.toHex,
+            sealed = ByteArray(40),
+        )
+        assertFalse(half.isSealed)
+        assertEquals(SyncProofGate.Build.Legacy, SyncProofGate.buildFor(half, rfedNode, rfedNode))
+    }
+
+    @Test
+    fun aLegacyEntryAndASealedOneGoTheSameWayThroughTheOutbox() = run { rig ->
+        val legacy = sentCopy("old")
+        val proven = sealed(sentCopy("new"))
+        rig.outbox.owe(legacy)
+        rig.outbox.owe(proven)
+        rig.link("L1")
+        rig.outbox.onLinkEstablished("L1")
+        assertEquals(listOf(legacy, proven), rig.port.builds)
+        assertEquals(listOf(false, true), rig.port.builds.map { it.isSealed })
+        rig.port.sent.forEach { it.proved() }
+        yield()
+        assertTrue(rig.outbox.owed().isEmpty())
     }
 
     // ---- UnprovedUploads' never-left records ----

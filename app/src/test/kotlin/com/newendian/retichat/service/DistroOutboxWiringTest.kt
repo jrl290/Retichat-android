@@ -203,4 +203,61 @@ class DistroOutboxWiringTest {
         assertEquals(5, RetichatBridge.AppLinkStatus.RECOVERED)
         assertEquals(codes.size, codes.toSet().size)
     }
+
+    @Test
+    fun bothKindsAreSealedRightAfterTheyArePackedAndOwedWithTheProofInTheSameWrite() {
+        // DISTRO-SYNC-PROOF-DESIGN.md §5.1: sealed once, by the handle that signed it, right after the pack, off the
+        // main thread; the entry is owed with both fields, so the one write that owes it keeps the proof.
+        val pack = body(runtime, "private suspend fun pack(", "private class JniPropagationPort(")
+        assertTrue(pack.contains("withContext(Dispatchers.IO)"))
+        assertTrue(pack.indexOf("RetichatBridge.messagePack(handle)") in 0 until pack.indexOf("RetichatBridge.distroSeal(signer, packed)"))
+        assertEquals(1, Regex("RetichatBridge\\.distroSeal\\(").findAll(runtime).count())
+        // A seal that fails is said as an error and the message is still owed, without it.
+        val failed = body(pack, "if (sealed == null) {", "Packed(packed, hash, sealed)")
+        assertTrue(failed.contains("Log.e("))
+        assertFalse(failed.contains("return"))
+        val channel = body(runtime, "suspend fun oweChannelSync(", "suspend fun oweSentCopy(")
+        val sent = body(runtime, "suspend fun oweSentCopy(", "private class Packed(")
+        for ((name, text) in listOf("C" to channel, "sent-copy" to sent)) {
+            assertTrue(name, text.contains("sealed = packed.sealed?.sealed, syncSig = packed.sealed?.syncSig,"))
+            assertTrue(name, text.indexOf("val entry = OwedEntry(") < text.indexOf("outbox.owe(entry)"))
+        }
+        // The Room row carries both, and a row with one alone reads as legacy.
+        val store = read("service/RoomOutboxStore.kt")
+        assertTrue(store.contains("sealed = entry.sealed,"))
+        assertTrue(store.contains("syncSig = entry.syncSig,"))
+        assertTrue(store.contains("sealed = row.sealed?.takeIf { row.syncSig != null },"))
+    }
+
+    @Test
+    fun thePortBuildsWhatTheGateSaysAndTheGateIsTheRfedNodesOwnPropagationHash() {
+        val build = body(runtime, "override suspend fun build(entry: OwedEntry): ByteArray", "override fun upEdgeMark(): UpEdgeMark")
+        assertTrue(build.contains("SyncProofGate.buildFor(entry, node.toHex(), PropagationSync.rfedDerivedPropagationHash(context))"))
+        // A legacy entry: the old builder. A sealed one: its stored bytes, with the claim only as the gate says.
+        assertTrue(build.contains("SyncProofGate.Build.Legacy -> RetichatBridge.propagationBuildUpload(key, entry.packed, node)"))
+        assertTrue(build.contains("RetichatBridge.propagationBuildSealedUpload(key, entry.sealed!!, entry.syncSig!!, how.withClaim, node)"))
+        assertEquals(1, Regex("propagationBuildSealedUpload\\(").findAll(runtime).count())
+        assertEquals(1, Regex("propagationBuildUpload\\(").findAll(runtime).count())
+        // The derived hash is the branch of resolvePropagationOverride used when no override is set, and nothing more.
+        val sync = read("service/PropagationSync.kt")
+        val derived = body(sync, "fun rfedDerivedPropagationHash(context: Context): String? {", "\n    }")
+        assertTrue(derived.contains("UserPreferences.getEffectiveRfedNodeIdentityHash(context)"))
+        assertTrue(derived.contains("FcmTokenRegistrar.rnsDestHash(rfedId, \"lxmf\", listOf(\"propagation\"))"))
+        for (override in listOf("getRfedLxmfPropOverride", "getLxmfPropagationHash")) assertFalse(override, derived.contains(override))
+        val resolve = body(sync, "fun resolvePropagationOverride(context: Context): String? {", "fun rfedDerivedPropagationHash(")
+        assertTrue(resolve.indexOf("getRfedLxmfPropOverride") < resolve.indexOf("return rfedDerivedPropagationHash(context)"))
+        assertTrue(resolve.indexOf("getLxmfPropagationHash") < resolve.indexOf("return rfedDerivedPropagationHash(context)"))
+    }
+
+    @Test
+    fun aResourceThatNeverLeftReachesTheOutboxSinkAndEachUploadTakesItsMarkFromTransportsUpEdges() {
+        val upload = body(runtime, "override fun upload(upload: ByteArray, sink: UploadSink): UploadLeft?", "return UploadLeft(")
+        assertTrue(upload.contains("override fun onNeverLeft() { decided.set(true); scope.launch { sink.neverLeft() } }"))
+        // Like the proof and the loss, handed to the outbox's one thread, never run on the Rust thread.
+        assertFalse(upload.contains("runBlocking"))
+        val mark = body(runtime, "override fun upEdgeMark(): UpEdgeMark {", "override fun upload(")
+        assertTrue(mark.contains("val at = RetichatBridge.interfaceUpEdges()"))
+        assertTrue(mark.contains("return UpEdgeMark { RetichatBridge.interfaceUpEdges() != at }"))
+        assertFalse(mark.contains("delay("))
+    }
 }

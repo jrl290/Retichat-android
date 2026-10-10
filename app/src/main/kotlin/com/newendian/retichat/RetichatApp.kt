@@ -10,10 +10,12 @@ import com.newendian.retichat.data.db.RetichatDatabase
 import com.newendian.retichat.data.repository.ChatRepository
 import com.newendian.retichat.service.MessageNotificationHelper
 import com.newendian.retichat.service.ConnectionStateManager
+import com.newendian.retichat.service.DistroManager
 import com.newendian.retichat.service.ForegroundHold
 import com.newendian.retichat.service.NetworkMonitor
 import com.newendian.retichat.service.PropagationSync
 import com.newendian.retichat.service.RfedChannelClient
+import com.newendian.retichat.service.RfedDistroClient
 import com.newendian.retichat.service.StackRuntime
 import com.newendian.retichat.service.logEscapedExceptions
 import kotlinx.coroutines.CoroutineScope
@@ -156,7 +158,22 @@ class RetichatApp : Application() {
     private var foregroundPollJob: Job? = null
     @Volatile private var foregroundPropagationPullIssued = false
 
+    /**
+     * The stack-ready-in-foreground event: one LXMF propagation pull, and, when
+     * a distro is held, one pull of the distro queue (DISTRO-SYNC-PROOF-DESIGN.md
+     * §7, Android "Pulling"). The distro sync proof (RFed SPEC §17.13) means a
+     * sibling's sent copy or channel change wakes no device: an app opened
+     * while its propagation stream was down fetches them here. An event, not a
+     * timer: the 5-minute poll below pulls only the propagation node. The two
+     * pulls are independent, so neither waits for the other.
+     */
     private fun triggerForegroundPropagationPull() {
+        if (DistroManager.hasDistro) {
+            applicationScope.launch {
+                runCatching { RfedDistroClient.pull(this@RetichatApp) }
+                    .onFailure { Log.w(TAG, "foreground distro pull failed", it) }
+            }
+        }
         applicationScope.launch {
             runCatching { PropagationSync.runOnce(this@RetichatApp) }
                 .onFailure { Log.w(TAG, "foreground propagation pull failed", it) }

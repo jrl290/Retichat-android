@@ -32,9 +32,10 @@ class RoomOutboxStoreTest {
         op = "join", name = "public.x", atMs = 1_767_225_600_000,
     )
 
-    private fun sent(hash: String) = OwedEntry(
+    private fun sent(hash: String, sealed: ByteArray? = null, syncSig: ByteArray? = null) = OwedEntry(
         id = "sent:$hash", kind = OwedKind.SENT, distro = "d".repeat(32), distroKey = "1".repeat(128),
         msgHash = hash, packed = byteArrayOf(9), label = "the sent-copy (§17.11)", toHex = "c".repeat(32),
+        sealed = sealed, syncSig = syncSig,
     )
 
     @Test
@@ -49,6 +50,38 @@ class RoomOutboxStoreTest {
         assertEquals(OwedKind.SENT, sBack.kind)
         assertEquals("c".repeat(32), sBack.toHex)
         assertNull(sBack.op)
+    }
+
+    @Test
+    fun theSealedBytesAndSyncSignatureRoundTripAndALegacyRowHasNeither() {
+        // DISTRO-SYNC-PROOF-DESIGN.md §7: the proof is stored with the entry, before any upload.
+        val c = sent("h1", sealed = ByteArray(200) { it.toByte() }, syncSig = ByteArray(64) { 5 })
+        val row = RoomOutboxStore.toRow(c, 3)
+        assertArrayEquals(c.sealed, row.sealed)
+        assertArrayEquals(c.syncSig, row.syncSig)
+        val back = RoomOutboxStore.toEntry(row)!!
+        assertTrue(back.isSealed)
+        assertArrayEquals(c.sealed, back.sealed)
+        assertArrayEquals(c.syncSig, back.syncSig)
+        // A row from before database 15 (or one whose seal failed) has neither, and builds the legacy way.
+        val legacy = RoomOutboxStore.toEntry(RoomOutboxStore.toRow(sent("h2"), 4))!!
+        assertFalse(legacy.isSealed)
+        assertNull(legacy.sealed)
+        assertNull(legacy.syncSig)
+    }
+
+    @Test
+    fun aRowWithOnlyOneHalfOfTheProofIsReadAsLegacy() {
+        // Sealed bytes without their signature (or the reverse) cannot make a claim RFed accepts:
+        // the entry goes the old way rather than not at all.
+        val whole = RoomOutboxStore.toRow(sent("h3", sealed = byteArrayOf(1, 2), syncSig = ByteArray(64)), 1)
+        for (half in listOf(whole.copy(sealed = null), whole.copy(syncSig = null))) {
+            val back = RoomOutboxStore.toEntry(half)!!
+            assertFalse(back.isSealed)
+            assertNull(back.sealed)
+            assertNull(back.syncSig)
+            assertArrayEquals(byteArrayOf(9), back.packed)
+        }
     }
 
     @Test

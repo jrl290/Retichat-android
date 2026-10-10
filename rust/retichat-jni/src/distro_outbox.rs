@@ -12,10 +12,19 @@
 //! * [`build_propagation_upload`]: the upload of a packed message, encrypted to
 //!   its distro's key and stamped for the propagation node, as
 //!   `LXMessage::pack` builds `propagation_packed` for a PROPAGATED message.
-//!   Built anew for every upload from the same packed message.
+//!   Built anew for every upload from the same packed message. The legacy
+//!   build: an entry owed before the distro sync proof, or one that could not
+//!   be sealed.
+//! * [`seal`] and [`build_sealed_upload`]: the distro sync proof (RFed SPEC
+//!   §17.13, DISTRO-SYNC-PROOF-DESIGN.md §5): the message encrypted to its
+//!   distro and signed by it once, when it is owed, and each upload of it
+//!   built from those same bytes with a new stamp, carrying the claim only for
+//!   the RFed node's own `lxmf.propagation` (§5.4). Thin wrappers over
+//!   `lxmf_rust::distro`, which RFed verifies with.
 
 use std::sync::{Arc, Mutex, Once};
 
+use lxmf_rust::distro::{propagation_payload, sealed_upload, seal_for_sync, sync_transient_id, verify_sync_claim, SyncClaim};
 use lxmf_rust::lx_message::LXMessage;
 use lxmf_rust::lx_stamper::{generate_stamp, WORKBLOCK_EXPAND_ROUNDS_PN};
 use reticulum_rust::destination::{Destination, DestinationType};
@@ -209,29 +218,120 @@ pub fn build_propagation_upload(distro_public_key: &[u8], packed: &[u8], stamp_c
     let (stamp, _value) = generate_stamp(&transient_id, stamp_cost, WORKBLOCK_EXPAND_ROUNDS_PN);
     let stamp = stamp.ok_or_else(|| format!("the propagation stamp (cost {stamp_cost}) could not be generated"))?;
     lxmf_data.extend_from_slice(&stamp);
+    // `msgpack [timebase f64, [bin lxmf_data]]`, every value native
+    // (CHECK_THESE_THINGS_FIRST §11): LXMF-rust's one builder, byte for byte
+    // what this crate wrote by hand until the distro sync proof.
     Ok(propagation_payload(now_seconds(), &lxmf_data))
 }
 
-/// `msgpack([timestamp_f64, [bin(lxmf_data)]])`, written by hand: the node
-/// reads a native array of an f64 and an array of one bin (CHECK_THESE_THINGS_FIRST §11).
-pub fn propagation_payload(timestamp: f64, lxmf_data: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(lxmf_data.len() + 16);
-    out.push(0x92);
-    out.push(0xcb);
-    out.extend_from_slice(&timestamp.to_bits().to_be_bytes());
-    out.push(0x91);
-    let len = lxmf_data.len();
-    if len <= 0xff {
-        out.extend_from_slice(&[0xc4, len as u8]);
-    } else if len <= 0xffff {
-        out.push(0xc5);
-        out.extend_from_slice(&(len as u16).to_be_bytes());
+/// The length of a distro sync signature, which [`seal`] puts first.
+pub const SYNC_SIG_LEN: usize = 64;
+
+/// Seal the packed message `packed` (D's own, `dest = src = D`) for the
+/// distro sync proof, once, when it is owed (RFed SPEC §17.13;
+/// DISTRO-SYNC-PROOF-DESIGN.md §5.1): `sealed = D_hash | D.encrypt(packed[16..])`
+/// and D's signature over `sync_signed_bytes(D_hash, SHA-256(sealed))`, by
+/// `lxmf_rust::distro::seal_for_sync`. Returns `sig(64) | sealed`, which the
+/// outbox keeps with the entry in the same write that owes it; every upload of
+/// the entry carries these bytes, never encrypted again.
+///
+/// Fails, with nothing made, when `distro` has no private key, `packed` is not
+/// addressed to it, or the signature does not validate. The outbox then owes
+/// the entry without them, says so as an error, and builds it the legacy way.
+pub fn seal(distro: &Identity, packed: &[u8]) -> Result<Vec<u8>, String> {
+    let sealed = seal_for_sync(distro, packed)?;
+    let mut out = Vec::with_capacity(SYNC_SIG_LEN + sealed.sealed.len());
+    out.extend_from_slice(&sealed.sig);
+    out.extend_from_slice(&sealed.sealed);
+    Ok(out)
+}
+
+/// A sealed upload as built ([`build_sealed_upload`]).
+#[derive(Debug)]
+pub struct SealedUpload {
+    /// The `lxmf.propagation` upload: three elements with the claim, two without.
+    pub upload: Vec<u8>,
+    /// Why the claim that was asked for is not in it: the stored signature is
+    /// not D's over these sealed bytes. `None` when it carries the claim, or
+    /// none was asked for.
+    pub claim_refused: Option<String>,
+}
+
+/// Build one upload of a sealed message (DISTRO-SYNC-PROOF-DESIGN.md §5.2):
+/// the sealed bytes as they were stored, never encrypted again, the PN stamp
+/// mined anew over `SHA-256(sealed)` at the node's `stamp_cost`, and a fresh
+/// timebase. With `with_claim` (the caller's gate: the node is the RFed node's
+/// own `lxmf.propagation`, §5.4) the envelope's third element is the claim
+/// `[id, distro_public_key, sig]`; without it, today's two-element envelope,
+/// which LXMF's own Resource handler requires.
+///
+/// The sealed message is addressed to `distro_public_key`'s `lxmf.delivery`
+/// and to no other, as the legacy build requires of its key. A claim RFed
+/// would refuse is never sent: when the stored signature is not D's over these
+/// bytes, the upload is built without it and [`SealedUpload::claim_refused`]
+/// says why. The message still goes, and wakes its devices as it does today;
+/// failing the build instead would leave the entry owed for ever. Fails, with
+/// nothing left, when the key is not the sealed message's or the stamp cannot
+/// be mined. Blocks while the stamp is mined.
+pub fn build_sealed_upload(
+    distro_public_key: &[u8],
+    sealed: &[u8],
+    sig: &[u8],
+    with_claim: bool,
+    stamp_cost: u32,
+) -> Result<SealedUpload, String> {
+    check_sealed_destination(distro_public_key, sealed)?;
+    let (stamp, _value) = generate_stamp(&sync_transient_id(sealed), stamp_cost, WORKBLOCK_EXPAND_ROUNDS_PN);
+    let stamp = stamp.ok_or_else(|| format!("the propagation stamp (cost {stamp_cost}) could not be generated"))?;
+    sealed_upload_with(distro_public_key, sealed, sig, with_claim, &stamp, now_seconds())
+}
+
+/// [`build_sealed_upload`] for a given stamp and timebase (the golden vector's).
+fn sealed_upload_with(
+    distro_public_key: &[u8],
+    sealed: &[u8],
+    sig: &[u8],
+    with_claim: bool,
+    stamp: &[u8],
+    timebase: f64,
+) -> Result<SealedUpload, String> {
+    check_sealed_destination(distro_public_key, sealed)?;
+    let (claim, claim_refused) = if with_claim {
+        match sync_claim(distro_public_key, sealed, sig) {
+            Ok(claim) => (Some(claim), None),
+            Err(why) => (None, Some(why)),
+        }
     } else {
-        out.push(0xc6);
-        out.extend_from_slice(&(len as u32).to_be_bytes());
+        (None, None)
+    };
+    let upload = sealed_upload(sealed, stamp, claim.as_ref(), timebase)?;
+    Ok(SealedUpload { upload, claim_refused })
+}
+
+/// The claim for `sealed`, checked as RFed checks it (`verify_sync_claim`).
+fn sync_claim(distro_public_key: &[u8], sealed: &[u8], sig: &[u8]) -> Result<SyncClaim, String> {
+    let claim = SyncClaim::for_sealed(sealed, distro_public_key, sig)?;
+    verify_sync_claim(&claim, &sync_transient_id(sealed), sealed).map_err(|why| why.to_string())?;
+    Ok(claim)
+}
+
+/// `sealed` is `D_hash | encrypted`, and `D_hash` is the `lxmf.delivery` of
+/// `distro_public_key`: the upload goes to its own distro and no other.
+fn check_sealed_destination(distro_public_key: &[u8], sealed: &[u8]) -> Result<(), String> {
+    if sealed.len() <= DEST_LEN {
+        return Err(format!("a sealed message is longer than {DEST_LEN} bytes, this is {}", sealed.len()));
     }
-    out.extend_from_slice(lxmf_data);
-    out
+    let recipient = Identity::from_public_key(distro_public_key)?;
+    let destination = Destination::new_outbound(
+        Some(recipient),
+        DestinationType::Single,
+        "lxmf".to_string(),
+        vec!["delivery".to_string()],
+    )?;
+    if destination.hash != sealed[..DEST_LEN] {
+        return Err("the distro's key does not produce the sealed message's destination".to_string());
+    }
+    Ok(())
 }
 
 fn now_seconds() -> f64 {
@@ -581,5 +681,193 @@ mod tests {
         Transport::set_interface_online(name, false);
         Transport::set_interface_online(name, true);
         assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "a cleared relay tells no one");
+    }
+
+    // ---- The distro sync proof (RFed SPEC §17.13; DISTRO-SYNC-PROOF-DESIGN.md §5, §13.1) ----
+
+    /// A sent copy D packed to itself, as the outbox owes it.
+    fn packed_sent_copy(content: &str) -> (Identity, Vec<u8>, Vec<u8>) {
+        let (distro, hash, msg) = distro_message(content);
+        let packed = pack_message(&Arc::new(Mutex::new(msg))).unwrap();
+        (distro, hash, packed)
+    }
+
+    /// `sig | sealed`, split as Kotlin splits it.
+    fn sealed_of(distro: &Identity, packed: &[u8]) -> (Vec<u8>, Vec<u8>) {
+        let both = seal(distro, packed).expect("sealed");
+        (both[..SYNC_SIG_LEN].to_vec(), both[SYNC_SIG_LEN..].to_vec())
+    }
+
+    fn decode(upload: &[u8]) -> Vec<Value> {
+        let mut rest = upload;
+        let value = rmpv::decode::read_value(&mut rest).expect("msgpack");
+        assert!(rest.is_empty(), "one value, nothing after it");
+        match value {
+            Value::Array(items) => items,
+            other => panic!("an array, not {other:?}"),
+        }
+    }
+
+    /// The one `lxmf_data` of an upload's message list.
+    fn only_lxmf_data(envelope: &[Value]) -> Vec<u8> {
+        match &envelope[1] {
+            Value::Array(list) if list.len() == 1 => match &list[0] {
+                Value::Binary(data) => data.clone(),
+                other => panic!("a bin, not {other:?}"),
+            },
+            other => panic!("an array of one message, not {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_message_is_sealed_once_to_its_distro_and_signed_by_it() {
+        let (distro, hash, packed) = packed_sent_copy("sealed text");
+        let (sig, sealed) = sealed_of(&distro, &packed);
+        assert_eq!(sig.len(), 64);
+        assert_eq!(&sealed[..16], &hash[..], "sealed = D_hash | D.encrypt(packed[16..])");
+        // A sibling opens it with the distro key: the message packed, with a valid distro signature.
+        let mut holder = distro.clone();
+        let opened = unwrap_blob(&mut holder, &sealed).unwrap().expect("addressed to the distro");
+        assert_eq!(opened.content, "sealed text");
+        assert!(opened.signature_validated);
+        // The sync signature is D's over the 65 signed bytes.
+        let d_hash: [u8; 16] = sealed[..16].try_into().unwrap();
+        let signed = lxmf_rust::distro::sync_signed_bytes(&d_hash, &sync_transient_id(&sealed));
+        assert_eq!(&signed[..17], b"rfed.distro.sync\x01");
+        assert!(distro.validate(&sig, &signed));
+        // A public-only identity cannot sign: an Err, never a panic. Nor is another distro's message sealed.
+        let public_only = Identity::from_public_key(&distro.get_public_key().unwrap()).unwrap();
+        assert!(seal(&public_only, &packed).is_err());
+        let (_other, _other_hash, foreign) = packed_sent_copy("not D's");
+        assert!(seal(&distro, &foreign).unwrap_err().contains("not addressed to the distro"));
+        assert!(seal(&distro, &packed[..40]).is_err());
+    }
+
+    #[test]
+    fn with_the_claim_the_upload_has_three_native_elements_and_without_it_two() {
+        let (distro, _hash, packed) = packed_sent_copy("three or two");
+        let (sig, sealed) = sealed_of(&distro, &packed);
+        let key = distro.get_public_key().unwrap();
+        let cost = 6;
+
+        // For the RFed node's own lxmf.propagation: [timebase, [lxmf_data], {"rfed.distro.sync": [claim]}].
+        let proven = build_sealed_upload(&key, &sealed, &sig, true, cost).unwrap();
+        assert_eq!(proven.claim_refused, None);
+        assert_eq!(proven.upload[0], 0x93, "fixarray(3)");
+        let envelope = decode(&proven.upload);
+        assert_eq!(envelope.len(), 3);
+        assert!(matches!(envelope[0], Value::F64(t) if t > 1_700_000_000.0));
+        let data = only_lxmf_data(&envelope);
+        assert_eq!(&data[..data.len() - 32], &sealed[..], "the stored sealed bytes, never encrypted again");
+        let valid = lxmf_rust::lx_stamper::validate_pn_stamp(&data, cost).expect("a stamp over SHA-256(sealed) at the node's cost");
+        assert_eq!(valid.0, sync_transient_id(&sealed).to_vec());
+        // The extension: a map with the str key and a native array of [bin16, bin64, bin64], never a bin of msgpack.
+        let Value::Map(map) = &envelope[2] else { panic!("a map, not {:?}", envelope[2]) };
+        assert_eq!(map.len(), 1);
+        assert_eq!(map[0].0, Value::String("rfed.distro.sync".into()));
+        let id = sync_transient_id(&sealed)[..16].to_vec();
+        assert_eq!(
+            map[0].1,
+            Value::Array(vec![Value::Array(vec![Value::Binary(id), Value::Binary(key.clone()), Value::Binary(sig.clone())])])
+        );
+        // RFed reads it with the same helpers and accepts it.
+        let claims = lxmf_rust::distro::decode_sync_extension(&envelope[2], 1);
+        assert_eq!((claims.by_id.len(), claims.malformed, claims.duplicate), (1, 0, 0));
+        let claim = claims.by_id.values().next().unwrap();
+        assert_eq!(verify_sync_claim(claim, &valid.0, &valid.1), Ok(()));
+
+        // For an override: LXMF's two-element envelope, exactly as the legacy wrapper writes it.
+        let plain = build_sealed_upload(&key, &sealed, &sig, false, cost).unwrap();
+        assert_eq!(plain.claim_refused, None);
+        assert_eq!(plain.upload[0], 0x92, "fixarray(2)");
+        let envelope = decode(&plain.upload);
+        assert_eq!(envelope.len(), 2);
+        let Value::F64(timebase) = envelope[0] else { panic!("an f64 timebase") };
+        let data = only_lxmf_data(&envelope);
+        assert_eq!(&data[..data.len() - 32], &sealed[..]);
+        assert_eq!(plain.upload, propagation_payload(timebase, &data));
+    }
+
+    /// The Android twin of retichat-ffi distro_outbox.rs:412 (DISTRO-SYNC-PROOF-DESIGN.md §13.1, iOS).
+    #[test]
+    fn two_builds_of_one_entry_share_the_sealed_bytes_and_differ_only_in_stamp_and_timebase() {
+        let (distro, _hash, packed) = packed_sent_copy("built twice");
+        let (sig, sealed) = sealed_of(&distro, &packed);
+        let key = distro.get_public_key().unwrap();
+        let a = decode(&build_sealed_upload(&key, &sealed, &sig, true, 0).unwrap().upload);
+        let b = decode(&build_sealed_upload(&key, &sealed, &sig, true, 0).unwrap().upload);
+        let (da, db) = (only_lxmf_data(&a), only_lxmf_data(&b));
+        assert_eq!(da.len(), db.len());
+        assert_eq!(&da[..da.len() - 32], &db[..db.len() - 32], "one sealed message");
+        assert_eq!(sync_transient_id(&da[..da.len() - 32]), sync_transient_id(&db[..db.len() - 32]), "one transient id");
+        assert_eq!(a[2], b[2], "the same claim");
+        // The legacy build encrypts anew each time: two of its uploads share nothing but the message inside.
+        let l1 = build_propagation_upload(&key, &packed, 0).unwrap();
+        let l2 = build_propagation_upload(&key, &packed, 0).unwrap();
+        let (_, l1) = lxmf_data_of(&l1);
+        let (_, l2) = lxmf_data_of(&l2);
+        assert_ne!(&l1[..l1.len() - 32], &l2[..l2.len() - 32]);
+    }
+
+    #[test]
+    fn a_claim_rfed_would_refuse_is_never_sent_and_the_message_still_goes() {
+        let (distro, _hash, packed) = packed_sent_copy("refused claim");
+        let (sig, sealed) = sealed_of(&distro, &packed);
+        let key = distro.get_public_key().unwrap();
+        // A signature over another sealing of the same message (each sealing is encrypted anew).
+        let (other_sig, _other_sealed) = sealed_of(&distro, &packed);
+        // A device's signature over the right bytes.
+        let device = Identity::new(true);
+        let d_hash: [u8; 16] = sealed[..16].try_into().unwrap();
+        let device_sig = device.sign(&lxmf_rust::distro::sync_signed_bytes(&d_hash, &sync_transient_id(&sealed)));
+        for bad in [other_sig, device_sig, sig[..63].to_vec(), Vec::new()] {
+            let built = build_sealed_upload(&key, &sealed, &bad, true, 0).unwrap();
+            assert!(built.claim_refused.is_some(), "refused");
+            let envelope = decode(&built.upload);
+            assert_eq!(envelope.len(), 2, "no claim: LXMF's envelope, which wakes as today");
+            let data = only_lxmf_data(&envelope);
+            assert_eq!(&data[..data.len() - 32], &sealed[..]);
+        }
+        // The good one is carried.
+        assert_eq!(decode(&build_sealed_upload(&key, &sealed, &sig, true, 0).unwrap().upload).len(), 3);
+    }
+
+    #[test]
+    fn a_sealed_upload_goes_to_its_own_distro_and_no_other() {
+        let (distro, _hash, packed) = packed_sent_copy("own distro");
+        let (sig, sealed) = sealed_of(&distro, &packed);
+        let other = Identity::new(true);
+        for with_claim in [true, false] {
+            let err = build_sealed_upload(&other.get_public_key().unwrap(), &sealed, &sig, with_claim, 0).unwrap_err();
+            assert!(err.contains("does not produce"), "{err}");
+            assert!(build_sealed_upload(&[1, 2, 3], &sealed, &sig, with_claim, 0).is_err());
+            assert!(build_sealed_upload(&distro.get_public_key().unwrap(), &sealed[..16], &sig, with_claim, 0).is_err());
+        }
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+
+    /// LXMF-rust tests/distro_sync_vectors.json, the vector LXMF-rust, RFed and Retichat-js assert:
+    /// the JNI's sealed build writes its envelope, with and without the claim, byte for byte.
+    #[test]
+    fn the_golden_vector_is_built_byte_for_byte() {
+        let vector: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../LXMF-rust/tests/distro_sync_vectors.json")).unwrap();
+        let field = |name: &str| unhex(vector[name].as_str().unwrap());
+        let key = unhex(vector["distro"]["public_key_hex"].as_str().unwrap());
+        let (sealed, sig, stamp) = (field("sealed_hex"), field("sig_hex"), field("stamp_hex"));
+        let timebase = vector["timebase"].as_f64().unwrap();
+        let proven = sealed_upload_with(&key, &sealed, &sig, true, &stamp, timebase).unwrap();
+        assert_eq!(proven.claim_refused, None);
+        assert_eq!(hex(&proven.upload), vector["envelope_hex"].as_str().unwrap());
+        let plain = sealed_upload_with(&key, &sealed, &sig, false, &stamp, timebase).unwrap();
+        assert_eq!(hex(&plain.upload), vector["envelope_legacy_hex"].as_str().unwrap());
+        // Its private key seals its packed message: new ciphertext each time, but D's signature over it.
+        let distro = Identity::from_bytes(&unhex(vector["distro"]["private_key_hex"].as_str().unwrap())).unwrap();
+        let (sig2, sealed2) = sealed_of(&distro, &field("packed_hex"));
+        assert_eq!(&sealed2[..16], &sealed[..16]);
+        assert_eq!(decode(&sealed_upload_with(&key, &sealed2, &sig2, true, &stamp, timebase).unwrap().upload).len(), 3);
     }
 }

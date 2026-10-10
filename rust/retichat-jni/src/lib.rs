@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use jni::objects::{GlobalRef, JByteArray, JClass, JObject, JObjectArray, JString, JValue};
-use jni::sys::{jbyteArray, jfloat, jint, jlong, jstring};
+use jni::sys::{jboolean, jbyteArray, jfloat, jint, jlong, jstring};
 use jni::{JNIEnv, JavaVM};
 
 use lxmf_rust::ffi as lxmf;
@@ -2577,7 +2577,7 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeD
 // are in `distro_outbox.rs`. Nothing here sends on a timer or sends again.
 // ---------------------------------------------------------------------------
 
-use app_links::{link_representation, AppLinks, LinkRepresentation};
+use app_links::{link_representation, AppLinks, LinkRepresentation, ResourceSilenceWatch};
 use reticulum_rust::link::{LinkHandle, STATE_ACTIVE};
 
 /// Call a no-argument Kotlin method on a callback from whatever thread this
@@ -2669,17 +2669,92 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeP
     let key = jbytes_to_vec(&env, &distro_public_key);
     let packed = jbytes_to_vec(&env, &packed);
     let node = jbytes_to_vec(&env, &node);
-    let cost = match distro_outbox::node_stamp_cost(Identity::recall_app_data(&node).as_deref()) {
-        Ok(cost) => cost,
-        Err(e) => {
-            // As the router does when it has no cost (LXMRouter::get_outbound_propagation_cost):
-            // ask for the announce that carries it. The upload waits for the next coming-up.
-            Transport::request_path(&node, None, None, None, None);
-            rns::set_error(e);
-            return std::ptr::null_mut();
-        }
-    };
+    let Some(cost) = node_stamp_cost_or_ask(&node) else { return std::ptr::null_mut() };
     bytes_or_null(&env, distro_outbox::build_propagation_upload(&key, &packed, cost))
+}
+
+/// The stamp cost `node` announced. Unknown: as the router does when it has no
+/// cost (LXMRouter::get_outbound_propagation_cost), ask for the announce that
+/// carries it, set `nativeLastError`, and return `None`; the upload waits for
+/// the next coming-up.
+fn node_stamp_cost_or_ask(node: &[u8]) -> Option<u32> {
+    match distro_outbox::node_stamp_cost(Identity::recall_app_data(node).as_deref()) {
+        Ok(cost) => Some(cost),
+        Err(e) => {
+            Transport::request_path(node, None, None, None, None);
+            rns::set_error(e);
+            None
+        }
+    }
+}
+
+/// `RetichatBridge.nativeDistroSeal(distroHandle: Long, packed: ByteArray): ByteArray?`
+///
+/// The distro sync proof (RFed SPEC §17.13; DISTRO-SYNC-PROOF-DESIGN.md §5.1):
+/// seal the message `packed` (D's own, `nativeMessagePack`) once, when it is
+/// owed, with the distro identity `distroHandle`. Returns `sig(64) | sealed`,
+/// where `sealed = D_hash | D.encrypt(packed[16..])` and `sig` is D's signature
+/// over `"rfed.distro.sync" | 0x01 | D_hash | SHA-256(sealed)`
+/// (`lxmf_rust::distro::seal_for_sync`). Null with `nativeLastError` when the
+/// handle has no private key, `packed` is not addressed to it, or the signature
+/// does not validate: the outbox then owes the entry without them.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeDistroSeal(
+    env: JNIEnv,
+    _class: JClass,
+    distro_handle: jlong,
+    packed: JByteArray,
+) -> jbyteArray {
+    let Some(distro) = distro_identity(distro_handle, "distro") else { return std::ptr::null_mut() };
+    let packed = jbytes_to_vec(&env, &packed);
+    bytes_or_null(&env, distro_outbox::seal(&distro, &packed))
+}
+
+/// `RetichatBridge.nativePropagationBuildSealedUpload(distroPublicKey: ByteArray,
+/// sealed: ByteArray, sig: ByteArray, withClaim: Boolean, node: ByteArray): ByteArray?`
+///
+/// One upload of a sealed entry (DISTRO-SYNC-PROOF-DESIGN.md §5.2): the stored
+/// `sealed` bytes, never encrypted again, with a PN stamp mined over
+/// `SHA-256(sealed)` for the node's stamp cost (read from its announce as
+/// `nativePropagationBuildUpload` reads it; unknown is an error, and the node's
+/// path is requested), and the claim `[id, distroPublicKey, sig]` as the third
+/// element only when `withClaim` (Kotlin's gate: `node` is the RFed node's own
+/// `lxmf.propagation`, §5.4). A claim RFed would refuse is left out and said as
+/// an error; the message still goes. Blocks while the stamp is mined: call it
+/// off the main thread. Null with `nativeLastError` when it cannot be built,
+/// with nothing sent.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativePropagationBuildSealedUpload(
+    env: JNIEnv,
+    _class: JClass,
+    distro_public_key: JByteArray,
+    sealed: JByteArray,
+    sig: JByteArray,
+    with_claim: jboolean,
+    node: JByteArray,
+) -> jbyteArray {
+    let key = jbytes_to_vec(&env, &distro_public_key);
+    let sealed = jbytes_to_vec(&env, &sealed);
+    let sig = jbytes_to_vec(&env, &sig);
+    let node = jbytes_to_vec(&env, &node);
+    let Some(cost) = node_stamp_cost_or_ask(&node) else { return std::ptr::null_mut() };
+    let built = distro_outbox::build_sealed_upload(&key, &sealed, &sig, with_claim != 0, cost).map(|built| {
+        if let Some(why) = &built.claim_refused {
+            // Never silent: the upload goes without the proof, so its devices are woken as before.
+            reticulum_rust::log(
+                format!(
+                    "[distro-sync] the stored sync claim for {} is not one RFed would accept ({why}): \
+                     the upload goes without it, and wakes the distro's devices as before",
+                    reticulum_rust::hexrep(&sealed[..16.min(sealed.len())], false),
+                ),
+                reticulum_rust::LOG_ERROR,
+                false,
+                false,
+            );
+        }
+        built.upload
+    });
+    bytes_or_null(&env, built)
 }
 
 /// `RetichatBridge.nativePropagationLink(node: ByteArray): ByteArray?`
@@ -2706,14 +2781,17 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeP
 }
 
 /// What reports an upload to Kotlin's `PropagationUploadCallback`: each of
-/// `onProved` and `onLost` at most once, from whatever thread the stack decides
-/// it on. A proof can follow a loss (the receipt stays listed, and a late proof
-/// still concludes it): both are told, in the order they happen.
+/// `onProved`, `onLost` and `onNeverLeft` at most once, from whatever thread the
+/// stack decides it on. A proof can follow a loss (the receipt stays listed, and
+/// a late proof still concludes it): both are told, in the order they happen.
+/// A never-left is told instead of a loss, never with one (app-links'
+/// `send_on_held_link_owed` decides an upload once).
 struct UploadReport {
     jvm: JavaVM,
     callback: GlobalRef,
     proved: AtomicBool,
     lost: AtomicBool,
+    never_left: AtomicBool,
 }
 
 impl UploadReport {
@@ -2726,6 +2804,12 @@ impl UploadReport {
     fn lost(&self) {
         if !self.lost.swap(true, Ordering::SeqCst) {
             call_kotlin(&self.jvm, &self.callback, "onLost", "()V", &[]);
+        }
+    }
+
+    fn never_left(&self) {
+        if !self.never_left.swap(true, Ordering::SeqCst) {
+            call_kotlin(&self.jvm, &self.callback, "onNeverLeft", "()V", &[]);
         }
     }
 }
@@ -2748,22 +2832,54 @@ fn tear_down_link_of_upload(node: &[u8], link: &LinkHandle) {
     }
 }
 
+/// `RetichatBridge.nativeInterfaceUpEdges(): Long`
+///
+/// How many interface up-edges Transport has told (`Transport::interface_up_edges`),
+/// the count `app_links::UpEdgeMark` wraps. The owner of a never-left upload is
+/// the Kotlin outbox, so it takes the mark there, just before each
+/// `nativePropagationUpload`, and asks it again once it has recorded a never-left
+/// upload as owed: a different count means an interface came up since, and that
+/// up-edge, which its listener heard before the upload was owed, was this
+/// upload's (`AppLinks::send_on_held_link_owed`, steps 1 and 2). A read, never a wait.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeInterfaceUpEdges(
+    _env: JNIEnv,
+    _class: JClass,
+) -> jlong {
+    Transport::interface_up_edges() as jlong
+}
+
 /// `RetichatBridge.nativePropagationUpload(node: ByteArray, upload: ByteArray,
 /// callback: PropagationUploadCallback): ByteArray?`
 ///
-/// Hand `upload` (a `nativePropagationBuildUpload` result) to the link AppLinks
-/// holds for the propagation node, which must be ACTIVE: one packet, or a
-/// Resource over the link MDU. Returns `[how u8 | link id]` (how 1 a packet, 2 a
-/// Resource; the link id the upload went on), or null with `nativeLastError`
-/// when it did not leave (no active link held, or the packet could not be
-/// queued): then no callback is ever called.
+/// Hand `upload` (a `nativePropagationBuildUpload` or
+/// `nativePropagationBuildSealedUpload` result) to the link AppLinks holds for
+/// the propagation node, which must be ACTIVE, as an upload the outbox owes
+/// (`AppLinks::send_on_held_link_owed`): one packet, or a Resource over the link
+/// MDU. Returns `[how u8 | link id]` (how 1 a packet, 2 a Resource; the link id
+/// the upload went on), or null with `nativeLastError` when it did not leave (no
+/// active link held, or the packet could not be queued): then no callback is
+/// ever called.
 ///
 /// Once it has left, `callback.onProved()` is called when the node proves the
 /// packet (or the Resource completes), and `callback.onLost()` when the packet
-/// receipt times out or the Resource fails. Nothing here raced, resends or
+/// receipt times out or the Resource fails. Nothing here races, resends or
 /// times anything: the stack's own receipt timeout is the clock. On a loss the
 /// link the upload went on is torn down (`tear_down_link_of_upload`) before
 /// `onLost` is called, so the close that follows is what the loss is.
+///
+/// A Resource whose first advertisement no interface could carry never left
+/// the device (DESIGN_PRINCIPLES §3, James 2026-10-06; the Resource case
+/// 2026-10-10): app-links cancels it locally, and `callback.onNeverLeft()` is
+/// called instead of `onLost`, with no teardown. The link is kept, and the
+/// outbox records it as it records a null return here: it goes at the next
+/// interface up-edge or coming-up.
+///
+/// DESIGN_PRINCIPLES §1, bulk transfers: a Resource's progress feeds a
+/// `ResourceSilenceWatch`, which logs (and in a debug build asserts, at its
+/// end point) a silence over 5 s and decides nothing. Its end point, `finish`,
+/// is the last thing each outcome does: after the delivery, the loss or the
+/// never-left is reported, and after an `Err`.
 #[no_mangle]
 pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativePropagationUpload(
     env: JNIEnv,
@@ -2796,25 +2912,49 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeP
         callback,
         proved: AtomicBool::new(false),
         lost: AtomicBool::new(false),
+        never_left: AtomicBool::new(false),
     });
     // The link the upload goes on: `before`, unless the held link changed
     // between reading it and the send (a replacement is then the newer one).
     let used: Arc<Mutex<LinkHandle>> = Arc::new(Mutex::new(before.clone()));
+    // §1, bulk transfers: fed by the Resource's own progress; a packet reports none.
+    let watch = ResourceSilenceWatch::new(format!(
+        "distro outbox upload of {} B to propagation node {}",
+        data.len(),
+        reticulum_rust::hexrep(&node, false),
+    ));
 
     let proved_report = report.clone();
-    let on_delivered: Arc<dyn Fn() + Send + Sync + 'static> = Arc::new(move || proved_report.proved());
+    let proved_watch = watch.clone();
+    let on_delivered: Arc<dyn Fn() + Send + Sync + 'static> = Arc::new(move || {
+        proved_watch.delivered();
+        proved_report.proved();
+        // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1 (the watch's end point, last)
+        let _ = proved_watch.finish();
+    });
     let lost_report = report.clone();
     let lost_node = node.clone();
     let lost_used = used.clone();
+    let lost_watch = watch.clone();
     let on_failed: Arc<dyn Fn() + Send + Sync + 'static> = Arc::new(move || {
         let link = lost_used.lock().map(|l| l.clone());
         if let Ok(link) = link {
             tear_down_link_of_upload(&lost_node, &link);
         }
         lost_report.lost();
+        // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1 (the watch's end point, last)
+        let _ = lost_watch.finish();
+    });
+    // Nothing left: no teardown, the link is kept (DESIGN_PRINCIPLES §3, 2026-10-06/10-10).
+    let never_left_report = report.clone();
+    let never_left_watch = watch.clone();
+    let on_never_left: Arc<dyn Fn() + Send + Sync + 'static> = Arc::new(move || {
+        never_left_report.never_left();
+        // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1 (the watch's end point, last)
+        let _ = never_left_watch.finish();
     });
 
-    match AppLinks::send_on_held_link(&node, data, true, on_delivered, on_failed, None) {
+    match AppLinks::send_on_held_link_owed(&node, data, true, on_delivered, on_failed, Some(watch.on_progress()), on_never_left) {
         Ok(()) => {
             let link = match AppLinks::get_handle(&node) {
                 Some(after) if !after.same_link(&before) => after,
@@ -2829,6 +2969,8 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeP
         }
         Err(e) => {
             rns::set_error(e);
+            // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1 (the watch's end point, last)
+            let _ = watch.finish();
             std::ptr::null_mut()
         }
     }

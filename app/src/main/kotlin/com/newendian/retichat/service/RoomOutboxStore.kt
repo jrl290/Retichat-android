@@ -6,7 +6,8 @@ import kotlinx.coroutines.CancellationException
 
 /**
  * The distro outbox's storage ([OutboxStore]) in Room's `distro_outbox`
- * (database 13). The outbox keeps what is owed in memory and this is its
+ * (database 13; the sealed bytes and sync signature of the distro sync proof
+ * since 15, null for a row owed before). The outbox keeps what is owed in memory and this is its
  * durable copy: it is read once at start, and written by [put] when something
  * is owed, [remove] when the node proves it or it is owed no more, and
  * [removeId] when a refused write must still take a replaced message out.
@@ -59,6 +60,8 @@ class RoomOutboxStore(private val dao: DistroOutboxDao) : OutboxStore {
             atMs = entry.atMs,
             toHex = entry.toHex,
             seq = seq,
+            sealed = entry.sealed,
+            syncSig = entry.syncSig,
         )
 
         /** Null for a row of a kind this build does not know: it is left alone and never uploaded. */
@@ -72,6 +75,9 @@ class RoomOutboxStore(private val dao: DistroOutboxDao) : OutboxStore {
                 id = row.id, kind = kind, distro = row.distro, distroKey = row.distroKey,
                 msgHash = row.msgHash, packed = row.packed, label = row.label,
                 op = row.op, name = row.name, atMs = row.atMs, toHex = row.toHex,
+                // Both or neither: a row with one alone is built the legacy way, as one owed before the proof.
+                sealed = row.sealed?.takeIf { row.syncSig != null },
+                syncSig = row.syncSig?.takeIf { row.sealed != null },
             )
         }
     }

@@ -63,6 +63,17 @@ import java.util.concurrent.atomic.AtomicBoolean
  * its links on, told by [RetichatBridge.interfaceOnlineRegister]) is the event.
  * It is never Android's "network available", which says only that the system
  * has a network: the interface answers it, and its up-edge, if it does, is this.
+ * A Resource upload whose first advertisement no interface could carry is told
+ * as never left too ([PropagationUploadCallback.onNeverLeft]: the stack
+ * cancelled it and kept the link), and each upload carries the [UpEdgeMark]
+ * taken just before it was handed over ([RetichatBridge.interfaceUpEdges]).
+ *
+ * The distro sync proof (RFed SPEC §17.13; DISTRO-SYNC-PROOF-DESIGN.md §5,
+ * §7): each message owed is sealed once, right after it is packed, with the
+ * same distro handle that signed it ([RetichatBridge.distroSeal]), and kept
+ * with the entry in the write that owes it. The port builds a sealed entry
+ * from those bytes, with the claim only for the RFed node's own
+ * `lxmf.propagation` ([SyncProofGate]).
  */
 object DistroOutboxRuntime {
     private const val TAG = "DistroOutbox"
@@ -191,13 +202,14 @@ object DistroOutboxRuntime {
                 return
             }
             val label = "the $op of #$channelName (§17.12)"
-            val (packed, hash) = pack(distro, signer) { handle ->
+            val packed = pack(distro, signer, label) { handle ->
                 RetichatBridge.messageSetDistroChannelSync(handle, op, channelName, atMs, deviceHex)
             } ?: return
             val entry = OwedEntry(
                 id = DistroChannelSync.entryId(channelHashHex), kind = OwedKind.CHANNEL,
                 distro = distro.deliveryHashHex, distroKey = distro.publicKeyHex,
-                msgHash = hash, packed = packed, label = label, op = op, name = channelName, atMs = atMs,
+                msgHash = packed.hash, packed = packed.bytes, label = label, op = op, name = channelName, atMs = atMs,
+                sealed = packed.sealed?.sealed, syncSig = packed.sealed?.syncSig,
             )
             val outbox = outbox(context)
             withContext(serial) { outbox.owe(entry) }
@@ -224,15 +236,17 @@ object DistroOutboxRuntime {
                 Log.w(TAG, "sent-copy: this device's address is not known — no copy for ${recipientHex.take(8)}")
                 return
             }
-            val (packed, hash) = pack(distro, signer, title = title, content = content) { handle ->
+            val label = "the sent-copy for ${recipientHex.take(8)} (§17.11)"
+            val packed = pack(distro, signer, label, title = title, content = content) { handle ->
                 RetichatBridge.messageAddFieldString(handle, LxmfFields.FIELD_CUSTOM_TYPE, LxmfFields.DISTRO_SENT_TYPE) &&
                     RetichatBridge.messageAddFieldString(handle, LxmfFields.FIELD_CUSTOM_DATA, recipientHex) &&
                     RetichatBridge.messageAddFieldString(handle, LxmfFields.FIELD_CUSTOM_META, deviceHex)
             } ?: return
             val entry = OwedEntry(
-                id = "sent:$hash", kind = OwedKind.SENT,
+                id = "sent:${packed.hash}", kind = OwedKind.SENT,
                 distro = distro.deliveryHashHex, distroKey = distro.publicKeyHex,
-                msgHash = hash, packed = packed, label = "the sent-copy for ${recipientHex.take(8)} (§17.11)", toHex = recipientHex,
+                msgHash = packed.hash, packed = packed.bytes, label = label, toHex = recipientHex,
+                sealed = packed.sealed?.sealed, syncSig = packed.sealed?.syncSig,
             )
             val outbox = outbox(context)
             withContext(serial) { outbox.owe(entry) }
@@ -244,20 +258,31 @@ object DistroOutboxRuntime {
         }
     }
 
+    /** A message packed once ([bytes], its hash [hash] in hex) and, unless that failed, sealed for the sync proof. */
+    private class Packed(val bytes: ByteArray, val hash: String, val sealed: RetichatBridge.DistroSealed?)
+
     /**
      * Make a message from the distro to the distro (its key, the identity
      * [signer], signs it), set its fields with [fields], pack and sign it once, and return its
      * LXMF bytes and message hash (hex). Null, said, when any step fails. The
      * message is made DIRECT only so that packing needs no destination: it is
      * never sent from here; only the bytes it packs to are kept.
+     *
+     * Then it is sealed for the distro sync proof (RFed SPEC §17.13;
+     * DISTRO-SYNC-PROOF-DESIGN.md §5.1) by the same [signer]: encrypted to the
+     * distro once and signed by it, the bytes every upload of [label] carries.
+     * Local work, here off the main thread where the packing runs. A seal that
+     * fails is said as an error and the message is still owed, without it: it
+     * is built the legacy way and wakes the distro's devices once.
      */
     private suspend fun pack(
         distro: DistroManager.DistroState,
         signer: Long,
+        label: String,
         title: String = "",
         content: String = "",
         fields: (Long) -> Boolean,
-    ): Pair<ByteArray, String>? = withContext(Dispatchers.IO) {
+    ): Packed? = withContext(Dispatchers.IO) {
         val distroHash = DistroCodec.hexToBytes(distro.deliveryHashHex) ?: return@withContext null
         val handle = RetichatBridge.messageCreate(
             destHash = distroHash, srcHash = distroHash, content = content, title = title,
@@ -278,7 +303,12 @@ object DistroOutboxRuntime {
                 Log.e(TAG, "packing failed: ${RetichatBridge.lastError()}")
                 return@withContext null
             }
-            packed to hash
+            val sealed = RetichatBridge.distroSeal(signer, packed)
+            if (sealed == null) {
+                Log.e(TAG, "$label could not be sealed for the distro sync proof (§17.13): ${RetichatBridge.lastError()} — " +
+                    "it is owed without the proof, and wakes the distro's devices once")
+            }
+            Packed(packed, hash, sealed)
         } finally {
             RetichatBridge.messageDestroy(handle)
         }
@@ -305,11 +335,27 @@ object DistroOutboxRuntime {
             return HeldLink(link.id, link.active)
         }
 
+        /**
+         * A sealed entry is built from its stored bytes, with the claim only for
+         * the RFed node's own lxmf.propagation ([SyncProofGate]); a legacy entry
+         * (owed before the proof, or not sealed) the way it always was.
+         */
         override suspend fun build(entry: OwedEntry): ByteArray = withContext(Dispatchers.IO) {
             val node = node() ?: throw IllegalStateException("no propagation node is configured")
             val key = DistroCodec.hexToBytes(entry.distroKey) ?: throw IllegalStateException("the distro's key is not hex")
-            RetichatBridge.propagationBuildUpload(key, entry.packed, node)
-                ?: throw IllegalStateException(RetichatBridge.lastError() ?: "the upload could not be built")
+            val built = when (val how = SyncProofGate.buildFor(entry, node.toHex(), PropagationSync.rfedDerivedPropagationHash(context))) {
+                SyncProofGate.Build.Legacy -> RetichatBridge.propagationBuildUpload(key, entry.packed, node)
+                is SyncProofGate.Build.Sealed ->
+                    RetichatBridge.propagationBuildSealedUpload(key, entry.sealed!!, entry.syncSig!!, how.withClaim, node)
+            }
+            built ?: throw IllegalStateException(RetichatBridge.lastError() ?: "the upload could not be built")
+        }
+
+        /** app-links' UpEdgeMark over the JNI: Transport's up-edge count now, asked again later. */
+        override fun upEdgeMark(): UpEdgeMark {
+            if (!RetichatBridge.isLoaded) return UpEdgeMark { false }
+            val at = RetichatBridge.interfaceUpEdges()
+            return UpEdgeMark { RetichatBridge.interfaceUpEdges() != at }
         }
 
         override fun upload(upload: ByteArray, sink: UploadSink): UploadLeft? {
@@ -318,6 +364,8 @@ object DistroOutboxRuntime {
             val callback = object : PropagationUploadCallback {
                 override fun onProved() { decided.set(true); scope.launch { sink.proved() } }
                 override fun onLost() { decided.set(true); scope.launch { sink.lost() } }
+                // No teardown came with it: the link is kept (James, 2026-10-06 and 2026-10-10).
+                override fun onNeverLeft() { decided.set(true); scope.launch { sink.neverLeft() } }
             }
             val started = RetichatBridge.propagationUpload(node, upload, callback)
             if (started == null) {

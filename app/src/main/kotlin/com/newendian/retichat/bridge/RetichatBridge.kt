@@ -135,13 +135,18 @@ interface InterfaceOnlineCallback {
  * The outcome of one upload on the held propagation link
  * ([RetichatBridge.propagationUpload]): [onProved] when the node proves the
  * packet (or the Resource completes), [onLost] when the packet receipt times
- * out or the Resource fails. Each is called at most once, on a Rust thread, and
- * a proof can follow a loss (a late proof). Must not block.
+ * out or the Resource fails, [onNeverLeft] when no interface could carry the
+ * Resource's first advertisement (it was cancelled on the device, nothing was
+ * sent, and the link is kept: DESIGN_PRINCIPLES §3, James 2026-10-06, the
+ * Resource case 2026-10-10). Each is called at most once, on a Rust thread; a
+ * proof can follow a loss (a late proof), and a never-left comes instead of a
+ * loss, never with one. Must not block.
  */
 @Keep
 interface PropagationUploadCallback {
     fun onProved()
     fun onLost()
+    fun onNeverLeft()
 }
 
 /**
@@ -709,6 +714,44 @@ object RetichatBridge {
     fun propagationBuildUpload(distroPublicKey: ByteArray, packed: ByteArray, node: ByteArray): ByteArray? =
         nativePropagationBuildUpload(distroPublicKey, packed, node)
 
+    /** A message sealed for the distro sync proof ([distroSeal]): the bytes every upload carries, and D's signature over them. */
+    class DistroSealed(val sealed: ByteArray, val syncSig: ByteArray)
+
+    /**
+     * The distro sync proof (RFed SPEC §17.13): seal the packed message
+     * [packed] ([messagePack], D's own) once, when it is owed, with the distro
+     * identity [distroHandle]: `sealed = D_hash | D.encrypt(packed[16..])` and
+     * D's signature over it. Null with [lastError] when it cannot be sealed
+     * (no private key, not addressed to D): the entry is then owed without it.
+     */
+    fun distroSeal(distroHandle: Long, packed: ByteArray): DistroSealed? {
+        val raw = nativeDistroSeal(distroHandle, packed) ?: return null
+        if (raw.size <= SYNC_SIG_LEN + 16) return null
+        return DistroSealed(raw.copyOfRange(SYNC_SIG_LEN, raw.size), raw.copyOfRange(0, SYNC_SIG_LEN))
+    }
+
+    /** The length of a distro sync signature, first in what [nativeDistroSeal] returns. */
+    const val SYNC_SIG_LEN = 64
+
+    /**
+     * One upload of a sealed entry for the node [node]: the stored [sealed]
+     * bytes, never encrypted again, stamped anew for the node's cost, with the
+     * claim `[id, distroPublicKey, syncSig]` only when [withClaim] (the node is
+     * the RFed node's own lxmf.propagation: [com.newendian.retichat.service.SyncProofGate]).
+     * Blocks while the stamp is mined: off the main thread. Null with
+     * [lastError] when it cannot be built; nothing has left.
+     */
+    fun propagationBuildSealedUpload(
+        distroPublicKey: ByteArray, sealed: ByteArray, syncSig: ByteArray, withClaim: Boolean, node: ByteArray,
+    ): ByteArray? = nativePropagationBuildSealedUpload(distroPublicKey, sealed, syncSig, withClaim, node)
+
+    /**
+     * How many interface up-edges Transport has told: app-links' `UpEdgeMark`,
+     * which the outbox takes just before each upload and asks again once a
+     * never-left upload is recorded as owed ([com.newendian.retichat.service.UpEdgeMark]).
+     */
+    fun interfaceUpEdges(): Long = nativeInterfaceUpEdges()
+
     /** Link states, `LinkHandle::status()`: [PropagationLink.state]. */
     object LinkState {
         const val PENDING   = 0
@@ -734,12 +777,14 @@ object RetichatBridge {
     data class UploadStart(val resource: Boolean, val linkId: String)
 
     /**
-     * Hand [upload] ([propagationBuildUpload]) to the ACTIVE link held for
-     * [node]. Null with [lastError] when it did not leave (no active link
-     * held, or it could not be queued): [callback] is then never called. Once
-     * it has left, [callback] hears the node's proof or the loss, and on a loss
-     * the link the upload went on has already been torn down (the receipt's
-     * timeout, as LXMF does). Nothing here resends or times anything.
+     * Hand [upload] ([propagationBuildUpload], [propagationBuildSealedUpload])
+     * to the ACTIVE link held for [node]. Null with [lastError] when it did not
+     * leave (no active link held, or it could not be queued): [callback] is then
+     * never called. Once it has left, [callback] hears the node's proof or the
+     * loss, and on a loss the link the upload went on has already been torn down
+     * (the receipt's timeout, as LXMF does); or, for a Resource whose first
+     * advertisement no interface could carry, that it never left, with the link
+     * kept. Nothing here resends or times anything.
      */
     fun propagationUpload(node: ByteArray, upload: ByteArray, callback: PropagationUploadCallback): UploadStart? {
         val raw = nativePropagationUpload(node, upload, callback) ?: return null
@@ -774,6 +819,11 @@ object RetichatBridge {
     ): Int
     private external fun nativeMessagePack(handle: Long): ByteArray?
     private external fun nativePropagationBuildUpload(distroPublicKey: ByteArray, packed: ByteArray, node: ByteArray): ByteArray?
+    private external fun nativeDistroSeal(distroHandle: Long, packed: ByteArray): ByteArray?
+    private external fun nativePropagationBuildSealedUpload(
+        distroPublicKey: ByteArray, sealed: ByteArray, sig: ByteArray, withClaim: Boolean, node: ByteArray,
+    ): ByteArray?
+    private external fun nativeInterfaceUpEdges(): Long
     private external fun nativePropagationLink(node: ByteArray): ByteArray?
     private external fun nativePropagationUpload(node: ByteArray, upload: ByteArray, callback: PropagationUploadCallback): ByteArray?
     private external fun nativePropagationLinkEventsRegister(callback: PropagationLinkCallback): Int

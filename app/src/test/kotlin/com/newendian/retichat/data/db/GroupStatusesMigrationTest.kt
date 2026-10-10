@@ -160,7 +160,9 @@ class GroupStatusesMigrationTest {
     @Test
     fun theMigrationIsRegisteredAndEveryEarlierStepIsStillInTheChain() {
         val database = File("src/main/kotlin/com/newendian/retichat/data/db/RetichatDatabase.kt").readText()
-        assertTrue(database.contains("version = GroupStatusesMigration.TO,"))
+        // Database 15 (DistroSyncMigration) came after it: the version is its, the step stays.
+        assertFalse(database.contains("version = GroupStatusesMigration.TO,"))
+        assertEquals(GroupStatusesMigration.TO, DistroSyncMigration.FROM)
         assertTrue(database.contains("MIGRATION_13_14"))
         // Every earlier step is still in the chain, so no version wipes the messages.
         for (step in listOf("MIGRATION_9_10", "MIGRATION_10_11", "MIGRATION_11_12", "MIGRATION_12_13", "MIGRATION_13_14")) {

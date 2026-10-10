@@ -150,26 +150,32 @@ object RfedDistroClient {
         DistroCodec.isAffirmative(resp)
     }
 
-    /** Drain fan-out copies RFed held for this device while it was unreachable. */
+    /**
+     * Drain fan-out copies RFed held for this device while it was unreachable,
+     * up to [PULL_ROUNDS_MAX] pages. A pull whose last round still reported
+     * more pending says so as a WARNING ([DistroPullRounds]); the rest waits
+     * for the next pull, which is the next event (a wake, the stream's open,
+     * the app coming to the foreground), never a timer.
+     */
     suspend fun pull(context: Context): Int = withContext(Dispatchers.IO) {
         if (DistroManager.identityHandle == 0L) return@withContext 0
         val dest = destHash(context, "register") ?: return@withContext 0
-        var total = 0
-        for (round in 1..PULL_ROUNDS_MAX) {
+        var drained = 0
+        val total = DistroPullRounds.drain(PULL_ROUNDS_MAX, warn = { Log.w(TAG, it) }) {
             val resp = ConnectionStateManager.appLinkSend(dest, "rfed", "distro.register", "/rfed/pull", DistroCodec.MSGPACK_NIL)
-                ?: run { Log.w(TAG, "pull: request failed"); return@withContext total }
+                ?: run { Log.w(TAG, "pull: request failed"); return@drain null }
             val (pairs, more) = DistroCodec.decodePullResponse(resp) ?: run {
                 Log.w(TAG, "pull: malformed response (${resp.size} bytes)")
-                return@withContext total
+                return@drain null
             }
             // RFed drained this page as it served it: a blob that throws is
             // dropped, and the rest of the page is still handled (PullPage).
             PullPage.handleEach(pairs, { _, blob -> handleBlob(context, blob) }) { id, e ->
                 Log.w(TAG, "pull: blob $id unreadable, dropped", e)
             }
-            total += pairs.size
-            _status.value = _status.value.copy(lastPullCount = total)
-            if (!more) break
+            drained += pairs.size
+            _status.value = _status.value.copy(lastPullCount = drained)
+            DistroPullRounds.Page(pairs.size, more)
         }
         Log.i(TAG, "pull drained $total blob(s)")
         total
@@ -383,5 +389,30 @@ object RfedDistroClient {
         Log.w(TAG, "registration: $reason")
         _status.value = _status.value.copy(registered = false, lastError = reason)
         return false
+    }
+}
+
+/**
+ * The rounds of one distro pull (`/rfed/pull`, RFed SPEC §17): each [round]
+ * handles one page and says how many blobs it carried and whether RFed reported
+ * more pending, or null when the round failed (it says why). At most
+ * [drain]'s `maxRounds` pages per pull. With the distro sync proof (SPEC
+ * §17.13) RFed lets up to 63 un-woken sync entries queue ahead of a woken
+ * message (DISTRO-SYNC-PROOF-DESIGN.md §6.3, §7), so a pull that stops at its
+ * round cap with more still pending is incomplete, and is said as a WARNING;
+ * the rest waits for the next pull, an event, never a timer.
+ */
+internal object DistroPullRounds {
+    class Page(val blobs: Int, val more: Boolean)
+
+    suspend fun drain(maxRounds: Int, warn: (String) -> Unit, round: suspend () -> Page?): Int {
+        var total = 0
+        for (n in 1..maxRounds) {
+            val page = round() ?: return total
+            total += page.blobs
+            if (!page.more) return total
+        }
+        warn("distro pull: more pending after $maxRounds rounds ($total blobs); the rest waits for the next pull")
+        return total
     }
 }

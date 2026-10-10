@@ -95,12 +95,21 @@ object PropagationSync {
         if (rfedOverride.isNotEmpty()) return rfedOverride
         val manual = UserPreferences.getLxmfPropagationHash(context)
         if (manual.isNotEmpty()) return manual
+        return rfedDerivedPropagationHash(context)
+    }
+
+    /**
+     * The RFed node's own `lxmf.propagation`: `Destination.hash(<configured
+     * RFed identity>, "lxmf", "propagation")`, hex, or null when no RFed
+     * identity is configured. [resolvePropagationOverride]'s last branch, used
+     * when no override is set; on its own it is the distro sync proof's gate
+     * (DISTRO-SYNC-PROOF-DESIGN.md §5.4, [SyncProofGate]): an owed upload
+     * carries its claim only to this node, never to an override, whose LXMF
+     * would drop a three-element envelope.
+     */
+    fun rfedDerivedPropagationHash(context: Context): String? {
         val rfedId = UserPreferences.getEffectiveRfedNodeIdentityHash(context)
-        if (rfedId.length == 32) {
-            FcmTokenRegistrar.rnsDestHash(rfedId, "lxmf", listOf("propagation"))
-                ?.takeIf { it.isNotEmpty() }
-                ?.let { return it }
-        }
-        return null
+        if (rfedId.length != 32) return null
+        return FcmTokenRegistrar.rnsDestHash(rfedId, "lxmf", listOf("propagation"))?.takeIf { it.isNotEmpty() }
     }
 }

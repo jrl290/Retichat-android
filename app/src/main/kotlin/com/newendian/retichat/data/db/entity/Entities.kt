@@ -277,6 +277,12 @@ data class ChannelMembershipEntity(
  * is still encrypted to its own distro after the device gives that distro up.
  * A channel entry adds [op], [name] and [atMs]; a sent entry adds [toHex].
  * [seq] orders what is owed, oldest first.
+ *
+ * [sealed] and [syncSig] (database 15) are the distro sync proof (RFed SPEC
+ * §17.13): [packed] encrypted to the distro once, when it was owed, and the
+ * distro's signature over those bytes, written in the same write as the rest.
+ * Both or neither, and null for every row owed before version 15: such a row
+ * is built the legacy way and wakes the distro's devices once.
  */
 @Entity(tableName = "distro_outbox")
 data class DistroOutboxEntity(
@@ -292,6 +298,8 @@ data class DistroOutboxEntity(
     val atMs: Long? = null,
     val toHex: String? = null,
     val seq: Long,
+    val sealed: ByteArray? = null,
+    val syncSig: ByteArray? = null,
 )
 
 /**

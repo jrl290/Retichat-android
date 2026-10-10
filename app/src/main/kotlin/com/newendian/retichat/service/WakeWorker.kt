@@ -102,6 +102,16 @@ class WakeWorker(
                 // start is what reaches the network, and up-edges are held to the
                 // 30-min period per interface — no manual one-shot here.
 
+                // The distro queue first (DISTRO-SYNC-PROOF-DESIGN.md §7, Android
+                // "Pulling"): a sibling's leave that came as distro sync, with no wake
+                // of its own (RFed SPEC §17.13), is applied before a post in the left
+                // channel is stored or notified by the per-channel pulls below. RFed's
+                // bound (64 un-pulled entries per device) keeps it to a few rounds.
+                if (DistroManager.hasDistro) {
+                    runCatching { RfedDistroClient.pull(applicationContext) }
+                        .onFailure { Log.w(TAG, "distro pull failed", it) }
+                }
+
                 // Per-channel pull (drain one page each).
                 val channels = app.database.channelDao().activeChannels()
                 for (channel in channels) {
@@ -115,10 +125,6 @@ class WakeWorker(
                 // Force a fresh propagation app-link ACTIVE edge here so a
                 // wake-triggered pull does not reuse a stale held link from
                 // before the transport reconnect completed.
-                if (DistroManager.hasDistro) {
-                    runCatching { RfedDistroClient.pull(applicationContext) }
-                        .onFailure { Log.w(TAG, "distro pull failed", it) }
-                }
                 PropagationSync.runOnce(applicationContext, requireFreshTransport = true)
             }
             if (!inBudget) Log.w(TAG, "WakeWorker exceeded ${BUDGET_MS}ms budget")

@@ -57,14 +57,15 @@ class DistroOutboxContractTest {
     }
 
     @Test
-    fun anOwedUploadIsMadeByFourPathsAndNoOther() {
+    fun anOwedUploadIsMadeByFivePathsAndNoOther() {
         // The coming-up pass, which reads the failure record with its coming-up; the interface's return,
         // which sends only what never left the device (James, 2026-10-06: nothing was sent, so no failure
-        // is retried); and uploadOwedAtOnce, which reads none: the user's own action (owe) and the third
-        // ruling's send (inside uploadOwed's loss handler). Anything else calling either would send an
-        // upload again on its own failure.
+        // is retried); and uploadOwedAtOnce, which reads none: the user's own action (owe), the third
+        // ruling's send (inside uploadOwed's loss handler), and a never-left upload whose UpEdgeMark says an
+        // interface came up since it was handed over (keepNeverLeft: that up-edge was its own). Anything else
+        // calling either would send an upload again on its own failure.
         assertEquals(listOf("sendDistroOutbox", "onInterfaceOnline", "uploadOwedAtOnce"), callersOf("uploadOwed"))
-        assertEquals(listOf("owe", "uploadOwed"), callersOf("uploadOwedAtOnce"))
+        assertEquals(listOf("owe", "uploadOwed", "keepNeverLeft"), callersOf("uploadOwedAtOnce"))
         // The upload it makes has one caller too.
         assertEquals(listOf("uploadOwed"), callersOf("uploadFor"))
     }
@@ -92,20 +93,54 @@ class DistroOutboxContractTest {
 
     @Test
     fun aNeverLeftUploadIsDecidedAndRecordedInOnePlaceAndNeverAsAFailure() {
-        // The record is made where the port did not take the packet, and nowhere else.
+        // The record is made in keepNeverLeft, and nowhere else; its two callers are where the port did not take
+        // the packet and where the stack said the Resource's first advertisement was not carried (2026-10-10).
         assertEquals(1, Regex("unproved\\.recordNeverLeft\\(").findAll(code).count())
-        val never = code.substring(code.indexOf("Handoff.NeverLeft -> {"), code.indexOf("flight.upload = upload"))
-        assertTrue(never.contains("unproved.recordNeverLeft(entry)"))
-        // No failure record, no coming-up, no error the client shows, no Resource decision: nothing was sent.
-        for (name in listOf("recordUnproved", "unproved.record(", "propComingUps", "log.error", "log.warn", "upload.on")) {
-            assertFalse(name, never.contains(name))
+        assertEquals(listOf("uploadOwed", "uploadOwed"), callersOf("keepNeverLeft"))
+        val keep = code.substring(code.indexOf("private fun keepNeverLeft("), code.indexOf("private fun uploadFor("))
+        assertTrue(keep.contains("unproved.recordNeverLeft(entry)"))
+        val never = code.substring(code.indexOf("is Handoff.NeverLeft -> {"), code.indexOf("flight.upload = upload"))
+        assertTrue(never.contains("keepNeverLeft(entry, handoff.mark, "))
+        val resource = code.substring(code.indexOf("upload.onOutcomeNeverLeft = {"), code.indexOf("upload.onOutcomeLost = { why ->"))
+        assertTrue(resource.contains("keepNeverLeft(entry, upload.mark, "))
+        // No failure record, no coming-up, no error the client shows: nothing was sent.
+        for ((where, text) in listOf("packet" to never, "resource" to resource, "keep" to keep)) {
+            for (name in listOf("recordUnproved", "unproved.record(", "propComingUps", "log.error", "log.warn", "comingUp")) {
+                assertFalse("$where $name", text.contains(name))
+            }
         }
+        // The packet's refusal decides no Resource: it sets no handler of an upload.
+        assertFalse(never.contains("upload.on"))
         // An upload beginning ends the record, before anything can yield.
         val uploadOwed = code.substring(code.indexOf("private suspend fun uploadOwed("))
         assertTrue(uploadOwed.indexOf("unproved.clearNeverLeft(entry)") in 0 until uploadOwed.indexOf("port.build(entry)"))
         // forget() ends both records, so every place that forgets an owed message ends both.
         val forget = code.substring(code.indexOf("fun forget(entry: OwedEntry)"), code.indexOf("val size: Int"))
         assertTrue(forget.contains("clearNeverLeft(entry)"))
+    }
+
+    @Test
+    fun aNeverLeftAsksItsMarkOnlyOnceRecordedAndSendsOnlyWhatIsStillRecordedOnTheLinkThatIsUp() {
+        // app-links send_on_held_link_owed / UpEdgeMark: the mark is taken just before the upload is handed over,
+        // and asked only after the never-left is recorded, so an up-edge in between is not missed.
+        val handOver = code.substring(code.indexOf("private fun uploadFor("), code.indexOf("private fun uploadProved("))
+        assertTrue(handOver.indexOf("val mark = port.upEdgeMark()") in 0 until handOver.indexOf("port.upload(bytes, sink)"))
+        assertTrue(handOver.contains("return Handoff.NeverLeft(mark)"))
+        assertTrue(handOver.contains("override fun neverLeft() { uploadNeverLeft(upload) }"))
+        val keep = code.substring(code.indexOf("private fun keepNeverLeft("), code.indexOf("private fun uploadFor("))
+        assertTrue(keep.indexOf("unproved.recordNeverLeft(entry)") in 0 until keep.indexOf("mark.cameUpSince()"))
+        // One send, with no coming-up: only with the stack running, the propagation link ACTIVE, the record still
+        // standing (an up-edge that took it first sent it), the entry still owed and no attempt open.
+        assertEquals(1, Regex("uploadOwedAtOnce\\(").findAll(keep).count())
+        assertTrue(keep.contains("uploadOwedAtOnce(held.id, entry)"))
+        for (guard in listOf("if (!mark.cameUpSince()) return", "stopped", "held.active", "!unproved.neverLeft(entry)",
+            "!stillOwed(entry)", "distroAttemptOpen(entry, held.id)")) {
+            assertTrue(guard, keep.contains(guard))
+        }
+        // The Resource's never-left reaches the outbox from the sink alone, and decides an upload once.
+        assertEquals(listOf("uploadFor"), callersOf("uploadNeverLeft"))
+        val decide = code.substring(code.indexOf("private fun uploadNeverLeft("), code.indexOf("private fun uploadLost("))
+        assertTrue(decide.contains("if (upload.settled != null) return false"))
     }
 
     @Test
@@ -125,6 +160,8 @@ class DistroOutboxContractTest {
         // The proof and the loss reach it from the sink the stack is handed, and the stop through cut.
         assertEquals(listOf("uploadFor"), callersOf("uploadProved"))
         assertEquals(listOf("uploadFor", "cut"), callersOf("uploadLost"))
+        // Or, for a Resource whose first advertisement no interface carried, by the stack's never-left (no failure).
+        assertEquals(listOf("uploadFor"), callersOf("uploadNeverLeft"))
         assertEquals(listOf("onStop"), callersOf("cut"))
     }
 
