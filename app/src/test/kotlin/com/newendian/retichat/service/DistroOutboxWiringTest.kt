@@ -227,6 +227,9 @@ class DistroOutboxWiringTest {
         assertTrue(store.contains("sealed = entry.sealed,"))
         assertTrue(store.contains("syncSig = entry.syncSig,"))
         assertTrue(store.contains("sealed = row.sealed?.takeIf { row.syncSig != null },"))
+        // ... and says so on the outbox's log when it is loaded: a dropped proof never goes in silence.
+        assertTrue(store.contains("toEntry(row)?.also { halfProof(row)?.let(log::warn) }"))
+        assertTrue(runtime.contains("RoomOutboxStore(app.database.distroOutboxDao(), AndroidLog)"))
     }
 
     @Test

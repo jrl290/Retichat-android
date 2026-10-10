@@ -108,7 +108,7 @@ object DistroOutboxRuntime {
         box?.let { return@withLock it }
         val app = context.applicationContext as RetichatApp
         val jni = JniPropagationPort(app, scope)
-        val created = DistroOutbox(RoomOutboxStore(app.database.distroOutboxDao()), jni, ::heldDistro, AndroidLog, scope)
+        val created = DistroOutbox(RoomOutboxStore(app.database.distroOutboxDao(), AndroidLog), jni, ::heldDistro, AndroidLog, scope)
         withContext(serial) { created.start() }
         port = jni
         box = created

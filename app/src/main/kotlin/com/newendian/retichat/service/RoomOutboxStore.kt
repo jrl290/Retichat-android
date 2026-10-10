@@ -16,14 +16,18 @@ import kotlinx.coroutines.CancellationException
  * owed under an id already there replaces it and goes to the end, as the web's
  * outbox does. A write that fails (a full disk) returns false and says nothing
  * here: the outbox says it, and holds the entry for this run.
+ *
+ * A row holding only one half of the sync proof is read as legacy and said as
+ * a warning on [log] ([halfProof]): its proof is dropped, so its upload wakes
+ * the distro's devices, and that must not happen in silence.
  */
-class RoomOutboxStore(private val dao: DistroOutboxDao) : OutboxStore {
+class RoomOutboxStore(private val dao: DistroOutboxDao, private val log: OutboxLog) : OutboxStore {
     private var seq = 0L
 
     override suspend fun loadAll(): List<OwedEntry> {
         val rows = dao.all()
         seq = rows.maxOfOrNull { it.seq } ?: 0L
-        return rows.mapNotNull { toEntry(it) }
+        return rows.mapNotNull { row -> toEntry(row)?.also { halfProof(row)?.let(log::warn) } }
     }
 
     override suspend fun put(entry: OwedEntry): Boolean = try {
@@ -75,10 +79,24 @@ class RoomOutboxStore(private val dao: DistroOutboxDao) : OutboxStore {
                 id = row.id, kind = kind, distro = row.distro, distroKey = row.distroKey,
                 msgHash = row.msgHash, packed = row.packed, label = row.label,
                 op = row.op, name = row.name, atMs = row.atMs, toHex = row.toHex,
-                // Both or neither: a row with one alone is built the legacy way, as one owed before the proof.
+                // Both or neither: a row with one alone is built the legacy way, as one owed before the proof
+                // ([halfProof] says so when it is loaded).
                 sealed = row.sealed?.takeIf { row.syncSig != null },
                 syncSig = row.syncSig?.takeIf { row.sealed != null },
             )
+        }
+
+        /**
+         * The warning for a row that holds one half of the sync proof alone, or null for one with
+         * both or neither. This build always writes both or neither, from one seal in one write,
+         * so only a damaged row or another writer comes here.
+         */
+        fun halfProof(row: DistroOutboxEntity): String? {
+            if ((row.sealed == null) == (row.syncSig == null)) return null
+            val held = if (row.sealed != null) "its sealed bytes without their sync signature"
+            else "a sync signature without its sealed bytes"
+            return "distro outbox: ${row.label} (${row.id}) is stored with $held; it is uploaded without the " +
+                "sync proof, and its upload wakes the distro's devices"
         }
     }
 }

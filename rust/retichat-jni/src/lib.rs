@@ -2924,6 +2924,15 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeP
         reticulum_rust::hexrep(&node, false),
     ));
 
+    // The watch's end point (`finish`) comes after this owner has reported the
+    // outcome, not after it has recorded it: each report hands it to Kotlin,
+    // which records it later on the outbox's serial executor. That is as
+    // app-links asks for an owner that hands the outcome on. A debug build's
+    // §1 panic, which a release .so never makes, ends only its own thread
+    // under this crate's default panic = "unwind". Under panic = "abort" it
+    // would end the process before that record; storage still holds the
+    // entry owed (a proof is recorded by taking it out), so it is sent
+    // again on the next run and nothing is lost.
     let proved_report = report.clone();
     let proved_watch = watch.clone();
     let on_delivered: Arc<dyn Fn() + Send + Sync + 'static> = Arc::new(move || {

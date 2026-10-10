@@ -26,6 +26,15 @@ class RoomOutboxStoreTest {
         override suspend fun removeId(id: String): Int = if (rows.remove(id) != null) 1 else 0
     }
 
+    private class Lines : OutboxLog {
+        val info = mutableListOf<String>()
+        val warn = mutableListOf<String>()
+        val error = mutableListOf<String>()
+        override fun info(message: String) { info += message }
+        override fun warn(message: String) { warn += message }
+        override fun error(message: String) { error += message }
+    }
+
     private fun channel(id: String, hash: String) = OwedEntry(
         id = id, kind = OwedKind.CHANNEL, distro = "d".repeat(32), distroKey = "1".repeat(128),
         msgHash = hash, packed = byteArrayOf(1, 2, 3, hash.length.toByte()), label = "the join of #x (§17.12)",
@@ -85,6 +94,42 @@ class RoomOutboxStoreTest {
     }
 
     @Test
+    fun aRowWithOnlyOneHalfOfTheProofIsSaidAsAWarningWhenLoadedAndAWholeOrLegacyRowSaysNothing() = runBlocking {
+        // Every drop speaks: the proof is dropped and the upload wakes the distro's devices, so the load says why.
+        val dao = FakeDao()
+        val whole = RoomOutboxStore.toRow(sent("whole", sealed = byteArrayOf(1, 2), syncSig = ByteArray(64)), 1)
+        dao.rows[whole.id] = whole
+        val legacy = RoomOutboxStore.toRow(sent("legacy"), 2)
+        dao.rows[legacy.id] = legacy
+        val noSig = RoomOutboxStore.toRow(sent("nosig", sealed = byteArrayOf(3), syncSig = ByteArray(64)), 3).copy(syncSig = null)
+        dao.rows[noSig.id] = noSig
+        val noSealed = RoomOutboxStore.toRow(sent("nosealed", sealed = byteArrayOf(4), syncSig = ByteArray(64)), 4).copy(sealed = null)
+        dao.rows[noSealed.id] = noSealed
+        val lines = Lines()
+        val loaded = RoomOutboxStore(dao, lines).loadAll()
+        // All four are still owed: the half-proof rows go the legacy way rather than not at all.
+        assertEquals(listOf("sent:whole", "sent:legacy", "sent:nosig", "sent:nosealed"), loaded.map { it.id })
+        assertEquals(listOf(true, false, false, false), loaded.map { it.isSealed })
+        assertEquals(2, lines.warn.size)
+        assertTrue(lines.info.isEmpty() && lines.error.isEmpty())
+        val (first, second) = lines.warn
+        assertTrue(first, first.contains("(sent:nosig)") && first.contains("sealed bytes without their sync signature"))
+        assertTrue(second, second.contains("(sent:nosealed)") && second.contains("sync signature without its sealed bytes"))
+        for (line in lines.warn) {
+            assertTrue(line, line.contains("the sent-copy (§17.11)"))
+            assertTrue(line, line.contains("without the sync proof") && line.contains("wakes the distro's devices"))
+        }
+        assertNull(RoomOutboxStore.halfProof(whole))
+        assertNull(RoomOutboxStore.halfProof(legacy))
+        // A row of a kind this build does not know is left alone, and its proof is not spoken of.
+        dao.rows.clear()
+        dao.rows[noSig.id] = noSig.copy(kind = "from-the-future")
+        val quiet = Lines()
+        assertTrue(RoomOutboxStore(dao, quiet).loadAll().isEmpty())
+        assertTrue(quiet.warn.isEmpty())
+    }
+
+    @Test
     fun aRowOfAKindThisBuildDoesNotKnowIsLeftAloneAndNeverUploaded() {
         val row = RoomOutboxStore.toRow(channel("channel:aa", "h1"), 1).copy(kind = "from-the-future")
         assertNull(RoomOutboxStore.toEntry(row))
@@ -93,12 +138,12 @@ class RoomOutboxStoreTest {
     @Test
     fun entriesComeBackOldestFirstAndAReplacementGoesToTheEnd() = runBlocking {
         val dao = FakeDao()
-        val store = RoomOutboxStore(dao)
+        val store = RoomOutboxStore(dao, Lines())
         assertTrue(store.put(channel("channel:aa", "join")))
         assertTrue(store.put(sent("copy")))
         assertTrue(store.put(channel("channel:aa", "leave")))
         // A later run loads them in the order they were owed: the leave replaced the join and went last.
-        val later = RoomOutboxStore(dao)
+        val later = RoomOutboxStore(dao, Lines())
         assertEquals(listOf("sent:copy", "channel:aa"), later.loadAll().map { it.id })
         assertEquals("leave", later.loadAll().last().msgHash)
         // It goes on from the highest number, never reusing one.
@@ -109,7 +154,7 @@ class RoomOutboxStoreTest {
     @Test
     fun aMessageProvedIsRemovedOnlyIfItIsStillTheOneStored() = runBlocking {
         val dao = FakeDao()
-        val store = RoomOutboxStore(dao)
+        val store = RoomOutboxStore(dao, Lines())
         store.put(channel("channel:aa", "join"))
         store.put(channel("channel:aa", "leave"))
         // The join's proof arrives late: the leave under the same id stays owed.
@@ -122,7 +167,7 @@ class RoomOutboxStoreTest {
     @Test
     fun aRefusedWriteIsFalseAndTheReplacedRowCanBeTakenOutAnyway() = runBlocking {
         val dao = FakeDao()
-        val store = RoomOutboxStore(dao)
+        val store = RoomOutboxStore(dao, Lines())
         assertTrue(store.put(channel("channel:aa", "join")))
         dao.failWrites = true
         assertFalse(store.put(channel("channel:aa", "leave")))
