@@ -37,6 +37,8 @@ import org.json.JSONObject
 object RfedDistroClient {
     private const val TAG = "Distro"
     private const val PULL_ROUNDS_MAX = 8
+    /** destHash is null only for a set RFed node identity hash that is not 32 hex characters (an unset one is the default). */
+    private const val NO_NODE = "the RFed node identity hash set here is not 32 hex characters"
     private const val PULL_AFTER_REGISTER_MS = 7_000L
     // Its launches pull and handle distro blobs (register's pull): what escapes
     // one is logged, never the process's end (RemoteInput.kt).
@@ -84,7 +86,7 @@ object RfedDistroClient {
         if (registerInFlight) return@withContext registeredForHandle == distro
         registerInFlight = true
         try {
-            val dest = destHash(context, "register") ?: return@withContext fail("no RFed node configured")
+            val dest = destHash(context, "register") ?: return@withContext fail(NO_NODE)
             val payload = RetichatBridge.distroRegisterPayload(device, distro)
                 ?: return@withContext fail("register payload: ${RetichatBridge.lastError()}")
             ConnectionStateManager.primeAppLink(dest, "rfed", "distro.register")
@@ -189,8 +191,8 @@ object RfedDistroClient {
     suspend fun pullOutcome(context: Context): PullOutcome = withContext(Dispatchers.IO) {
         if (DistroManager.identityHandle == 0L) return@withContext PullOutcome(0, "no distro held")
         val dest = destHash(context, "register") ?: run {
-            Log.w(TAG, "pull: no RFed node configured")
-            return@withContext PullOutcome(0, "no RFed node configured")
+            Log.w(TAG, "pull: $NO_NODE")
+            return@withContext PullOutcome(0, NO_NODE)
         }
         pullLock.withLock {
             // A Settings restart stops the stack under a round still waiting: its

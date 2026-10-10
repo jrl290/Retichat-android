@@ -164,6 +164,18 @@ class DistroFirstResubscribeTest {
     }
 
     @Test
+    fun anUnusableNodeHashIsSaidAsWhatItIsNeverAsNoNodeConfigured() {
+        // An unset hash is the default node (UserPreferences.getEffectiveRfedNodeIdentityHash):
+        // destHash is null only for a set one that is not 32 hex characters.
+        val client = src("service/RfedDistroClient.kt")
+        assertTrue(client.contains("private const val NO_NODE = \"the RFed node identity hash set here is not 32 hex characters\""))
+        assertTrue(client.contains("Log.w(TAG, \"pull: \$NO_NODE\")"))
+        assertTrue(client.contains("return@withContext PullOutcome(0, NO_NODE)"))
+        assertTrue(client.contains("return@withContext fail(NO_NODE)"))
+        assertFalse(client.contains("no RFed node configured"))
+    }
+
+    @Test
     fun noAnswerToTheAnnounceIsNeverCalledARefusal() {
         assertEquals("RFed did not answer the pre-signed announce", DistroCodec.notAYes("pre-signed announce", null))
         assertEquals(
