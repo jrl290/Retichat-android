@@ -232,7 +232,7 @@ class DistroAttachmentsTest {
         // Live: the propagation stream and rfed.delivery; deferred: /rfed/pull.
         assertTrue(src("service/PropagationStream.kt").contains("RfedDistroClient.handleBlob(app, blob)"))
         assertTrue(src("service/RfedChannelClient.kt").contains("RfedDistroClient.handleBlob(appContext, inner)"))
-        assertTrue(body(client, "suspend fun pull(").contains("handleBlob(context, blob)"))
+        assertTrue(body(client, "suspend fun pullOutcome(").contains("handleBlob(context, blob)"))
         assertTrue(src("service/WakeWorker.kt").contains("RfedDistroClient.pull(applicationContext)"))
         // And handleBlob is the one caller of onDistroMessageReceived.
         val callers = File("src/main/kotlin").walk().filter { it.extension == "kt" }

@@ -1,0 +1,195 @@
+package com.newendian.retichat.service
+
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.runBlocking
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
+import org.junit.Test
+import java.io.File
+
+/**
+ * Stack start with a distro: the distro's queue is pulled and applied before the
+ * persisted channels are subscribed again (DistroFirst). Found in private staging,
+ * 2026-10-10: on a push wake RFed saw /rfed/subscribe, then 0.3 s later the
+ * /rfed/unsubscribe of a sibling's leave the wake's pull applied, and a post
+ * fanned out between them reached a device whose distro had left the channel.
+ * Also the truth rule for the pull's and the announce's no-answer lines.
+ */
+class DistroFirstResubscribeTest {
+    private fun src(path: String) = File("src/main/kotlin/com/newendian/retichat/$path").readText()
+
+    private class Device(vararg held: String) {
+        val channels = held.toMutableList()
+        val wire = mutableListOf<String>()
+        val said = mutableListOf<Pair<String, Boolean>>()
+
+        /** RFed's queue holds a sibling's leave of #b: the pull applies it here. */
+        suspend fun pullApplyingLeaveOfB(): RfedDistroClient.PullOutcome {
+            wire += "/rfed/pull"
+            if (channels.remove("b")) wire += "/rfed/unsubscribe #b"
+            return RfedDistroClient.PullOutcome(1, null)
+        }
+
+        suspend fun resubscribe() {
+            for (c in channels) wire += "/rfed/subscribe #$c"
+        }
+
+        suspend fun start(hasDistro: Boolean, pull: suspend () -> RfedDistroClient.PullOutcome) =
+            DistroFirst.thenResubscribe(hasDistro, pull, { line, warning -> said += line to warning }) { resubscribe() }
+    }
+
+    @Test
+    fun aSiblingsLeaveThePullAppliesIsNeverSubscribedAgain() = runBlocking {
+        val d = Device("a", "b")
+        d.start(hasDistro = true) { d.pullApplyingLeaveOfB() }
+        assertEquals(
+            "the leave is applied before any channel is subscribed again, and the left channel is not",
+            listOf("/rfed/pull", "/rfed/unsubscribe #b", "/rfed/subscribe #a"),
+            d.wire,
+        )
+        assertEquals(listOf("Distro queue pulled and applied first (1 blob(s)): re-subscribing persisted channels" to false), d.said)
+    }
+
+    @Test
+    fun aDeviceWithNoDistroResubscribesAtOnceWithNoPull() = runBlocking {
+        val d = Device("a", "b")
+        d.start(hasDistro = false) { fail("no distro: no pull"); RfedDistroClient.PullOutcome(0, null) }
+        assertEquals(listOf("/rfed/subscribe #a", "/rfed/subscribe #b"), d.wire)
+        assertTrue(d.said.isEmpty())
+    }
+
+    @Test
+    fun aPullWithNoAnswerStillLetsTheReSubscriptionGoAndSaysSo() = runBlocking {
+        // No interface: the round gets no link inside its 5 s. Its outcome is known, so the channels go now.
+        val d = Device("a")
+        d.start(hasDistro = true) { RfedDistroClient.PullOutcome(0, DistroPullRounds.noAnswer(stoppedSince = false)) }
+        assertEquals(listOf("/rfed/subscribe #a"), d.wire)
+        assertEquals(
+            listOf(
+                "Distro pull before re-subscribing stopped after 0 blob(s): no answer from RFed (no link inside 5 s, " +
+                    "or the request went unanswered); re-subscribing persisted channels now; a sibling's leave still " +
+                    "queued at RFed, if any, is applied when a later pull brings it" to true,
+            ),
+            d.said,
+        )
+    }
+
+    @Test
+    fun aPullThatThrowsStillLetsTheReSubscriptionGoAndSaysSo() = runBlocking {
+        val d = Device("a")
+        d.start(hasDistro = true) { throw IllegalStateException("boom") }
+        assertEquals(listOf("/rfed/subscribe #a"), d.wire)
+        assertEquals(1, d.said.size)
+        assertTrue(d.said[0].first.startsWith("Distro pull before re-subscribing threw (boom): re-subscribing persisted channels now"))
+        assertTrue(d.said[0].second)
+    }
+
+    @Test
+    fun aPullStoppedAtItsRoundCapSaysTheRestWaits() = runBlocking {
+        val d = Device("a")
+        d.start(hasDistro = true) { RfedDistroClient.PullOutcome(24, null, morePending = true) }
+        assertEquals(listOf("/rfed/subscribe #a"), d.wire)
+        assertEquals(
+            "Distro pull before re-subscribing applied 24 blob(s) and stopped at its round cap with more pending: " +
+                "re-subscribing persisted channels now; the rest is applied when a later pull brings it",
+            d.said.single().first,
+        )
+    }
+
+    @Test
+    fun cancellationIsNotAnOutcomeAndSubscribesNothing() = runBlocking {
+        val d = Device("a")
+        try {
+            d.start(hasDistro = true) { throw CancellationException("scope gone") }
+            fail("cancellation must propagate")
+        } catch (_: CancellationException) {
+        }
+        assertTrue(d.wire.isEmpty())
+    }
+
+    @Test
+    fun aRoundWithNoAnswerIsSaidAsNoAnswerOrAsTheRestartsCancellationNeverAsAFailure() {
+        assertEquals("no answer from RFed (no link inside 5 s, or the request went unanswered)", DistroPullRounds.noAnswer(false))
+        assertEquals(
+            "cancelled: the stack was stopped (StackRuntime.restart) while the round waited for RFed",
+            DistroPullRounds.noAnswer(true),
+        )
+        val client = src("service/RfedDistroClient.kt")
+        assertFalse("until 2026-10-10 a round with no answer read \"request failed\"", client.contains("Log.w(TAG, \"pull: request failed\")"))
+        assertTrue(client.contains("DistroPullRounds.noAnswer(stoppedSince = StackRuntime.stops != stops)"))
+        assertTrue(client.contains("Log.w(TAG, \"pull stopped after \$total blob(s): \$unfinished\")"))
+        val runtime = src("service/StackRuntime.kt")
+        val shutdown = runtime.substring(runtime.indexOf("private fun shutdownNow("))
+        assertTrue("the stop is counted before anything is torn down", shutdown.indexOf("stops++") < shutdown.indexOf("ConnectionStateManager.unregister()"))
+    }
+
+    @Test
+    fun theStacksStartWiresTheGateAroundBothThePushReRegistrationAndTheReSubscription() {
+        val runtime = src("service/StackRuntime.kt")
+        val gate = runtime.indexOf("DistroFirst.thenResubscribe(")
+        assertTrue(gate >= 0)
+        val block = runtime.substring(gate, runtime.indexOf("val hashHex = selfDestHash", gate))
+        assertTrue(block.contains("hasDistro = DistroManager.hasDistro"))
+        assertTrue(block.contains("pull = { RfedDistroClient.pullOutcome(app) }"))
+        val pull = block.indexOf("pull = {")
+        assertTrue("push registration waits for the pull", block.indexOf("reregisterChannelPushOnStart()") > pull)
+        assertTrue("the re-subscription waits for the pull", block.indexOf("scheduleResubscribeOnRfedChannelActive()") > pull)
+        assertTrue(block.contains("// NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1"))
+        // Nothing else re-subscribes at start, outside the gate.
+        assertEquals(1, Regex("scheduleResubscribeOnRfedChannelActive\\(\\)").findAll(runtime).count())
+        assertEquals(1, Regex("reregisterChannelPushOnStart\\(\\)").findAll(runtime).count())
+    }
+
+    @Test
+    fun pullsRunOneAtATimeSoTheStartsPullCannotComeBackEmptyBesideAWakesPull() {
+        val client = src("service/RfedDistroClient.kt")
+        val body = client.substring(client.indexOf("suspend fun pullOutcome("), client.indexOf("suspend fun handleBlob("))
+        val lock = body.indexOf("pullLock.withLock {")
+        assertTrue(lock >= 0)
+        assertTrue("every round, and the handling of its blobs, is inside the lock", body.indexOf("DistroPullRounds.drain(") > lock)
+        assertTrue(client.contains("suspend fun pull(context: Context): Int = pullOutcome(context).blobs"))
+    }
+
+    @Test
+    fun anUnreachableNodeAtTheReSubscriptionIsSaidNotSilent() {
+        val channels = src("service/RfedChannelClient.kt")
+        val body = channels.substring(
+            channels.indexOf("suspend fun scheduleResubscribeOnRfedChannelActive()"),
+            channels.indexOf("suspend fun resubscribePersistedChannels()"),
+        )
+        assertTrue(body.contains("Log.w(TAG, \"RFed node not reachable within 5 s: \${channels.size} persisted channel(s) not re-subscribed at this start\")"))
+        assertFalse(body.contains("waitForRfedReachable(timeoutMs = 5_000L)) return@withContext"))
+    }
+
+    @Test
+    fun noAnswerToTheAnnounceIsNeverCalledARefusal() {
+        assertEquals("RFed did not answer the pre-signed announce", DistroCodec.notAYes("pre-signed announce", null))
+        assertEquals(
+            "RFed refused the pre-signed announce (it answered false)",
+            DistroCodec.notAYes("pre-signed announce", byteArrayOf(0xc2.toByte())),
+        )
+        assertEquals(
+            "RFed refused the pre-signed announce (it answered nil)",
+            DistroCodec.notAYes("pre-signed announce", byteArrayOf(0xc0.toByte())),
+        )
+        assertEquals(
+            "RFed refused the pre-signed announce (it answered 2 byte(s): 91c2)",
+            DistroCodec.notAYes("pre-signed announce", byteArrayOf(0x91.toByte(), 0xc2.toByte())),
+        )
+        assertEquals(
+            "RFed refused the pre-signed announce (it answered 0 byte(s): )",
+            DistroCodec.notAYes("pre-signed announce", ByteArray(0)),
+        )
+        assertEquals("17 byte(s): 000102030405060708090a0b0c0d0e0f…", DistroCodec.describeAnswer(ByteArray(17) { it.toByte() }))
+        assertEquals("RFed did not answer the registration", DistroCodec.notAYes("registration", null))
+        val client = src("service/RfedDistroClient.kt")
+        assertFalse("until 2026-10-10 no answer read \"refused (resp=null bytes)\"", client.contains("resp=\${resp?.size} bytes"))
+        assertFalse(client.contains("fail(if (resp == null) \"RFed link not reachable\""))
+        val announce = client.substring(client.indexOf("private suspend fun publishAnnounce("), client.indexOf("suspend fun unregister("))
+        assertTrue(announce.contains("val said = DistroCodec.notAYes(\"pre-signed announce\", resp)"))
+        assertTrue(announce.contains("Log.w(TAG, said)"))
+        assertTrue(client.contains("return@withContext fail(DistroCodec.notAYes(\"registration\", resp))"))
+    }
+}

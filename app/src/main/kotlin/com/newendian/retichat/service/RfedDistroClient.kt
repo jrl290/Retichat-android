@@ -13,6 +13,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import com.newendian.retichat.names.NameField
 import com.newendian.retichat.names.Signature
@@ -89,7 +91,9 @@ object RfedDistroClient {
             val resp = ConnectionStateManager.appLinkSend(dest, "rfed", "distro.register", "/rfed/distro/register", payload)
             if (!DistroCodec.isAffirmative(resp)) {
                 armRetryOnActive(context, dest)
-                return@withContext fail(if (resp == null) "RFed link not reachable" else "RFed refused registration")
+                // No answer is not a refusal (the truth rule): until 2026-10-10 a
+                // request that got no response read "RFed link not reachable".
+                return@withContext fail(DistroCodec.notAYes("registration", resp))
             }
             registeredForHandle = distro
             _status.value = _status.value.copy(registered = true, lastError = null)
@@ -132,8 +136,12 @@ object RfedDistroClient {
             _status.value = _status.value.copy(announced = true)
             Log.i(TAG, "RFed is now announcing the distro address")
         } else {
-            _status.value = _status.value.copy(announced = false, lastError = "RFed refused the pre-signed announce")
-            Log.w(TAG, "RFed refused the pre-signed announce (resp=${resp?.size} bytes)")
+            // No answer (offline, the link not up inside its 5 s) is said as no
+            // answer, a refusal with what came back. Until 2026-10-10 both read
+            // "RFed refused the pre-signed announce (resp=null bytes)".
+            val said = DistroCodec.notAYes("pre-signed announce", resp)
+            _status.value = _status.value.copy(announced = false, lastError = said)
+            Log.w(TAG, said)
         }
     }
 
@@ -155,30 +163,67 @@ object RfedDistroClient {
      * up to [PULL_ROUNDS_MAX] pages. A pull whose last round still reported
      * more pending says so as a WARNING ([DistroPullRounds]); the rest waits
      * for the next pull, which is the next event (a wake, the stream's open,
-     * the app coming to the foreground), never a timer.
+     * the app coming to the foreground), never a timer. Returns the blobs it
+     * handled; [pullOutcome] says how it ended.
      */
-    suspend fun pull(context: Context): Int = withContext(Dispatchers.IO) {
-        if (DistroManager.identityHandle == 0L) return@withContext 0
-        val dest = destHash(context, "register") ?: return@withContext 0
-        var drained = 0
-        val total = DistroPullRounds.drain(PULL_ROUNDS_MAX, warn = { Log.w(TAG, it) }) {
-            val resp = ConnectionStateManager.appLinkSend(dest, "rfed", "distro.register", "/rfed/pull", DistroCodec.MSGPACK_NIL)
-                ?: run { Log.w(TAG, "pull: request failed"); return@drain null }
-            val (pairs, more) = DistroCodec.decodePullResponse(resp) ?: run {
-                Log.w(TAG, "pull: malformed response (${resp.size} bytes)")
-                return@drain null
-            }
-            // RFed drained this page as it served it: a blob that throws is
-            // dropped, and the rest of the page is still handled (PullPage).
-            PullPage.handleEach(pairs, { _, blob -> handleBlob(context, blob) }) { id, e ->
-                Log.w(TAG, "pull: blob $id unreadable, dropped", e)
-            }
-            drained += pairs.size
-            _status.value = _status.value.copy(lastPullCount = drained)
-            DistroPullRounds.Page(pairs.size, more)
+    suspend fun pull(context: Context): Int = pullOutcome(context).blobs
+
+    /**
+     * How one pull ended: the blobs it handled, why it stopped short of RFed's
+     * last answer (null when every round it ran was answered: said in the log
+     * already), and whether RFed still had more when the round cap stopped it.
+     */
+    class PullOutcome(val blobs: Int, val unfinished: String?, val morePending: Boolean = false)
+
+    /**
+     * One pull at a time, in the order they are asked for (DESIGN_PRINCIPLES
+     * §5). RFed drains each page as it serves it, so two pulls at once split the
+     * queue between them: the stack start's pull ([DistroFirst]) could come back
+     * empty and let the persisted channels be re-subscribed while a wake's pull
+     * still held a sibling's leave, the gap this closes. Each pull is bounded by
+     * its rounds' own 5 s budgets, so the next one always gets its turn.
+     */
+    private val pullLock = Mutex()
+
+    /** [pull], with how it ended. Never throws for a round that got no answer. */
+    suspend fun pullOutcome(context: Context): PullOutcome = withContext(Dispatchers.IO) {
+        if (DistroManager.identityHandle == 0L) return@withContext PullOutcome(0, "no distro held")
+        val dest = destHash(context, "register") ?: run {
+            Log.w(TAG, "pull: no RFed node configured")
+            return@withContext PullOutcome(0, "no RFed node configured")
         }
-        Log.i(TAG, "pull drained $total blob(s)")
-        total
+        pullLock.withLock {
+            // A Settings restart stops the stack under a round still waiting: its
+            // round then gets no answer, which is that restart's doing, not a
+            // failure (the truth rule; Retichat-js says the same of reconnect()).
+            val stops = StackRuntime.stops
+            var drained = 0
+            var unfinished: String? = null
+            var lastMore = false
+            val total = DistroPullRounds.drain(PULL_ROUNDS_MAX, warn = { Log.w(TAG, it) }) {
+                val resp = ConnectionStateManager.appLinkSend(dest, "rfed", "distro.register", "/rfed/pull", DistroCodec.MSGPACK_NIL)
+                if (resp == null) {
+                    unfinished = DistroPullRounds.noAnswer(stoppedSince = StackRuntime.stops != stops)
+                    return@drain null
+                }
+                val (pairs, more) = DistroCodec.decodePullResponse(resp) ?: run {
+                    unfinished = "malformed response (${resp.size} bytes)"
+                    return@drain null
+                }
+                // RFed drained this page as it served it: a blob that throws is
+                // dropped, and the rest of the page is still handled (PullPage).
+                PullPage.handleEach(pairs, { _, blob -> handleBlob(context, blob) }) { id, e ->
+                    Log.w(TAG, "pull: blob $id unreadable, dropped", e)
+                }
+                drained += pairs.size
+                lastMore = more
+                _status.value = _status.value.copy(lastPullCount = drained)
+                DistroPullRounds.Page(pairs.size, more)
+            }
+            if (unfinished == null) Log.i(TAG, "pull drained $total blob(s)")
+            else Log.w(TAG, "pull stopped after $total blob(s): $unfinished")
+            PullOutcome(total, unfinished, morePending = unfinished == null && lastMore)
+        }
     }
 
     /**
@@ -404,6 +449,15 @@ object RfedDistroClient {
  */
 internal object DistroPullRounds {
     class Page(val blobs: Int, val more: Boolean)
+
+    /**
+     * A round with no answer, said as it happened: the stack stopped under it (a
+     * Settings restart, StackRuntime.restart, closes its link), or RFed did not
+     * answer. Until 2026-10-10 both read "pull: request failed".
+     */
+    fun noAnswer(stoppedSince: Boolean): String =
+        if (stoppedSince) "cancelled: the stack was stopped (StackRuntime.restart) while the round waited for RFed"
+        else "no answer from RFed (no link inside 5 s, or the request went unanswered)"
 
     suspend fun drain(maxRounds: Int, warn: (String) -> Unit, round: suspend () -> Page?): Int {
         var total = 0

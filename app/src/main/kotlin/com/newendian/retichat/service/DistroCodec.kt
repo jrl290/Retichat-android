@@ -54,6 +54,35 @@ object DistroCodec {
         return false
     }
 
+    /**
+     * What RFed's answer that is not a yes came to, said as it happened (James's
+     * truth rule): null is no answer at all (the link did not come up inside its
+     * 5 s, or the request got no response), which is never a refusal; an answer
+     * that is not a yes is a refusal, said with what came back. "RFed did not
+     * answer the pre-signed announce" / "RFed refused the pre-signed announce
+     * (it answered false)". Until 2026-10-10 Android said "RFed refused the
+     * pre-signed announce (resp=null bytes)" for a device that was offline.
+     */
+    fun notAYes(request: String, response: ByteArray?): String =
+        if (response == null) "RFed did not answer the $request"
+        else "RFed refused the $request (it answered ${describeAnswer(response)})"
+
+    /**
+     * An answer for the log: RFed's refusals are msgpack `false` (destinations.rs
+     * `fail`) or nil, said as such; anything else as its size and first bytes.
+     */
+    fun describeAnswer(response: ByteArray): String {
+        if (response.size == 1) {
+            when (response[0].toInt() and 0xff) {
+                0xc2 -> return "false"
+                0xc0 -> return "nil"
+            }
+        }
+        val head = response.take(16).joinToString("") { "%02x".format(it) }
+        val more = if (response.size > 16) "…" else ""
+        return "${response.size} byte(s): $head$more"
+    }
+
     /** msgpack nil — the body of `/rfed/pull` on `rfed.distro.register`. */
     val MSGPACK_NIL: ByteArray = byteArrayOf(0xc0.toByte())
 

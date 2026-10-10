@@ -581,7 +581,11 @@ class RfedChannelClient(
         if (identityHandle == 0L) return@withContext
         val channels = channelDao.activeChannels()
         if (channels.isEmpty()) return@withContext
-        if (!ConnectionStateManager.waitForRfedReachable(timeoutMs = 5_000L)) return@withContext
+        if (!ConnectionStateManager.waitForRfedReachable(timeoutMs = 5_000L)) {
+            // Said, never silent: until 2026-10-10 this returned without a word.
+            Log.w(TAG, "RFed node not reachable within 5 s: ${channels.size} persisted channel(s) not re-subscribed at this start")
+            return@withContext
+        }
         if (didResubscribeOnActive) return@withContext
         didResubscribeOnActive = true
         Log.i(TAG, "rfed reachable — re-subscribing persisted channels")

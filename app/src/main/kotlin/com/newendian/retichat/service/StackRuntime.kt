@@ -64,6 +64,14 @@ object StackRuntime {
         private set
 
     /**
+     * How many times the stack has been stopped in this process ([restart]).
+     * A request that saw no answer reads it to tell the stop's doing from a
+     * failure (RfedDistroClient.pullOutcome).
+     */
+    @Volatile var stops: Long = 0L
+        private set
+
+    /**
      * Take a hold and start the stack if it is not running. Suspends until
      * it is ready. The hold is counted first, before anything can suspend or
      * throw, so a caller owes the release from the moment it calls this; use
@@ -327,20 +335,35 @@ object StackRuntime {
         runCatching { PropagationStream.start(app, routerHandle, identityHandle, selfDestHash) }
             .onFailure { Log.e(TAG, "PropagationStream.start failed", it) }
 
-        // Re-register per-channel rfed.notify subscriptions so push wakeups resume
-        // after process restart (mirrors iOS resubscribePersistedChannels).
+        // With a distro, its queue first (DistroFirst, DESIGN_PRINCIPLES §5): the
+        // siblings' joins and leaves RFed holds for this device are pulled and
+        // applied before any persisted channel is subscribed again or has its
+        // push registered again. Until 2026-10-10 the re-subscription raced the
+        // wake's pull, and RFed saw /rfed/subscribe and, 0.3 s later, the
+        // applied leave's /rfed/unsubscribe: a post fanned out between them
+        // reached a device whose distro had left the channel. The pull's outcome,
+        // whatever it is, is the event the re-subscription waits for: never a
+        // timer, and each round of the pull is bounded by its own 5 s budget.
         app.applicationScope.launch(Dispatchers.IO) {
-            runCatching { app.rfedChannelClient.reregisterChannelPushOnStart() }
-                .onFailure { Log.e(TAG, "reregisterChannelPushOnStart failed", it) }
-            // Defer /rfed/subscribe for every persisted channel until the
-            // rfed.channel APP_LINK reaches ACTIVE — see RfedChannelClient
-            // KDoc and DESIGN_PRINCIPLES.md §1.  Calling resubscribe eagerly
-            // races the link establishment and trips the 5 s assertion on
-            // cold start; the right shape is to defer the send until the
-            // link is observed up.  No timeout, no retry, no fail-state.
-            // // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1
-            runCatching { app.rfedChannelClient.scheduleResubscribeOnRfedChannelActive() }
-                .onFailure { Log.e(TAG, "scheduleResubscribeOnRfedChannelActive failed", it) }
+            DistroFirst.thenResubscribe(
+                hasDistro = DistroManager.hasDistro,
+                pull = { RfedDistroClient.pullOutcome(app) },
+                say = { line, warning -> if (warning) Log.w(DistroFirst.TAG, line) else Log.i(DistroFirst.TAG, line) },
+            ) {
+                // Re-register per-channel rfed.notify subscriptions so push wakeups resume
+                // after process restart (mirrors iOS resubscribePersistedChannels).
+                runCatching { app.rfedChannelClient.reregisterChannelPushOnStart() }
+                    .onFailure { Log.e(TAG, "reregisterChannelPushOnStart failed", it) }
+                // Defer /rfed/subscribe for every persisted channel until the
+                // rfed.channel APP_LINK reaches ACTIVE — see RfedChannelClient
+                // KDoc and DESIGN_PRINCIPLES.md §1.  Calling resubscribe eagerly
+                // races the link establishment and trips the 5 s assertion on
+                // cold start; the right shape is to defer the send until the
+                // link is observed up.  No timeout, no retry, no fail-state.
+                // // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1
+                runCatching { app.rfedChannelClient.scheduleResubscribeOnRfedChannelActive() }
+                    .onFailure { Log.e(TAG, "scheduleResubscribeOnRfedChannelActive failed", it) }
+            }
         }
 
         val hashHex = selfDestHash.joinToString("") { "%02x".format(it) }
@@ -388,6 +411,8 @@ object StackRuntime {
 
     private fun shutdownNow(app: RetichatApp) {
         Log.i(TAG, "Shutting down stack (refCount=${refCount.get()})")
+        // First: a request this stop leaves without an answer reads it (stops).
+        stops++
         isReady = false
         readyDeferred = null
         // The next start registers the distro again (the node may have changed).
