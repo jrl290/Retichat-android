@@ -3,6 +3,7 @@
 -keep class com.newendian.retichat.bridge.RetichatBridge { *; }
 -keep interface com.newendian.retichat.bridge.MessageCallback { *; }
 -keep interface com.newendian.retichat.bridge.AnnounceCallback { *; }
+-keep interface com.newendian.retichat.bridge.MessageStateCallback { *; }
 -keep interface com.newendian.retichat.bridge.RfedBlobCallback { *; }
 -keep interface com.newendian.retichat.bridge.AppLinkStatusCallback { *; }
 -keep interface com.newendian.retichat.bridge.AppLinkPacketCallback { *; }
@@ -14,6 +15,7 @@
 -keep interface com.newendian.retichat.bridge.InterfaceOnlineCallback { *; }
 -keep class * implements com.newendian.retichat.bridge.MessageCallback { *; }
 -keep class * implements com.newendian.retichat.bridge.AnnounceCallback { *; }
+-keep class * implements com.newendian.retichat.bridge.MessageStateCallback { *; }
 -keep class * implements com.newendian.retichat.bridge.RfedBlobCallback { *; }
 -keep class * implements com.newendian.retichat.bridge.AppLinkStatusCallback { *; }
 -keep class * implements com.newendian.retichat.bridge.AppLinkPacketCallback { *; }
