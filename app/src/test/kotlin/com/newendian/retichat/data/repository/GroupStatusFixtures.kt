@@ -552,6 +552,11 @@ class GroupRig(
         val src = u.source.toHex()
         val chat = store.chatByGroupId(groupId)
         val members = chat?.let { store.members(it.id) }.orEmpty()
+        // GROUPS-DISTRO-DESIGN.md §6.3: the first rules, before the action's own (D, when [me] is one, is the echo).
+        DeliveryPolicy.firstRules(u.signature, src, fields.group(GroupEntry.SENDER), selves, if (device != null) setOf(self) else emptySet())?.let { why ->
+            dropped += "$action from ${runCatching { v.nameOf(src) }.getOrDefault(src.take(8))}: $why"
+            return null
+        }
         val allowed = DeliveryPolicy.groupMessage(
             action = action,
             sourceAllowed = true,

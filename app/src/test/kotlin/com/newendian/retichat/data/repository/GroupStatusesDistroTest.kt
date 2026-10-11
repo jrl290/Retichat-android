@@ -29,6 +29,12 @@ class GroupStatusesDistroTest {
         return TestLxmf.pack(id(from), id(from).hash, id(to).hash, fields, clock.also { clock += 1.0 })
     }
 
+    /** [from]'s accept or leave carrying no key: unverifiable here unless [from]'s key is held. */
+    private fun keyless(from: String, to: String, action: String = Action.ACCEPT): ByteArray {
+        val fields = TestLxmf.groupFields(true, v.groupId, action, id(from).hashHex, null, v.displayNames.getValue(from))
+        return TestLxmf.pack(id(from), id(from).hash, id(to).hash, fields, clock.also { clock += 1.0 })
+    }
+
     private fun status(to: String, elements: List<ByteArray>): ByteArray {
         val fields = TestLxmf.groupFields(true, v.groupId, Action.STATUS, id(v.creator).hashHex, null, v.displayNames.getValue(v.creator), elements)
         return TestLxmf.pack(id(v.creator), id(v.creator).hash, id(to).hash, fields, clock.also { clock += 1.0 })
@@ -75,6 +81,22 @@ class GroupStatusesDistroTest {
         assertEquals(true, r.receive(accept("bob", to = "frank")))
         assertTrue(id("bob").hashHex in r.store.allowed)
         assertTrue(id("bob").hashHex in r.store.keys)
+    }
+
+    @Test
+    fun aSiblingsAcceptOrLeaveWhoseSignatureIsNotValidatedIsDroppedAndAMembersStillCounts() = runBlocking {
+        // RFed SPEC §17.14 (alignment decision 1): a device of D is never another member; only a
+        // validly signed message from it is the user's own. A member's is counted until the switch, as before.
+        val sibling = id("alice").hashHex
+        val r = GroupRig(v, "frank", device = deviceA, siblings = setOf(sibling)).also { it.hold(accepted = true) }
+        for (action in listOf(Action.ACCEPT, Action.LEAVE)) {
+            assertEquals(null, r.receive(keyless("alice", to = "frank", action = action)))
+        }
+        assertEquals(MemberStatus.INVITED, r.status("alice"))
+        assertTrue(r.store.lines.values.none { it.member == sibling })
+        assertEquals(2, r.dropped.count { it.contains("not validated") })
+        assertEquals(true, r.receive(keyless("bob", to = "frank")))
+        assertEquals(MemberStatus.ACCEPTED, r.status("bob"))
     }
 
     @Test
