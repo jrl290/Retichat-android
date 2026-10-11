@@ -62,6 +62,26 @@ class RoomOutboxStoreTest {
     }
 
     @Test
+    fun aGroupSyncRoundTripsAsItsOwnKindNotAsASentCopy() {
+        // GROUPS-DISTRO-DESIGN.md §10.5: every site that tells kinds apart learns `group`
+        // (mutation: writing every non-channel row as "sent" reads a G back as a sent-copy).
+        val g = OwedEntry(
+            id = "group:" + "e".repeat(64), kind = OwedKind.GROUP, distro = "d".repeat(32), distroKey = "1".repeat(128),
+            msgHash = "e".repeat(64), packed = byteArrayOf(7, 7), label = "the leave group sync of 9f8e7d6c (§17.14)",
+            op = "leave", name = "9f8e7d6c5b4a39281706f5e4d3c2b1a0", atMs = 1_767_225_600_000,
+            sealed = ByteArray(40) { 3 }, syncSig = ByteArray(64) { 4 },
+        )
+        val row = RoomOutboxStore.toRow(g, 9)
+        assertEquals(RoomOutboxStore.KIND_GROUP, row.kind)
+        assertEquals("group", row.kind)
+        val back = RoomOutboxStore.toEntry(row)!!
+        assertEquals(OwedKind.GROUP, back.kind)
+        assertEquals(g, back)
+        assertEquals(listOf<Any?>("leave", "9f8e7d6c5b4a39281706f5e4d3c2b1a0", 1_767_225_600_000, null), listOf(back.op, back.name, back.atMs, back.toHex))
+        assertTrue(back.isSealed)
+    }
+
+    @Test
     fun theSealedBytesAndSyncSignatureRoundTripAndALegacyRowHasNeither() {
         // DISTRO-SYNC-PROOF-DESIGN.md §7: the proof is stored with the entry, before any upload.
         val c = sent("h1", sealed = ByteArray(200) { it.toByte() }, syncSig = ByteArray(64) { 5 })

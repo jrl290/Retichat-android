@@ -50,10 +50,16 @@ class RoomOutboxStore(private val dao: DistroOutboxDao, private val log: OutboxL
     companion object {
         const val KIND_CHANNEL = "channel"
         const val KIND_SENT = "sent"
+        /** A §17.14 group sync (GROUPS-DISTRO-DESIGN.md §10.5). The column is a plain string: no migration. */
+        const val KIND_GROUP = "group"
 
         fun toRow(entry: OwedEntry, seq: Long): DistroOutboxEntity = DistroOutboxEntity(
             id = entry.id,
-            kind = if (entry.kind == OwedKind.CHANNEL) KIND_CHANNEL else KIND_SENT,
+            kind = when (entry.kind) {
+                OwedKind.CHANNEL -> KIND_CHANNEL
+                OwedKind.SENT -> KIND_SENT
+                OwedKind.GROUP -> KIND_GROUP
+            },
             distro = entry.distro,
             distroKey = entry.distroKey,
             msgHash = entry.msgHash,
@@ -73,6 +79,7 @@ class RoomOutboxStore(private val dao: DistroOutboxDao, private val log: OutboxL
             val kind = when (row.kind) {
                 KIND_CHANNEL -> OwedKind.CHANNEL
                 KIND_SENT -> OwedKind.SENT
+                KIND_GROUP -> OwedKind.GROUP
                 else -> return null
             }
             return OwedEntry(

@@ -252,6 +252,49 @@ class DistroOutboxTest {
         assertEquals(1, rig.port.sent.count { it.entryId == join.id })
     }
 
+    private fun groupSync(op: String, hash: String, distro: HeldDistro = d1) = OwedEntry(
+        id = "group:$hash", kind = OwedKind.GROUP, distro = distro.delivery, distroKey = distro.publicKey,
+        msgHash = hash, packed = hash.toByteArray(), label = "the $op group sync of 9f8e7d6c (§17.14)",
+        op = op, name = "9f8e7d6c5b4a39281706f5e4d3c2b1a0", atMs = 5,
+    )
+
+    @Test
+    fun aGroupSyncIsKeptWhenTheDeviceGivesUpItsDistroAndStillGoesToThatDistroOnce() = run { rig ->
+        // GROUPS-DISTRO-DESIGN.md §10.5 (James 2026-10-10, §23 Q1): G reports an act already made as D,
+        // so it is kept like a sent-copy; only §17.12 membership messages are dropped.
+        val join = channel("join", "public.x", "join")
+        val leave = groupSync("leave", "g1")
+        val post = groupSync("post", "g2")
+        rig.outbox.owe(join)
+        rig.outbox.owe(leave)
+        rig.outbox.owe(post)
+        rig.distro = d2
+        rig.outbox.onDistroChanged()
+        assertEquals(listOf(leave, post), rig.outbox.owed())
+        assertTrue(rig.store.rows.containsKey(leave.id))
+        assertTrue(rig.lines.warn.none { it.contains("group sync") })
+        rig.link("L1")
+        rig.outbox.onLinkEstablished("L1")
+        // Each is uploaded once, with D1's key, never addressed to the distro held now.
+        assertEquals(1, rig.port.sent.count { it.entryId == leave.id })
+        assertEquals(1, rig.port.sent.count { it.entryId == post.id })
+        assertEquals(listOf(d1.publicKey, d1.publicKey), rig.port.builds.map { it.distroKey })
+        rig.port.sent.single { it.entryId == leave.id }.proved()
+        yield()
+        assertTrue(rig.lines.info.any { it.contains("leave group sync") && it.contains("propagated") && it.contains("§17.14") })
+        assertEquals(listOf(post), rig.outbox.owed())
+    }
+
+    @Test
+    fun eachGroupSyncIsOwedOnItsOwnNoLaterOneReplacesIt() = run { rig ->
+        // §10.5: "Each G is owed on its own"; two Gs of one group are two entries.
+        val a = groupSync("post", "p1")
+        val b = groupSync("post", "p2")
+        rig.outbox.owe(a)
+        rig.outbox.owe(b)
+        assertEquals(listOf(a, b), rig.outbox.owed())
+    }
+
     @Test
     fun aSentCopyMadeUnderD1StillGoesToD1WhenTheDeviceHoldsD2() = run { rig ->
         val old = sentCopy("old", distro = d1)

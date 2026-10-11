@@ -16,10 +16,12 @@ import kotlinx.coroutines.launch
  * store, the JNI link and the clock are ports, so the JVM tests drive it with
  * fake link and upload events.
  *
- * Two kinds are owed: the §17.12 membership message C, the newest action per
+ * Three kinds are owed: the §17.12 membership message C, the newest action per
  * channel only (a later join or leave of the channel replaces the one still
- * owed: its id is the channel's), and the §17.11 sent-copy of a message sent as
- * D, one per message. Each entry is the LXMF message exactly as D packed and
+ * owed: its id is the channel's), the §17.11 sent-copy of a message sent as
+ * D, one per message, and the §17.14 group sync G, one per action
+ * (GROUPS-DISTRO-DESIGN.md §10.5, under ruling 2 as James extended it on
+ * 2026-10-10). Each entry is the LXMF message exactly as D packed and
  * signed it when the user acted, never packed again, so every upload of it is
  * one and the same message and a sibling that gets it twice holds the second
  * as a repeat.
@@ -31,7 +33,7 @@ import kotlinx.coroutines.launch
  * uploaded again when the propagation link next comes up. That second upload is
  * a send retry, which DESIGN_PRINCIPLES §3 forbids, allowed here only by the
  * exception James decided on 2026-10-03 ("what a device owes its distro") and
- * for these two messages alone. His rulings of that day, and of 2026-10-04:
+ * for these three messages alone. His rulings of that day, and of 2026-10-04:
  *
  *  - The link comes up when a new propagation link is established
  *    ([onLinkEstablished]), or when a STALE link recovers because the node is
@@ -84,15 +86,24 @@ import kotlinx.coroutines.launch
  * timer, no retry loop (DESIGN_PRINCIPLES §3, §5).
  */
 
-enum class OwedKind { CHANNEL, SENT }
+/**
+ * What an entry is: a §17.12 channel membership message, a §17.11 sent-copy, or
+ * a §17.14 group sync (GROUPS-DISTRO-DESIGN.md §10.5). Only [CHANNEL] is owed to
+ * the distro held now; a sent-copy and a group sync each report an act already
+ * made as their distro, and are kept and go to that distro whatever the device
+ * holds later.
+ */
+enum class OwedKind { CHANNEL, SENT, GROUP }
 
 /**
- * One thing owed. [id] is `channel:<channel hash>` or `sent:<LXMF message
- * hash>`; [msgHash] is the LXMF message hash of [packed], which is what tells
+ * One thing owed. [id] is `channel:<channel hash>`, `sent:<LXMF message
+ * hash>` or `group:<LXMF message hash>`; [msgHash] is the LXMF message hash of [packed], which is what tells
  * one message from another under the same id. [distro] is D's `lxmf.delivery`
  * hash and [distroKey] D's public key (hex), so a sent-copy is still encrypted
  * to its own distro after the device gives that distro up. A channel entry
- * adds [op], [name] and [atMs]; a sent entry [toHex].
+ * adds [op], [name] and [atMs]; a sent entry [toHex]; a group sync [op], the
+ * group id as [name], and [atMs]. Each group sync is owed on its own, under
+ * its own hash: no later one replaces it (§10.5).
  *
  * [sealed] and [syncSig] are the distro sync proof (RFed SPEC §17.13;
  * DISTRO-SYNC-PROOF-DESIGN.md §5.1): [packed] encrypted to D once, when it
@@ -1067,6 +1078,8 @@ class DistroOutbox(
         }
         if (entry.kind == OwedKind.CHANNEL) {
             log.info("The ${entry.op} of #${entry.name} (at ${entry.atMs}) propagated to the distro as a $how: the propagation node proved it (§17.12)")
+        } else if (entry.kind == OwedKind.GROUP) {
+            log.info("The ${entry.op} group sync of ${entry.name?.take(8)} (at ${entry.atMs}) propagated to the distro as a $how: the propagation node proved it (§17.14)")
         } else {
             log.info("Sent-copy for ${entry.toHex?.take(8)} propagated to the distro as a $how: the propagation node proved it (§17.11)")
         }
