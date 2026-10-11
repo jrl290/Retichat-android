@@ -10,6 +10,10 @@ import com.newendian.retichat.names.DisplayNames
  * signed as D, so it is final at every member and, through the group sync, on
  * every device of D; a group whose D this device no longer holds can only be
  * read, or deleted from this device. A device-listed group keeps today's texts.
+ * Also why nothing that would send is offered in any group, or a create or a
+ * post was refused, while the stack is not running or D has not loaded yet
+ * (§8.7): the same words on iOS, Android and the web (alignment decision 3,
+ * 2026-10-11).
  */
 object DistroGroupTexts {
     const val DECLINE_TITLE = "Decline this invitation?"
