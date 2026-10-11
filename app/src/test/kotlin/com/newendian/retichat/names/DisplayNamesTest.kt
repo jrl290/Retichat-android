@@ -110,6 +110,11 @@ class DisplayNamesTest {
         assertEquals("01234567… joined the group", SystemText.render(SystemText.MEMBER, "joined the group", hash, before))
         assertEquals("Alice joined the group", SystemText.render(SystemText.MEMBER, "joined the group", hash, after))
         assertEquals("plain text", SystemText.render(null, "plain text", hash, after))
+        // Alignment decision 3: a known sibling device's own accept or leave, whatever its names.
+        assertEquals("Your other device joined the group", SystemText.render(SystemText.OTHER_DEVICE, "joined the group", hash, after))
+        assertEquals("Your other device left the group", SystemText.render(SystemText.OTHER_DEVICE, "left the group", hash, before))
+        val store = java.io.File("src/main/kotlin/com/newendian/retichat/data/repository/RoomGroupStatusStore.kt").readText()
+        assertTrue(store.contains("systemKind = if (otherDevice) SystemText.OTHER_DEVICE else SystemText.MEMBER,"))
     }
 
     // ── §5.2 accepting a 0xD1 ─────────────────────────────────────────

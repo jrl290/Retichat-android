@@ -117,8 +117,14 @@ interface GroupStatusStore {
 
     suspend fun setMemberStatus(chatId: String, memberHex: String, status: String)
 
-    /** The system line about a member who joined or left: [id] is its row, [timestampMs] the message's own time. */
-    suspend fun memberLine(chatId: String, memberHex: String, joined: Boolean, id: String, timestampMs: Long)
+    /**
+     * The system line about a member who joined or left: [id] is its row,
+     * [timestampMs] the message's own time. [otherDevice]: the member is a
+     * known sibling, another device of the user's distro listed as its own
+     * entry, and the line reads "Your other device joined the group" (or
+     * "left"), never "You …", which would read as the user's own act.
+     */
+    suspend fun memberLine(chatId: String, memberHex: String, joined: Boolean, id: String, timestampMs: Long, otherDevice: Boolean)
 
     /** [memberHex] passes the privacy filter from now on: a member of a joined group, by association. */
     suspend fun allow(memberHex: String)
@@ -415,10 +421,13 @@ class GroupStatusEngine(
             store.allow(src)
         }
         val groupId = chat.groupIdHex.orEmpty()
+        // A self address that is not the group's own, its distro or this device: another device of D (§9.1).
+        val otherDevice = self.isSelf(src) && src != self.own && src != self.distro && src != selfHex()
         store.memberLine(
             chat.id, src, accepted,
             id = if (accepted) "acc_${src.take(8)}_${groupId.take(8)}" else msgId,
             timestampMs = timestampMs,
+            otherDevice = otherDevice,
         )
     }
 

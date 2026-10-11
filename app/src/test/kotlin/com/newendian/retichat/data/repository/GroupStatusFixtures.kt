@@ -415,7 +415,7 @@ class FakeGroupNative : GroupNative {
 }
 
 /** What [MemoryGroupStatusStore] was asked to say about a member. */
-data class Line(val chatId: String, val member: String, val joined: Boolean, val id: String, val timestampMs: Long)
+data class Line(val chatId: String, val member: String, val joined: Boolean, val id: String, val timestampMs: Long, val otherDevice: Boolean = false)
 
 /** [GroupStatusStore] in memory, with what Room's DAOs do. */
 class MemoryGroupStatusStore : GroupStatusStore {
@@ -437,8 +437,8 @@ class MemoryGroupStatusStore : GroupStatusStore {
         for (i in rows.indices) if (rows[i].destHashHex == memberHex) rows[i] = rows[i].copy(inviteStatus = status)
     }
 
-    override suspend fun memberLine(chatId: String, memberHex: String, joined: Boolean, id: String, timestampMs: Long) {
-        lines[id] = Line(chatId, memberHex, joined, id, timestampMs)
+    override suspend fun memberLine(chatId: String, memberHex: String, joined: Boolean, id: String, timestampMs: Long, otherDevice: Boolean) {
+        lines[id] = Line(chatId, memberHex, joined, id, timestampMs, otherDevice)
     }
 
     override suspend fun allow(memberHex: String) { allowed += memberHex }

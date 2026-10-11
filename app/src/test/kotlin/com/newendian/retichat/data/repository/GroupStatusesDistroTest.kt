@@ -81,6 +81,24 @@ class GroupStatusesDistroTest {
         assertEquals(true, r.receive(accept("bob", to = "frank")))
         assertTrue(id("bob").hashHex in r.store.allowed)
         assertTrue(id("bob").hashHex in r.store.keys)
+        // Alignment decision 3: the sibling's line is "Your other device joined the group", a member's its name's.
+        assertEquals(listOf(true to true), r.store.lines.values.filter { it.member == sibling }.map { it.joined to it.otherDevice })
+        assertEquals(listOf(true to false), r.store.lines.values.filter { it.member == id("bob").hashHex }.map { it.joined to it.otherDevice })
+    }
+
+    @Test
+    fun aSiblingsOwnLeaveReadsYourOtherDeviceLeftAndAMembersLeaveItsName() = runBlocking {
+        val sibling = id("alice").hashHex
+        val r = GroupRig(v, "frank", device = deviceA, siblings = setOf(sibling)).also { it.hold(accepted = true) }
+        assertEquals(true, r.receive(accept("alice", to = "frank", action = Action.LEAVE)))
+        assertEquals(true, r.receive(accept("bob", to = "frank", action = Action.LEAVE)))
+        assertEquals(MemberStatus.LEFT, r.status("alice"))
+        assertEquals(listOf(false to true), r.store.lines.values.filter { it.member == sibling }.map { it.joined to it.otherDevice })
+        assertEquals(listOf(false to false), r.store.lines.values.filter { it.member == id("bob").hashHex }.map { it.joined to it.otherDevice })
+        // In a device group (the user is no distro) nobody is another device of the user.
+        val plain = GroupRig(v, "frank").also { it.hold(accepted = true) }
+        assertEquals(true, plain.receive(accept("alice", to = "frank")))
+        assertFalse(plain.store.lines.values.single().otherDevice)
     }
 
     @Test

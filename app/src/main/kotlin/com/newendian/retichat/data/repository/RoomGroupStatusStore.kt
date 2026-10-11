@@ -36,8 +36,9 @@ class RoomGroupStatusStore(
     override suspend fun setMemberStatus(chatId: String, memberHex: String, status: String) =
         messageDao.setGroupMemberStatus(chatId, memberHex, status)
 
-    override suspend fun memberLine(chatId: String, memberHex: String, joined: Boolean, id: String, timestampMs: Long) {
-        // A system line about the member (name resolved when shown).
+    override suspend fun memberLine(chatId: String, memberHex: String, joined: Boolean, id: String, timestampMs: Long, otherDevice: Boolean) {
+        // A system line about the member (name resolved when shown), or about
+        // another device of the user's ("Your other device …").
         messageDao.upsert(
             MessageEntity(
                 id = id,
@@ -47,7 +48,7 @@ class RoomGroupStatusStore(
                 timestamp = timestampMs,
                 isOutbound = false,
                 state = RetichatBridge.MessageState.DELIVERED,
-                systemKind = SystemText.MEMBER,
+                systemKind = if (otherDevice) SystemText.OTHER_DEVICE else SystemText.MEMBER,
             )
         )
     }

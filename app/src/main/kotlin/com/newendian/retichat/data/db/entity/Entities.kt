@@ -108,6 +108,8 @@ data class MessageEntity(
      * Null for an ordinary message. [com.newendian.retichat.names.SystemText.MEMBER]
      * for a system line about [senderHashHex] ("… joined the group"): the
      * text holds no name, and the member's name is resolved when shown.
+     * [com.newendian.retichat.names.SystemText.OTHER_DEVICE] for one about
+     * another device of the user's ("Your other device joined the group").
      */
     val systemKind: String? = null,
 )
