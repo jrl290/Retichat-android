@@ -55,7 +55,7 @@ class GroupFieldsWiringTest {
         // the id its path read: the repository reads no group entries reading itself.
         assertEquals(13, Regex("fields\\.group\\(GroupEntry\\.").findAll(repo).count())
         assertEquals(0, Regex("fields\\.(direct)?[gG]roupEntries\\(\\)").findAll(repo).count())
-        assertTrue(repo.contains("val route = DeliveryPolicy.directRoute(fields)"))
+        assertTrue(repo.contains("val route = DeliveryPolicy.directRoute(received)"))
     }
 
     @Test

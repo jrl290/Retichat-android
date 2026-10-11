@@ -270,6 +270,12 @@ object DeliveryPolicy {
 
     /** What a message that arrived directly, on the device's own address, is ([directRoute]). */
     sealed class DirectRoute {
+        /**
+         * Refused whole: a map in its fields repeats a key ([LxmfFields.Received.Refused];
+         * RFed SPEC §17.14 "Repeated keys"). Dropped with one log line before anything
+         * else is looked at, never a DM, a group, a transfer or a sent copy.
+         */
+        data class Refused(val why: String) : DirectRoute()
         /** A distro sent copy ([isDistroSentCopy]): dropped with a log line. */
         object SentCopy : DirectRoute()
         /** A distro identity transfer carrying [key] ([distroTransferKey]): offered when the filter lets its sender through. */
@@ -283,16 +289,34 @@ object DeliveryPolicy {
     }
 
     /**
-     * How a message that arrived directly is classified, in this order, as iOS
-     * and the web classify it: a distro sent copy; an identity transfer; then,
-     * by its group id (RFed SPEC §17.14, "On the direct path too"), a group
-     * message, or one refused for a GROUP_ID that is not 32 hex (another
-     * length, not hex, a bin, an int, nil); then a direct message. Here a
-     * distro marker means nothing to the group id
-     * ([LxmfFields.directGroupEntries]): a `rfed.distro.channel` or
-     * `rfed.distro.group` marker beside a GROUP_ID leaves it a group message.
-     * Until 2026-10-11 such a marker made it a direct message on this path,
-     * and a transfer with a malformed GROUP_ID was refused instead of offered.
+     * [directRoute] for fields as a receive path reads them
+     * ([LxmfFields.receive]): a message whose fields repeat a key is
+     * [DirectRoute.Refused], before anything else is looked at.
+     */
+    fun directRoute(received: LxmfFields.Received): DirectRoute = when (received) {
+        is LxmfFields.Received.Refused -> DirectRoute.Refused(received.why)
+        is LxmfFields.Received.Read -> directRoute(received.fields)
+    }
+
+    /**
+     * How a message that arrived directly is classified, in this order: a
+     * distro sent copy; an identity transfer; then, by its group id (RFed SPEC
+     * §17.14, "On the direct path too"), a group message, or one refused for a
+     * GROUP_ID that is not 32 hex (another length, not hex, a bin, an int,
+     * nil); then a direct message. A `rfed.distro.channel` or
+     * `rfed.distro.group` marker means nothing to the group id
+     * ([LxmfFields.directGroupEntries]): beside a GROUP_ID it leaves it a group
+     * message, as on iOS and the web. Until 2026-10-11 such a marker made it a
+     * direct message on this path.
+     *
+     * Not the order iOS (cd2282f) and the web (3a0efa6) use for one case: they
+     * refuse a malformed GROUP_ID before they look at the sent-copy and
+     * transfer markers, so a transfer or a sent copy that also carries a
+     * malformed GROUP_ID is refused there, and is offered (a transfer) or
+     * dropped as a sent copy here. Which order is right is not ruled (RFed SPEC
+     * §17.14, open for James, 2026-10-11); until it is, this order is kept as
+     * it was, and DirectRouteTest pins it so a change is deliberate. (4d337d1
+     * said iOS and the web offer such a transfer; they refuse it.)
      */
     fun directRoute(fields: LxmfFields): DirectRoute {
         if (isDistroSentCopy(fields)) return DirectRoute.SentCopy

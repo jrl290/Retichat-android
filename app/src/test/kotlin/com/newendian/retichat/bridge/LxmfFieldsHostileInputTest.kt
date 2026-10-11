@@ -88,14 +88,61 @@ class LxmfFieldsHostileInputTest {
     }
 
     @Test
-    fun nestingIsCappedSoItCannotOverflowTheStack() {
-        // {0x05: [[[...[]...]]]}: the map is container 1, so 62 one-element
-        // arrays and the empty one inside them reach container 64, the cap
-        // (LXMF's own fields nest 3 deep: map, 0x05 array, [name, data]).
-        val atCap = decode("8105" + "91".repeat(62) + "90")
-        assertTrue(atCap.has(LxmfFields.FIELD_FILE_ATTACHMENTS))
-        assertEquals(0, decode("8105" + "91".repeat(63) + "90").size)
-        // Far deeper than any stack: malformed, not a StackOverflowError.
-        assertEquals(0, decode("8105" + "91".repeat(200_000) + "90").size)
+    fun nestingIsSteppedOverSoItCannotOverflowTheStackOrEmptyTheMap() {
+        // {0x05: [[[...[]...]]], 0x02: 7}: containers below the deepest an accessor
+        // reads (3: map, 0x05 array, [name, data]) are stepped over whole, without
+        // recursion and without a limit, and the rest of the map is read in step.
+        // Until 2026-10-11 a container below 64 made the whole map unreadable.
+        for (depth in listOf(3, 62, 63, 200_000)) {
+            val fields = decode("8205" + "91".repeat(depth) + "90" + "0207")
+            assertEquals("$depth deep", 2, fields.size)
+            assertTrue(fields.has(LxmfFields.FIELD_FILE_ATTACHMENTS))
+            assertTrue(fields.getFileAttachments().isEmpty())
+            assertEquals("$depth deep", 7L, fields.getInt(0x02))
+        }
+        // An attachment pair at its own depth is read, whatever is nested beside it.
+        val pair = "92" + "a161" + "c40101"          // ["a", b"\x01"]
+        val withDeep = decode("8205" + "92" + pair + "91".repeat(1000) + "90" + "0207")
+        assertEquals(1, withDeep.getFileAttachments().size)
+        assertEquals("a", withDeep.getFileAttachments()[0].first)
+    }
+
+    @Test
+    fun aValueSteppedOverIsCheckedAgainstTheBytesLeft() {
+        // Deeper than an accessor reads, so stepped over: each length and count is
+        // checked as the reader checks it, and nothing is allocated.
+        val below = "8105" + "91919191"            // {0x05: [[[[ ... ]]]]}: the fourth array is stepped over
+        for (bad in listOf(
+            "ddffffffff",              // array32 of 2^32-1 elements
+            "dfffffffff",              // map32 of 2^32-1 entries
+            "dc0005",                  // array16 of 5 with nothing there
+            "c6ffffffff",              // bin32 of 2^32-1 bytes
+            "c97fffffff01",            // ext32 of 2^31-1 bytes
+            "d801c6",                  // fixext16 with 1 of its 16 bytes
+            "db00000002a1",            // str32 of 2 with 1 there
+            "cb0000",                  // float64 cut short
+            "92",                      // an array of 2 with none there
+        )) {
+            assertEquals(bad, 0, decode(below + bad).size)
+            var reported: Throwable? = null
+            LxmfFields.receive(hex(below + bad), onFailure = { reported = it })
+            assertTrue("$bad: reported", reported is IllegalArgumentException || reported is java.nio.BufferUnderflowException)
+        }
+        // Every type stepped over in step: the key after them is read.
+        val values = listOf(
+            "00", "ff", "a3616263", "c0", "c1", "c2", "c3",
+            "c40100", "c5000100", "c60000000100",                         // bin 8, 16, 32 of one byte
+            "c7010000", "c800010000", "c9000000010000",                   // ext 8, 16, 32 of one byte
+            "ca00000000", "cb0000000000000000",                           // float 32, 64
+            "cc01", "cd0001", "ce00000001", "cf0000000000000001",         // uint 8..64
+            "d001", "d10001", "d200000001", "d30000000000000001",         // int 8..64
+            "d40100", "d5010000", "d601" + "00".repeat(4), "d701" + "00".repeat(8), "d801" + "00".repeat(16),
+            "d90161", "da000161", "db0000000161",                         // str 8, 16, 32
+            "dc0000", "dd00000000", "de0000", "df00000000", "80", "90",   // empty containers
+            "920102", "810102", "dc0002" + "0102", "de0001" + "0102",    // and ones holding values
+        )
+        val stepped = "dc" + "%04x".format(values.size) + values.joinToString("")
+        val ok = decode("8205" + "919191" + stepped + "0207")
+        assertEquals(7L, ok.getInt(0x02))
     }
 }

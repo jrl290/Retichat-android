@@ -139,6 +139,23 @@ class LxmfFields private constructor(
         }
     }
 
+    /** What a receive path makes of a message's fields map ([receive]). */
+    sealed class Received {
+        /**
+         * The fields as read: [EMPTY] when there were none, or when they could
+         * not be read for any reason but a repeated key (then reported to
+         * `onFailure`).
+         */
+        data class Read(val fields: LxmfFields) : Received()
+
+        /**
+         * A map in them repeats a key ([RepeatedKeyException], [why] says
+         * where): the message is refused whole, with one log line, never shown,
+         * stored or applied (RFed SPEC §17.14 "Repeated keys").
+         */
+        data class Refused(val why: String) : Received()
+    }
+
     companion object {
         /** Standard LXMF field IDs (for reference). */
         const val FIELD_EMBEDDED_LXMS    = 0x01
@@ -226,15 +243,22 @@ class LxmfFields private constructor(
         val EMPTY = LxmfFields(emptyMap())
 
         /**
-         * Decode a msgpack-encoded fields map from raw bytes.
-         * Returns [EMPTY] on null/empty input or parse failure.
+         * Read a msgpack-encoded fields map from raw bytes, throwing on bytes
+         * that cannot be read: [RepeatedKeyException] for a map that repeats a
+         * key, another Exception for anything else malformed. Null or empty
+         * input, or a value that is not a map, is [EMPTY].
          *
          * The bytes are the sender's (a distro message's map as packed, a
          * direct message's re-encoded by rmpv, which keeps ext values), so no
-         * header is trusted: ext values are stepped over whole, every length
-         * and count is checked against the bytes left before anything is
-         * read or allocated, and nesting stops at [MAX_DEPTH]. Malformed
-         * bytes throw an Exception, caught here.
+         * header is trusted: ext values are stepped over whole, and every
+         * length and count is checked against the bytes left before anything
+         * is read or allocated. Containers are read down to [KEPT_DEPTH], the
+         * deepest any accessor looks; a container below that is stepped over
+         * whole, without recursion and without a depth limit, as iOS's
+         * `skipValue` steps over it, and reads as no value. Until 2026-10-11 a
+         * container nested deeper than 64 anywhere, in a field nothing reads,
+         * made the whole map unreadable, so a group message was filed as a
+         * fieldless DM.
          *
          * A map that repeats a key is never read here (RFed SPEC §17.14
          * "Repeated keys"; James, 2026-10-11: parity with Python LXMF). The
@@ -242,66 +266,74 @@ class LxmfFields private constructor(
          * before the app is given any of its bytes: the router's unpack on the
          * direct path, the distro unwrap, the group receipt and the channel
          * codec (LXMF-rust `msgpack_keys`, with Python's key equality). This
-         * reader, which compares only the integer keys it keeps, never picks
-         * one entry of a repeated key either: a map, at any depth, that
-         * repeats one is malformed, so [decode] gives [EMPTY]. From 2026-10-11
-         * (5f9edff's copy) to this change it kept the first entry, and 0xFB-0xFD
-         * of the fields map from their last; before that the last of every key.
-         * An Error (OutOfMemoryError,
-         * StackOverflowError) is not, and would kill the app with the
-         * message unsaved: a stranger's distro message did exactly that
-         * until 2026-09-29. Receive paths call [decodeOrEmpty], which
-         * catches that too.
+         * reader is the backstop for a native library built before that
+         * (LXMF-rust 16a9902): a map it reads (down to [KEPT_DEPTH]) that
+         * repeats an integer key, the keys it compares, throws
+         * [RepeatedKeyException], and a receive path ([receive]) refuses the
+         * message whole for it. It never picks one entry of a repeated key.
+         * From 2026-10-11 (5f9edff's copy) to 4d337d1 it kept the first entry,
+         * and 0xFB-0xFD of the fields map from their last; before that the last
+         * of every key. From 4d337d1 to this change a repeat gave [EMPTY], and
+         * the message went on as a fieldless DM.
          */
-        fun decode(raw: ByteArray?): LxmfFields {
+        fun read(raw: ByteArray?): LxmfFields {
             if (raw == null || raw.isEmpty()) return EMPTY
-            return try {
-                val buf = ByteBuffer.wrap(raw)
-                val map = readMap(buf, 1) ?: return EMPTY
-                LxmfFields(map)
-            } catch (e: Exception) {
-                EMPTY
-            }
+            val map = readMap(ByteBuffer.wrap(raw), 1) ?: return EMPTY
+            return LxmfFields(map)
         }
 
         /**
-         * [decode] as a receive path calls it (ChatRepository's direct and
-         * distro paths): the backstop behind the reader's own checks. Anything
-         * the decoder throws, an Error included, is no fields, reported to
-         * [onFailure]: the message is still stored, without its attachments.
-         * Before 2026-09-29 a stranger's map made decode throw
-         * OutOfMemoryError out of RfedDistroClient.handleBlob after the copy
-         * was marked seen, so the text was never stored and a /rfed/pull page
-         * stopped there. [decoder] is [decode]; it is a parameter so a test
-         * can make it throw.
+         * [read], with [EMPTY] for bytes it cannot read, a repeated key
+         * included. Not for a receive path: a message's fields are read with
+         * [receive], which refuses a repeated key and reports the rest.
          */
-        fun decodeOrEmpty(
+        fun decode(raw: ByteArray?): LxmfFields = try {
+            read(raw)
+        } catch (e: Exception) {
+            EMPTY
+        }
+
+        /**
+         * A message's fields as every receive path reads them (ChatRepository's
+         * direct and distro paths, a `status` element): [read] behind a
+         * backstop. A repeated key is [Received.Refused], and the caller drops
+         * the message with one log line. Anything else the decoder throws, an
+         * Error included, is reported to [onFailure] and read as no fields: the
+         * message is still stored, without its attachments. Before 2026-09-29 a
+         * stranger's map made the decoder throw OutOfMemoryError out of
+         * RfedDistroClient.handleBlob after the copy was marked seen, so the text
+         * was never stored and a /rfed/pull page stopped there. Until 2026-10-11
+         * the decoder caught its own exceptions, so [onFailure] never heard of
+         * them, and a repeated key read as no fields. [decoder] is [read]; it is
+         * a parameter so a test can make it throw.
+         */
+        fun receive(
             raw: ByteArray?,
-            decoder: (ByteArray?) -> LxmfFields = { decode(it) },
+            decoder: (ByteArray?) -> LxmfFields = { read(it) },
             onFailure: (Throwable) -> Unit = {},
-        ): LxmfFields = try {
-            decoder(raw)
+        ): Received = try {
+            Received.Read(decoder(raw))
+        } catch (e: RepeatedKeyException) {
+            Received.Refused(e.message ?: "a map repeats a key")
         } catch (t: Throwable) {
             onFailure(t)
-            EMPTY
+            Received.Read(EMPTY)
         }
 
         // ---- Minimal msgpack reader (supports the types LXMF uses) ----
 
         /**
-         * Containers nested deeper than this (the fields map is 1) make the
-         * map malformed. LXMF's own fields nest 3 deep (map, 0x05 array,
-         * [name, data]); the reader recurses once per level.
+         * The deepest container an accessor reads (the fields map is 1): the
+         * Retichat field's map is 2 and its key 10's array 3; the attachments
+         * array (0x05) is 2 and each [name, data] pair 3. A container below
+         * this is stepped over whole ([skipValue]) and reads as null, so the
+         * reader recurses at most this deep, whatever the bytes nest.
          */
-        private const val MAX_DEPTH = 64
+        private const val KEPT_DEPTH = 3
 
         /** [n] more bytes are there. A 32-bit length read signed can be negative. */
         private fun need(buf: ByteBuffer, n: Long) {
             if (n < 0 || n > buf.remaining()) throw IllegalArgumentException("$n bytes wanted, ${buf.remaining()} left")
-        }
-
-        private fun enter(depth: Int) {
-            if (depth > MAX_DEPTH) throw IllegalArgumentException("nested deeper than $MAX_DEPTH")
         }
 
         private fun readMap(buf: ByteBuffer, depth: Int): Map<Int, Any?>? {
@@ -313,7 +345,6 @@ class LxmfFields private constructor(
                 b == 0xDF -> buf.int                       // map 32
                 else -> return null
             }
-            enter(depth)
             need(buf, 2L * count)  // a key and a value of a byte at least
             val result = LinkedHashMap<Int, Any?>()
             repeat(count) {
@@ -327,8 +358,8 @@ class LxmfFields private constructor(
                     is Long -> if (key in 0L..Int.MAX_VALUE.toLong()) key.toInt() else return@repeat
                     else -> return@repeat
                 }
-                // A repeated key: the map is malformed, never read from one of its entries ([decode]).
-                if (intKey in result) throw IllegalArgumentException("a map at depth $depth repeats the key $intKey")
+                // A repeated key: the message is refused whole, never read from one of its entries ([read], [receive]).
+                if (intKey in result) throw RepeatedKeyException("a map at depth $depth repeats the key $intKey")
                 result[intKey] = value
             }
             return result
@@ -337,6 +368,13 @@ class LxmfFields private constructor(
         private fun readValue(buf: ByteBuffer, depth: Int): Any? {
             if (!buf.hasRemaining()) return null
             val b = buf.get().toInt() and 0xFF
+            // A map or an array below the deepest container an accessor reads:
+            // stepped over whole, from its own first byte, and no value.
+            if (depth > KEPT_DEPTH && isContainer(b)) {
+                buf.position(buf.position() - 1)
+                skipValue(buf)
+                return null
+            }
             return when {
                 // positive fixint (0x00..0x7F)
                 b in 0x00..0x7F -> b.toLong()
@@ -440,14 +478,72 @@ class LxmfFields private constructor(
         }
 
         private fun readArray(buf: ByteBuffer, count: Int, depth: Int): List<Any?> {
-            enter(depth)
             need(buf, count.toLong())  // a byte per element at least
             val result = ArrayList<Any?>()
             repeat(count) { result.add(readValue(buf, depth + 1)) }
             return result
         }
+
+        /** A fixmap, fixarray, array 16/32 or map 16/32 header byte. */
+        private fun isContainer(b: Int): Boolean = b in 0x80..0x9F || b in 0xDC..0xDF
+
+        /** A 32-bit length or count, unsigned. */
+        private fun u32(buf: ByteBuffer): Long = buf.int.toLong() and 0xFFFFFFFFL
+
+        /** Step over [n] bytes, checked against the bytes left. */
+        private fun skipBytes(buf: ByteBuffer, n: Long) {
+            need(buf, n)
+            buf.position(buf.position() + n.toInt())
+        }
+
+        /**
+         * Step over exactly one value of any type, containers included, without
+         * recursion and without a depth limit (as iOS LxmfFields.swift's
+         * `skipValue`): [pending] counts the values still to step over, and a
+         * container adds its elements (a map two per entry). Each value takes a
+         * byte at least, so more pending than bytes left is malformed, and
+         * nothing is allocated. Maps stepped over are not read, so their keys
+         * are not compared here; the native layer refuses a repeat in them.
+         */
+        private fun skipValue(buf: ByteBuffer) {
+            var pending = 1L
+            while (pending > 0) {
+                pending--
+                need(buf, 1)
+                val b = buf.get().toInt() and 0xFF
+                when {
+                    b <= 0x7F || b >= 0xE0 -> {}                          // fixints
+                    b in 0x80..0x8F -> pending += 2L * (b and 0x0F)       // fixmap
+                    b in 0x90..0x9F -> pending += (b and 0x0F).toLong()   // fixarray
+                    b in 0xA0..0xBF -> skipBytes(buf, (b and 0x1F).toLong()) // fixstr
+                    b in 0xC0..0xC3 -> {}                                 // nil, 0xC1, false, true
+                    b == 0xC4 || b == 0xD9 -> { need(buf, 1); skipBytes(buf, (buf.get().toInt() and 0xFF).toLong()) }
+                    b == 0xC5 || b == 0xDA -> { need(buf, 2); skipBytes(buf, (buf.short.toInt() and 0xFFFF).toLong()) }
+                    b == 0xC6 || b == 0xDB -> { need(buf, 4); skipBytes(buf, u32(buf)) }
+                    b == 0xC7 -> { need(buf, 1); skipBytes(buf, 1L + (buf.get().toInt() and 0xFF)) }   // ext 8
+                    b == 0xC8 -> { need(buf, 2); skipBytes(buf, 1L + (buf.short.toInt() and 0xFFFF)) } // ext 16
+                    b == 0xC9 -> { need(buf, 4); skipBytes(buf, 1L + u32(buf)) }                       // ext 32
+                    b == 0xCA || b == 0xCE || b == 0xD2 -> skipBytes(buf, 4)
+                    b == 0xCB || b == 0xCF || b == 0xD3 -> skipBytes(buf, 8)
+                    b == 0xCC || b == 0xD0 -> skipBytes(buf, 1)
+                    b == 0xCD || b == 0xD1 -> skipBytes(buf, 2)
+                    b in 0xD4..0xD8 -> skipBytes(buf, 1L + (1L shl (b - 0xD4))) // fixext
+                    b == 0xDC -> { need(buf, 2); pending += (buf.short.toInt() and 0xFFFF).toLong() }
+                    b == 0xDD -> { need(buf, 4); pending += u32(buf) }
+                    b == 0xDE -> { need(buf, 2); pending += 2L * (buf.short.toInt() and 0xFFFF) }
+                    b == 0xDF -> { need(buf, 4); pending += 2L * u32(buf) }
+                }
+                need(buf, pending)
+            }
+        }
     }
 }
+
+/**
+ * A map the fields reader reads repeats a key ([LxmfFields.read]): the
+ * message is refused whole (RFed SPEC §17.14 "Repeated keys").
+ */
+class RepeatedKeyException(message: String) : IllegalArgumentException(message)
 
 /**
  * [LxmfFields.groupEntries]: the keys LXMF-rust's distro unwrap reports for

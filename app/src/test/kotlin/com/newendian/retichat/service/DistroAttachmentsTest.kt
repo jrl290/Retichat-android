@@ -53,8 +53,15 @@ class DistroAttachmentsTest {
     @Suppress("UNCHECKED_CAST")
     private fun obj(json: String) = MiniJson.parse(json) as Map<String, Any?>
 
-    /** RfedDistroClient.handleBlob's read: `o.opt("fields")` → fieldsBytes → the repository's LxmfFields.decodeOrEmpty. */
-    private fun fieldsOf(json: String): LxmfFields = LxmfFields.decodeOrEmpty(DistroCodec.fieldsBytes(obj(json)["fields"]))
+    /** RfedDistroClient.handleBlob's read: `o.opt("fields")` → fieldsBytes → the repository's LxmfFields.receive. */
+    private fun fieldsOf(json: String): LxmfFields = read(DistroCodec.fieldsBytes(obj(json)["fields"]))
+
+    /** [LxmfFields.receive]'s fields, as the repository takes them when nothing is refused. */
+    private fun read(
+        raw: ByteArray?,
+        decoder: (ByteArray?) -> LxmfFields = { LxmfFields.read(it) },
+        onFailure: (Throwable) -> Unit = {},
+    ): LxmfFields = (LxmfFields.receive(raw, decoder, onFailure) as LxmfFields.Received.Read).fields
 
     @Test
     fun aPhotoSentToTheDistroKeepsItsAttachment() {
@@ -123,7 +130,7 @@ class DistroAttachmentsTest {
         )) {
             // Never throws: RfedDistroClient still hands the message on.
             val raw = DistroCodec.fieldsBytes(bad)
-            assertTrue("'${bad.take(24)}' must give no attachments", LxmfFields.decodeOrEmpty(raw).getFileAttachments().isEmpty())
+            assertTrue("'${bad.take(24)}' must give no attachments", read(raw).getFileAttachments().isEmpty())
         }
         // Not base64 at all is null, which the client logs as unreadable.
         assertNull(DistroCodec.fieldsBytes("not base64!"))
@@ -163,15 +170,15 @@ class DistroAttachmentsTest {
             IllegalStateException("malformed"),
         )) {
             var reported: Throwable? = null
-            val fields = LxmfFields.decodeOrEmpty(raw, decoder = { throw error }, onFailure = { reported = it })
+            val fields = read(raw, decoder = { throw error }, onFailure = { reported = it })
             assertEquals(error.toString(), 0, fields.size)
             assertTrue(fields.getFileAttachments().isEmpty())
             // Said, not swallowed: the repository logs it.
             assertEquals(error, reported)
         }
-        // With the real decoder it is decode, and nothing is reported.
+        // With the real decoder it is read, and nothing is reported.
         var reported: Throwable? = null
-        assertEquals(1, LxmfFields.decodeOrEmpty(raw, onFailure = { reported = it }).getFileAttachments().size)
+        assertEquals(1, read(raw, onFailure = { reported = it }).getFileAttachments().size)
         assertNull(reported)
     }
 
@@ -222,7 +229,7 @@ class DistroAttachmentsTest {
         // Required, no default: a caller can not forget the fields again.
         assertTrue(Regex("timestamp: Double,\\s*fieldsRaw: ByteArray\\?,\\s*nameField").containsMatchIn(received))
         // Through the backstop: an Error from the decoder costs the attachments, not the message.
-        assertTrue(received.contains("val fields = LxmfFields.decodeOrEmpty(fieldsRaw, onFailure = {"))
+        assertTrue(received.contains("val fields = when (val received = LxmfFields.receive(fieldsRaw, onFailure = {"))
         assertTrue(received.contains("handleDirectMessage(msgId, srcHash, srcHex, content, timestamp, fields)"))
         assertFalse(received.contains("ByteArray(0)"))
         assertFalse(received.contains("LxmfFields.EMPTY"))
@@ -230,7 +237,7 @@ class DistroAttachmentsTest {
         assertTrue(body(repo, "private suspend fun handleDirectMessage(").contains("saveInboundAttachments(msgId, fields)"))
         // The direct path decodes the same sender-controlled map through the
         // same backstop, and nothing in the repository calls the bare decoder.
-        assertTrue(body(repo, "fun onMessageReceived(").contains("val fields = LxmfFields.decodeOrEmpty(fieldsRaw, onFailure = {"))
+        assertTrue(body(repo, "fun onMessageReceived(").contains("val received = LxmfFields.receive(fieldsRaw, onFailure = {"))
         assertFalse(repo.contains("LxmfFields.decode("))
         // The sent copy stays text only.
         assertTrue(repo.contains("fun onDistroSentCopy(recipientHex: String, title: String, content: String, timestamp: Double)"))

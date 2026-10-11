@@ -21,9 +21,10 @@ import java.io.File
  * skipped, a bin GROUP_ID that is no id, a distro marker that makes a message
  * no group message on the distro path and means nothing on the direct path
  * (RFed SPEC §17.14); a map that repeats a key never read from one of its
- * entries (RFed SPEC §17.14 "Repeated keys", James, 2026-10-11: parity with
- * Python LXMF; the native layer refuses such a message whole before the app
- * sees it, pinned by the JNI crate's test); and the invite parser's comma
+ * entries, and a receive path's read of it a refusal (RFed SPEC §17.14
+ * "Repeated keys", James, 2026-10-11: parity with Python LXMF; the native
+ * layer refuses such a message whole before the app sees it, pinned by the
+ * JNI crate's test); and the invite parser's comma
  * split (`invite_members`). From 5f9edff's copy to 16a9902's the reader kept
  * the first entry of a repeated key and 0xFB from its last; before that the
  * last of every key.
@@ -145,6 +146,9 @@ class GroupEntryVectorsTest {
         // it reads no fields at all rather than one entry of the key.
         for (vector in list("refused")) {
             assertSame(vector["name"].toString(), LxmfFields.EMPTY, fields(vector))
+            // A receive path's read is a refusal: the message is dropped, never a DM (DirectRouteTest).
+            val received = LxmfFields.receive(DistroCodec.hexToBytes(vector["fields_hex"] as String)!!)
+            assertTrue(vector["name"].toString(), received is LxmfFields.Received.Refused)
         }
         val jni = File("../rust/retichat-jni/src/group_status.rs").readText()
         val test = jni.substringAfter("fn the_unwrap_and_the_receipt_refuse_a_message_that_repeats_a_key()")
@@ -153,7 +157,7 @@ class GroupEntryVectorsTest {
     }
 
     @Test
-    fun aMapThatRepeatsAKeyAtAnyDepthIsNeverReadFromOneOfItsEntries() {
+    fun aMapTheReaderReadsThatRepeatsAKeyIsNeverReadFromOneOfItsEntries() {
         val a = "a".repeat(32)
         val b = "b".repeat(32)
         fun str(s: String) = byteArrayOf(0xD9.toByte(), s.length.toByte()) + s.toByteArray()
@@ -172,6 +176,13 @@ class GroupEntryVectorsTest {
         // [0x09: [{1: 7, 1: 8}]]: a map in an array.
         val inArray = byteArrayOf(0x81.toByte(), 0x09, 0x91.toByte(), 0x82.toByte(), 0x01, 0x07, 0x01, 0x08)
         assertSame(LxmfFields.EMPTY, LxmfFields.decode(inArray))
+        for (bytes in listOf(top, custom, nested, inArray)) {
+            assertTrue(LxmfFields.receive(bytes) is LxmfFields.Received.Refused)
+        }
+        // [0x09: [[{1: 7, 1: 8}]]]: a map below the deepest container an accessor reads is
+        // stepped over, not read, so its keys are not compared here; the native layer refuses it.
+        val below = byteArrayOf(0x81.toByte(), 0x09, 0x91.toByte(), 0x91.toByte(), 0x82.toByte(), 0x01, 0x07, 0x01, 0x08)
+        assertEquals(1, LxmfFields.decode(below).size)
         // The same entries without the repeat are read.
         val once = byteArrayOf(0x82.toByte()) +
             byteArrayOf(0xCC.toByte(), 0xA0.toByte()) + str(a) + byteArrayOf(0xCC.toByte(), 0xFB.toByte(), 0xA1.toByte(), 'x'.code.toByte())
@@ -188,7 +199,7 @@ class GroupEntryVectorsTest {
         assertFalse(statuses.contains("fields.group(GroupEntry.ID)"))
         // The direct path classifies through DeliveryPolicy.directRoute; the group handler takes the
         // id its path read and never reads it again (the distro reading would drop a marker's).
-        assertTrue(repo.contains("val route = DeliveryPolicy.directRoute(fields)"))
+        assertTrue(repo.contains("val route = DeliveryPolicy.directRoute(received)"))
         assertFalse(repo.contains("fields.groupEntries()"))
         assertTrue(repo.contains("handleGroupMessage(msgId, groupId, srcHex,"))
         assertTrue(repo.contains("handleGroupMessage(hash, groupId, srcHex,"))

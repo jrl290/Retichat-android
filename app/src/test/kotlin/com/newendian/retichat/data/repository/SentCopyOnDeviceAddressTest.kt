@@ -42,7 +42,7 @@ class SentCopyOnDeviceAddressTest {
         val received = repo.substring(start, repo.indexOf("\n    fun onDistroMessageReceived(", start))
         // DeliveryPolicy.directRoute's first case (DirectRouteTest), acted on before anything else.
         val drop = received.indexOf("DeliveryPolicy.DirectRoute.SentCopy -> {")
-        assertTrue(drop > received.indexOf("val route = DeliveryPolicy.directRoute(fields)"))
+        assertTrue(drop > received.indexOf("val route = DeliveryPolicy.directRoute(received)"))
         // Its block returns before the next case.
         val block = received.substring(drop, received.indexOf("DeliveryPolicy.DirectRoute.BadGroupId -> {", drop))
         assertTrue(block.contains("                return\n            }"))

@@ -1509,15 +1509,21 @@ class ChatRepository(
         senderKey: ByteArray? = null,
         packed: ByteArray? = null,
     ) {
-        val fields = LxmfFields.decodeOrEmpty(fieldsRaw, onFailure = {
-            Log.w(TAG, "onMessageReceived: fields from ${srcHash.toHex().take(8)} unreadable (${it::class.java.simpleName}) — storing the message without them")
+        val received = LxmfFields.receive(fieldsRaw, onFailure = {
+            Log.w(TAG, "onMessageReceived: fields from ${srcHash.toHex().take(8)} unreadable (${it::class.java.simpleName}: ${it.message}) — storing the message without them")
         })
+        // What it is (DeliveryPolicy.directRoute). A message whose payload repeats a key
+        // is refused by the router whole, with its one log line, and never gets here
+        // (RFed SPEC §17.14 "Repeated keys"); one that does all the same (a native
+        // library built before LXMF-rust 16a9902) is refused here, never a DM.
+        val route = DeliveryPolicy.directRoute(received)
+        if (route is DeliveryPolicy.DirectRoute.Refused) {
+            Log.w(TAG, "onMessageReceived: REFUSED the message from ${srcHash.toHex().take(8)} whole: ${route.why} (RFed SPEC §17.14 \"Repeated keys\")")
+            return
+        }
+        val fields = (received as? LxmfFields.Received.Read)?.fields ?: return
         // Field 0xD1, decoded by the one Rust decoder (bin or str; §3).
         val nameField = NameField.fromTrailer(RetichatBridge.displayNameDecode(fieldsRaw))
-        // What it is (DeliveryPolicy.directRoute, the order iOS and the web use). A
-        // message whose payload repeats a key never gets here: the router refused it
-        // whole, with its one log line (RFed SPEC §17.14 "Repeated keys").
-        val route = DeliveryPolicy.directRoute(fields)
         val groupId = (route as? DeliveryPolicy.DirectRoute.Group)?.groupId
         Log.i(TAG, "onMessageReceived: src=${srcHash.toHex().take(16)}, groupId=$groupId, content='${content.take(40)}'")
         when (route) {
@@ -1633,9 +1639,17 @@ class ChatRepository(
     ) {
         val srcHex = srcHash.toHex()
         val msgId = DistroCodec.messageId(srcHex, timestamp, content)
-        val fields = LxmfFields.decodeOrEmpty(fieldsRaw, onFailure = {
-            Log.w(TAG, "onDistroMessageReceived: fields from ${srcHex.take(8)} unreadable (${it::class.java.simpleName}) — storing the message without its attachments")
-        })
+        val fields = when (val received = LxmfFields.receive(fieldsRaw, onFailure = {
+            Log.w(TAG, "onDistroMessageReceived: fields from ${srcHex.take(8)} unreadable (${it::class.java.simpleName}: ${it.message}) — storing the message without its attachments")
+        })) {
+            // The distro unwrap refuses it first (RFed SPEC §17.14 "Repeated keys"); here
+            // only from a native library built before LXMF-rust 16a9902. Never a DM.
+            is LxmfFields.Received.Refused -> {
+                Log.w(TAG, "onDistroMessageReceived: REFUSED the message from ${srcHex.take(8)} whole: ${received.why} (RFed SPEC §17.14 \"Repeated keys\")")
+                return
+            }
+            is LxmfFields.Received.Read -> received.fields
+        }
         Log.i(TAG, "onDistroMessageReceived: src=${srcHex.take(16)} via=distro content='${content.take(40)}' fields=${fieldsRaw?.let { "${it.size}B" } ?: "none"} attachments=${fields.getFileAttachments().size}")
         // No privacy filter: mail to the distro is mail to this person (iOS
         // storeIncomingDirect via distro fan-out does not filter either).
@@ -1751,9 +1765,16 @@ class ChatRepository(
             Log.w(TAG, "distro group message ${hash.take(12)} DROPPED: no distro loaded")
             return@withContext DistroGroupOutcome.DROPPED
         }
-        val fields = LxmfFields.decodeOrEmpty(fieldsRaw, onFailure = {
-            Log.w(TAG, "onDistroGroupMessage: fields from ${srcHex.take(8)} unreadable (${it::class.java.simpleName})")
-        })
+        val fields = when (val received = LxmfFields.receive(fieldsRaw, onFailure = {
+            Log.w(TAG, "onDistroGroupMessage: fields from ${srcHex.take(8)} unreadable (${it::class.java.simpleName}: ${it.message})")
+        })) {
+            // The distro unwrap refuses it first; here only from an older native library.
+            is LxmfFields.Received.Refused -> {
+                Log.w(TAG, "distro group message ${hash.take(12)} from ${srcHex.take(8)} REFUSED whole: ${received.why} (RFed SPEC §17.14 \"Repeated keys\")")
+                return@withContext DistroGroupOutcome.DROPPED
+            }
+            is LxmfFields.Received.Read -> received.fields
+        }
         val signature = unverifiedReason
         val action = fields.group(GroupEntry.ACTION)
         val what = "group ${action ?: "message"} ${hash.take(12)} for ${groupId.take(8)} from ${srcHex.take(8)} via the distro"

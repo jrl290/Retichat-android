@@ -328,7 +328,11 @@ class GroupStatusEngine(
             is GroupUnpack.Unpacked -> u.message
             GroupUnpack.Refused, GroupUnpack.NotLxmf -> return u.toString()
         }
-        val fields = LxmfFields.decodeOrEmpty(unpacked.fieldsRaw)
+        // Refused by the receipt first; here only from a native library built before LXMF-rust 16a9902.
+        val fields = when (val received = LxmfFields.receive(unpacked.fieldsRaw)) {
+            is LxmfFields.Received.Refused -> return "refused whole: ${received.why}"
+            is LxmfFields.Received.Read -> received.fields
+        }
         // Read as a message that arrived directly is read (RFed SPEC §17.14).
         val about = fields.directGroupEntries().groupId ?: return "no group id"
         if (about != groupId) return "about another group"

@@ -393,7 +393,7 @@ class FakeGroupNative : GroupNative {
         val signed = destination + source + core + hash
         val timestamp = java.nio.ByteBuffer.wrap(payload.copyOfRange(elements[0].first + 1, elements[0].first + 9)).double
         val fieldsRaw = payload.copyOfRange(elements[3].first, elements[3].last + 1)
-        val fields = LxmfFields.decodeOrEmpty(fieldsRaw)
+        val fields = (LxmfFields.receive(fieldsRaw) as? LxmfFields.Received.Read)?.fields ?: return null
 
         val sourceHex = source.toHex()
         var verdict = held[sourceHex]?.let { if (TestLxmf.verify(it, signature, signed)) Signature.VALIDATED else Signature.INVALID }
@@ -556,7 +556,7 @@ class GroupRig(
     suspend fun receive(packed: ByteArray): Boolean? {
         val receipt = native.receipt(packed) ?: return null
         val u = receipt.unpacked
-        val fields = LxmfFields.decodeOrEmpty(u.fieldsRaw)
+        val fields = (LxmfFields.receive(u.fieldsRaw) as? LxmfFields.Received.Read)?.fields ?: return null
         val groupId = fields.group(GroupEntry.ID) ?: return null
         val action = fields.group(GroupEntry.ACTION)
         val src = u.source.toHex()
