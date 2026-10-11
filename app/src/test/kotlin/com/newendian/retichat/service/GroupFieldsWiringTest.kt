@@ -47,9 +47,12 @@ class GroupFieldsWiringTest {
         // No group entry is read from a field number directly.
         assertEquals(emptySet<String>(), sitesOf(Regex("LxmfFields\\.GROUP_(?!ENTRIES_IN_RETICHAT_FIELD)")))
         val repo = sources.getValue("data/repository/ChatRepository.kt")
-        // 15: the distro path's group messages (GROUPS-DISTRO-DESIGN.md §6.1, §6.3) read the same entries the same way
-        // (16 until the review of 8d330c4 moved that path's decision into DistroGroupAdmission, which reads GROUP_SENDER once).
-        assertEquals(15, Regex("fields\\.group\\(GroupEntry\\.").findAll(repo).count())
+        // 13: the distro path's group messages (GROUPS-DISTRO-DESIGN.md §6.1, §6.3) read the same entries the same way
+        // (16 until the review of 8d330c4 moved that path's decision into DistroGroupAdmission, which reads GROUP_SENDER once;
+        // 15 until 2026-10-11, when the direct path and the group branch took GROUP_ID from the one reading of
+        // has_group_id / group_id, LxmfFields.groupEntries, which reads it through group() too).
+        assertEquals(13, Regex("fields\\.group\\(GroupEntry\\.").findAll(repo).count())
+        assertEquals(2, Regex("fields\\.groupEntries\\(\\)").findAll(repo).count())
     }
 
     @Test

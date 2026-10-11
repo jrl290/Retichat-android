@@ -323,7 +323,7 @@ class GroupStatusEngine(
         }
         val unpacked = native.unpack(element) ?: return "not an LXMF message"
         val fields = LxmfFields.decodeOrEmpty(unpacked.fieldsRaw)
-        val about = fields.group(GroupEntry.ID) ?: return "no group id"
+        val about = fields.groupEntries().groupId ?: return "no group id"
         if (about != groupId) return "about another group"
         val action = fields.group(GroupEntry.ACTION)
         if (action != GroupChatManager.Action.ACCEPT && action != GroupChatManager.Action.LEAVE) {

@@ -1514,7 +1514,10 @@ class ChatRepository(
         })
         // Field 0xD1, decoded by the one Rust decoder (bin or str; §3).
         val nameField = NameField.fromTrailer(RetichatBridge.displayNameDecode(fieldsRaw))
-        val groupId = fields.group(GroupEntry.ID)
+        // The group entries as every path reads them (RFed SPEC §17.14: a repeated
+        // key from its first entry, a distro marker never a group message).
+        val entries = fields.groupEntries()
+        val groupId = entries.groupId
         Log.i(TAG, "onMessageReceived: src=${srcHash.toHex().take(16)}, groupId=$groupId, content='${content.take(40)}'")
         // A distro identity transfer from another of our devices (RFed SPEC §17.9):
         // LXMF's custom pair with our type string; not a message to display.
@@ -1527,6 +1530,13 @@ class ChatRepository(
         // incoming one. Until 2026-10-05 it went on as a DM from the distro.
         if (DeliveryPolicy.isDistroSentCopy(fields)) {
             Log.i(TAG, "onMessageReceived: DROPPED distro sent-copy marker outside fan-out src=${srcHash.toHex().take(8)}")
+            return
+        }
+        // RFed SPEC §17.14 step 2, on this path as on the distro's: a GROUP_ID of any
+        // type in either form makes it a group message, and one that is not 32 hex is
+        // dropped here, never shown as a DM. Until 2026-10-11 a bin id went on as one.
+        if (entries.hasGroupId && groupId == null) {
+            Log.i(TAG, "onMessageReceived: DROPPED group message from ${srcHash.toHex().take(8)}: its group id is not 32 hex characters")
             return
         }
         val signature = Signature.reason(signatureValid, unverifiedReason)
@@ -2267,7 +2277,7 @@ class ChatRepository(
         packed: ByteArray?,
         viaDistro: Boolean,
     ): Boolean {
-        val groupId = fields.group(GroupEntry.ID) ?: run {
+        val groupId = fields.groupEntries().groupId ?: run {
             Log.w(TAG, "group message ${msgId.take(12)} from ${srcHex.take(8)} DROPPED: no group id")
             return false
         }

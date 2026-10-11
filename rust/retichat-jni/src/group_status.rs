@@ -1008,4 +1008,64 @@ mod distro_unwrap_tests {
             assert_eq!(!out["group_sync"].is_null(), expected["group_sync"].as_bool().unwrap(), "{name}: group_sync");
         }
     }
+
+    /// Every op and variant (D's own G, as the Python reference packed it) through the unwrap the
+    /// app calls: its `group_sync` is the vector's reading, key for key, which DistroGroupSync.read
+    /// then takes (DistroGroupSyncTest); a G is never a group message. The variants hold the
+    /// repeated 0xFB (`leave_0xfb_twice_the_last_the_marker`) and the members csv split on the code
+    /// point ',' (`accept_members_combining_mark_after_a_comma`).
+    #[test]
+    fn the_distro_unwrap_reads_each_op_and_variant_as_the_vectors_do() {
+        let v = vectors();
+        let mut d = distro(&v);
+        let variants = v["variants"].as_array().unwrap();
+        assert_eq!((v["ops"].as_array().unwrap().len(), variants.len()), (8, 14));
+        for name in ["leave_0xfb_twice_the_last_the_marker", "accept_members_combining_mark_after_a_comma"] {
+            assert!(variants.iter().any(|e| e["name"] == name), "{name} is in the vectors");
+        }
+        for set in ["ops", "variants"] {
+            for vector in v[set].as_array().unwrap() {
+                let name = vector["name"].as_str().unwrap();
+                let packed = unhex(vector["packed_hex"].as_str().unwrap());
+                let blob = [packed[..16].to_vec(), d.encrypt(&packed[16..]).unwrap()].concat();
+                let out: Json = serde_json::from_str(&distro_unwrap_json(&mut d, &blob).unwrap().expect("a blob for D")).unwrap();
+                assert_eq!(out["hash"], vector["hash_hex"], "{set} {name}: hash");
+                assert_eq!(out["group_sync"], vector["expected"], "{set} {name}: group_sync");
+                assert_eq!(out["has_group_id"], Json::Bool(false), "{set} {name}: a G is no group message");
+            }
+        }
+    }
+
+    /// Every reject (a G from D whose form fails §17.14 rule 4) through the unwrap the app calls:
+    /// its `group_sync` holds the sending device and a problem, and nothing else, so the app's
+    /// DistroGroupSync.read gives a problem and never a sync (DistroGroupSyncTest). Among them the
+    /// combining mark before D's entry (`members_naming_d_after_a_combining_mark`).
+    #[test]
+    fn the_distro_unwrap_reports_a_problem_for_each_reject() {
+        let v = vectors();
+        let mut d = distro(&v);
+        let dest = lxmf_rust::distro::delivery_hash(&d).unwrap();
+        let rejects = v["rejects"].as_array().unwrap();
+        assert_eq!(rejects.len(), 53);
+        assert!(rejects.iter().any(|e| e["name"] == "members_naming_d_after_a_combining_mark"));
+        for vector in rejects {
+            let name = vector["name"].as_str().unwrap();
+            // [timestamp 1790000000.5, bin title "", bin content "x", the fields as given], signed by D.
+            let mut payload = unhex("94cb41daac4ee0200000c400c40178");
+            payload.extend_from_slice(&unhex(vector["fields_hex"].as_str().unwrap()));
+            let mut signed = [dest.clone(), dest.clone(), payload.clone()].concat();
+            let hash = identity::full_hash(&signed);
+            signed.extend_from_slice(&hash);
+            let signature = d.sign(&signed);
+            let blob = [dest.clone(), d.encrypt(&[dest.clone(), signature, payload].concat()).unwrap()].concat();
+            let out: Json = serde_json::from_str(&distro_unwrap_json(&mut d, &blob).unwrap().expect("a blob for D")).unwrap();
+            let sync = &out["group_sync"];
+            assert!(sync["problem"].as_str().is_some_and(|p| !p.is_empty()), "{name} must be refused: {sync}");
+            assert_eq!(sync["by"], vector["by"], "{name}: by");
+            for key in ["op", "group_id", "at_ms", "name", "members", "keys", "creator", "text", "left"] {
+                assert_eq!(sync[key], Json::Null, "{name}: {key} is null when the form fails");
+            }
+            assert_eq!(out["has_group_id"], Json::Bool(false), "{name}: a G is no group message");
+        }
+    }
 }

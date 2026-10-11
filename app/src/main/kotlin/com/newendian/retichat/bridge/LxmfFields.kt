@@ -40,6 +40,28 @@ class LxmfFields private constructor(
         return (retichatEntry(entry.key) as? String) ?: (entries[entry.legacyField] as? String)
     }
 
+    /**
+     * The group entries every path reads (GROUPS-DISTRO-DESIGN.md §7, RFed SPEC
+     * §17.14), as LXMF-rust's distro unwrap reads them, pinned by the
+     * `group_entries` vectors: a message whose `fields[0xFB]` is a distro
+     * marker ([DISTRO_MARKERS]) is no group message and its entries are not
+     * read; otherwise a GROUP_ID entry of any type in either form (key 1 of
+     * 0xD1, or 0xA0) makes it one ([GroupEntryReading.hasGroupId]), and the id
+     * is kept only when it is a str of 32 hex characters, lowercased. A
+     * repeated key is read from its first entry, 0xFB from its last ([decode]).
+     */
+    fun groupEntries(): GroupEntryReading {
+        val type = getString(FIELD_CUSTOM_TYPE)
+        if (type != null && type in DISTRO_MARKERS) {
+            return GroupEntryReading(false, null, null, null, groupSync = type == DISTRO_GROUP_TYPE)
+        }
+        val has = (entries[FIELD_RETICHAT] as? Map<*, *>)?.containsKey(RF_GROUP_ID) == true ||
+            entries.containsKey(GroupEntry.ID.legacyField)
+        if (!has) return GroupEntryReading(false, null, null, null, groupSync = false)
+        val id = group(GroupEntry.ID)?.takeIf { HEX32.matches(it) }?.lowercase()
+        return GroupEntryReading(true, id, group(GroupEntry.ACTION), group(GroupEntry.NAME), groupSync = false)
+    }
+
     /** As [group], for the one bool entry ([GroupEntry.RELAY_DONE]): msgpack bool only. */
     fun groupBool(entry: GroupEntry): Boolean? {
         require(entry.type == GroupEntry.Type.BOOL) { "$entry is not a bool entry" }
@@ -132,6 +154,18 @@ class LxmfFields private constructor(
         const val FIELD_CUSTOM_META      = 0xFD
         const val DISTRO_TRANSFER_TYPE   = "rfed.distro.transfer"
         const val DISTRO_SENT_TYPE       = "rfed.distro.sent"
+        /** RFed SPEC §17.12's membership message (DistroChannelSync.TYPE). */
+        const val DISTRO_CHANNEL_TYPE    = "rfed.distro.channel"
+        /** RFed SPEC §17.14's group sync (DistroGroupSync.TYPE). */
+        const val DISTRO_GROUP_TYPE      = "rfed.distro.group"
+        /**
+         * RFed SPEC §17.14: exactly these `fields[0xFB]` values are distro
+         * markers; a message carrying one is never a group message, whatever
+         * else it carries ([groupEntries]).
+         */
+        val DISTRO_MARKERS = setOf(DISTRO_TRANSFER_TYPE, DISTRO_SENT_TYPE, DISTRO_CHANNEL_TYPE, DISTRO_GROUP_TYPE)
+
+        private val HEX32 = Regex("^[0-9a-fA-F]{32}$")
         /**
          * FIELD_RETICHAT (LXMF-rust/DISPLAY_NAMES.md §2.1, §10): Retichat's
          * one field number. Its value is a msgpack map with small integer
@@ -183,7 +217,16 @@ class LxmfFields private constructor(
          * header is trusted: ext values are stepped over whole, every length
          * and count is checked against the bytes left before anything is
          * read or allocated, and nesting stops at [MAX_DEPTH]. Malformed
-         * bytes throw an Exception, caught here. An Error (OutOfMemoryError,
+         * bytes throw an Exception, caught here.
+         *
+         * A key a map holds more than once is read from its first entry, in
+         * the fields map and in every map inside it (the Retichat field 0xD1
+         * among them), except LXMF's custom fields 0xFB-0xFD of the fields
+         * map, read from their last (RFed SPEC §17.14 "Repeated keys", as
+         * LXMF-rust reads them; pinned by the `group_entries` vectors). The
+         * Python reference refuses such a map whole. Until 2026-10-11 the last
+         * of every key was kept, so a GROUP_ID given twice was read here for
+         * the second group and by every other client for the first. An Error (OutOfMemoryError,
          * StackOverflowError) is not, and would kill the app with the
          * message unsaved: a stranger's distro message did exactly that
          * until 2026-09-29. Receive paths call [decodeOrEmpty], which
@@ -263,10 +306,15 @@ class LxmfFields private constructor(
                     is Long -> if (key in 0L..Int.MAX_VALUE.toLong()) key.toInt() else return@repeat
                     else -> return@repeat
                 }
-                result[intKey] = value
+                // A repeated key: the first entry stands, but for the fields
+                // map's custom fields, whose last does ([decode]).
+                if (intKey !in result || (depth == 1 && intKey in LAST_WINS)) result[intKey] = value
             }
             return result
         }
+
+        /** The fields map's keys read from their last entry: LXMF's FIELD_CUSTOM_TYPE, _DATA and _META. */
+        private val LAST_WINS = setOf(FIELD_CUSTOM_TYPE, FIELD_CUSTOM_DATA, FIELD_CUSTOM_META)
 
         private fun readValue(buf: ByteBuffer, depth: Int): Any? {
             if (!buf.hasRemaining()) return null
@@ -382,6 +430,21 @@ class LxmfFields private constructor(
         }
     }
 }
+
+/**
+ * [LxmfFields.groupEntries]: the keys LXMF-rust's distro unwrap reports for
+ * groups (`has_group_id`, `group_id`, `group_action`, `group_name`, and
+ * whether the message is a group sync), read here from the bytes of a message
+ * that arrived directly. [hasGroupId], not [groupId], routes a message to the
+ * group branch: a malformed id is dropped there.
+ */
+data class GroupEntryReading(
+    val hasGroupId: Boolean,
+    val groupId: String?,
+    val action: String?,
+    val name: String?,
+    val groupSync: Boolean,
+)
 
 /**
  * DISPLAY_NAMES.md §10: the nine group entries, each with its key in the
