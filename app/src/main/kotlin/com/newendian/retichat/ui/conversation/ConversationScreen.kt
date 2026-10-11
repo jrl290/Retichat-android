@@ -155,6 +155,11 @@ private fun DmConversationContent(
     val dayMarkers = rememberDayMarkerText()
     val isGroup = chatEntity?.isGroup == true
     val isPendingInvite = viewModel?.isPendingInvite?.collectAsState()?.value ?: false
+    // GROUPS-DISTRO-DESIGN.md §8.7, §13: a group whose own address is a distro D.
+    val acting = viewModel?.groupActing?.collectAsState()?.value
+    val distroGroup = acting?.distroGroup == true
+    // Its own address cannot be signed for here now: nothing is offered that would send.
+    val readOnly = acting?.readOnly == true
 
     // Pending attachment state
     var pendingAttachmentName by remember { mutableStateOf<String?>(null) }
@@ -361,6 +366,14 @@ private fun DmConversationContent(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(top = 8.dp),
                         )
+                        if (acting?.former == true) {
+                            Text(
+                                text = DistroGroupTexts.formerDistro(acting.own),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                            )
+                        }
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -370,11 +383,13 @@ private fun DmConversationContent(
                         ) {
                             OutlinedButton(
                                 onClick = { showDeclineConfirm = true },
+                                enabled = !readOnly,
                                 modifier = Modifier.weight(1f).height(48.dp),
                                 shape = RoundedCornerShape(10.dp),
                             ) { Text("Decline") }
                             Button(
                                 onClick = { viewModel?.acceptInvite() },
+                                enabled = !readOnly,
                                 modifier = Modifier.weight(1f).height(48.dp),
                                 shape = RoundedCornerShape(10.dp),
                             ) { Text("Accept") }
@@ -389,6 +404,16 @@ private fun DmConversationContent(
                 Column(
                     modifier = Modifier.fillMaxWidth(),
                 ) {
+                    // §8.7: read only here; the composer is disabled.
+                    if (acting?.former == true) {
+                        HorizontalDivider()
+                        Text(
+                            text = DistroGroupTexts.formerDistro(acting.own),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                        )
+                    }
                     // Pending attachment preview
                     if (pendingAttachmentName != null) {
                         Row(
@@ -449,7 +474,7 @@ private fun DmConversationContent(
                             .padding(horizontal = 8.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        IconButton(onClick = { filePickerLauncher.launch("*/*") }) {
+                        IconButton(onClick = { filePickerLauncher.launch("*/*") }, enabled = !readOnly) {
                             Icon(
                                 Icons.Default.AttachFile,
                                 contentDescription = "Attach",
@@ -463,6 +488,7 @@ private fun DmConversationContent(
                         OutlinedTextField(
                             value = draft,
                             onValueChange = { draft = it },
+                            enabled = !readOnly,
                             modifier = Modifier.weight(1f),
                             placeholder = { Text("Message") },
                             shape = MaterialTheme.shapes.large,
@@ -491,7 +517,7 @@ private fun DmConversationContent(
                                 pendingAttachmentName = null
                                 pendingAttachmentData = null
                             },
-                            enabled = draft.isNotBlank() || pendingAttachmentName != null,
+                            enabled = !readOnly && (draft.isNotBlank() || pendingAttachmentName != null),
                             colors = IconButtonDefaults.filledIconButtonColors(
                                 containerColor = MaterialTheme.colorScheme.primary,
                                 contentColor = MaterialTheme.colorScheme.onPrimary,
@@ -513,8 +539,9 @@ private fun DmConversationContent(
     if (showDeclineConfirm) {
         AlertDialog(
             onDismissRequest = { showDeclineConfirm = false },
-            title = { Text("Decline this group invite?") },
-            text = { Text("You won't be able to join this group later.") },
+            // §13: in a D-group the decline is D's, on every device of it.
+            title = { Text(if (distroGroup) DistroGroupTexts.DECLINE_TITLE else "Decline this group invite?") },
+            text = { Text(if (distroGroup) DistroGroupTexts.DECLINE_TEXT else "You won't be able to join this group later.") },
             confirmButton = {
                 TextButton(
                     onClick = {
@@ -540,6 +567,7 @@ private fun DmConversationContent(
             localName = peerLocalName,
             members = groupMembers,
             names = names,
+            acting = acting,
             onDismiss = { showChatInfo = false },
             onRename = { newName ->
                 scope.launch {
@@ -568,6 +596,12 @@ private fun DmConversationContent(
             onLeave = {
                 scope.launch {
                     app.repository.leaveGroupChat(chatId)
+                    onBack()
+                }
+            },
+            onDeleteFromThisDevice = {
+                scope.launch {
+                    app.repository.deleteGroupFromThisDevice(chatId)
                     onBack()
                 }
             },

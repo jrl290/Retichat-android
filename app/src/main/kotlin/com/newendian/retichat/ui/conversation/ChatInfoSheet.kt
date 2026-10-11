@@ -40,6 +40,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.newendian.retichat.MemberStatus
 import com.newendian.retichat.data.db.entity.GroupMemberEntity
+import com.newendian.retichat.data.repository.GroupActing
 import com.newendian.retichat.names.DisplayNames
 import com.newendian.retichat.names.NameBook
 import com.newendian.retichat.service.UserPreferences
@@ -85,11 +86,15 @@ fun ChatInfoSheet(
     localName: String?,
     members: List<GroupMemberEntity>,
     names: NameBook,
+    /** Who acts in the group from this device (GROUPS-DISTRO-DESIGN.md §8.7, §13); null for a DM. */
+    acting: GroupActing?,
     onDismiss: () -> Unit,
     onRename: (String) -> Unit,
     onArchive: () -> Unit,
     onDelete: () -> Unit,
     onLeave: () -> Unit,
+    /** §8.7: a group whose distro this device no longer holds, removed here only. */
+    onDeleteFromThisDevice: () -> Unit,
 ) {
     val context = LocalContext.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -108,6 +113,9 @@ fun ChatInfoSheet(
     }
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var showLeaveConfirm by remember { mutableStateOf(false) }
+    var showLocalDeleteConfirm by remember { mutableStateOf(false) }
+    // A D-group: its decline, leave and delete are D's, on all the user's devices (§13).
+    val distroGroup = acting?.distroGroup == true
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -248,7 +256,8 @@ fun ChatInfoSheet(
                         )
                         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                             members.forEach { member ->
-                                val name = names.member(member.destHashHex)
+                                // Every self address reads "You": the device, D and D's known siblings (§9.2).
+                                val name = names.member(member.destHashHex, acting?.selves.orEmpty())
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     verticalAlignment = Alignment.CenterVertically,
@@ -280,9 +289,32 @@ fun ChatInfoSheet(
 
             item {
                 ChatInfoCard {
-                    if (isGroup) {
+                    if (isGroup && acting?.former == true) {
+                        // §8.7: only "Delete from this device"; no leave can be signed here.
+                        TextButton(
+                            onClick = { showLocalDeleteConfirm = true },
+                            colors = ButtonDefaults.textButtonColors(
+                                contentColor = MaterialTheme.colorScheme.error,
+                            ),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                androidx.compose.material3.Icon(
+                                    Icons.Default.Delete,
+                                    contentDescription = null,
+                                )
+                                Spacer(Modifier.padding(horizontal = 6.dp))
+                                Text(DistroGroupTexts.LOCAL_DELETE, style = MaterialTheme.typography.bodyLarge)
+                            }
+                        }
+                    } else if (isGroup) {
                         TextButton(
                             onClick = { showLeaveConfirm = true },
+                            // §8.7: not offered until the distro is loaded (start-up); nothing is queued.
+                            enabled = acting?.readOnly != true,
                             colors = ButtonDefaults.textButtonColors(
                                 contentColor = MaterialTheme.colorScheme.error,
                             ),
@@ -356,10 +388,12 @@ fun ChatInfoSheet(
     if (showDeleteConfirm) {
         AlertDialog(
             onDismissRequest = { showDeleteConfirm = false },
-            title = { Text(if (isGroup) "Delete and leave this group?" else "Delete this conversation?") },
+            title = { Text(if (isGroup && distroGroup) DistroGroupTexts.DELETE_TITLE else if (isGroup) "Delete and leave this group?" else "Delete this conversation?") },
             text = {
                 Text(
-                    if (isGroup) {
+                    if (isGroup && distroGroup) {
+                        DistroGroupTexts.DELETE_TEXT
+                    } else if (isGroup) {
                         "Deleting a group conversation leaves the group: the members are told you left, " +
                             "and you won't be able to rejoin it. All messages will be permanently deleted."
                     } else {
@@ -392,11 +426,15 @@ fun ChatInfoSheet(
     if (showLeaveConfirm) {
         AlertDialog(
             onDismissRequest = { showLeaveConfirm = false },
-            title = { Text("Leave this group?") },
+            title = { Text(if (distroGroup) DistroGroupTexts.LEAVE_TITLE else "Leave this group?") },
             text = {
                 Text(
-                    "The members are told you left, and this conversation is deleted. You won't receive " +
-                        "future messages, and you won't be able to rejoin this group."
+                    if (distroGroup) {
+                        DistroGroupTexts.LEAVE_TEXT
+                    } else {
+                        "The members are told you left, and this conversation is deleted. You won't receive " +
+                            "future messages, and you won't be able to rejoin this group."
+                    }
                 )
             },
             confirmButton = {
@@ -415,6 +453,33 @@ fun ChatInfoSheet(
             },
             dismissButton = {
                 TextButton(onClick = { showLeaveConfirm = false }) {
+                    Text("Cancel")
+                }
+            },
+        )
+    }
+
+    if (showLocalDeleteConfirm) {
+        AlertDialog(
+            onDismissRequest = { showLocalDeleteConfirm = false },
+            title = { Text("${DistroGroupTexts.LOCAL_DELETE}?") },
+            text = { Text(DistroGroupTexts.LOCAL_DELETE_TEXT) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showLocalDeleteConfirm = false
+                        onDismiss()
+                        onDeleteFromThisDevice()
+                    },
+                    colors = ButtonDefaults.textButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error,
+                    ),
+                ) {
+                    Text("Delete")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showLocalDeleteConfirm = false }) {
                     Text("Cancel")
                 }
             },

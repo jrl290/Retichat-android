@@ -17,11 +17,14 @@ import com.newendian.retichat.data.db.entity.GroupMemberEntity
 import com.newendian.retichat.data.db.entity.MessageEntity
 import com.newendian.retichat.data.model.Contact
 import com.newendian.retichat.data.repository.ChatRepository
+import com.newendian.retichat.data.repository.GroupActing
 import com.newendian.retichat.names.NameBook
 import com.newendian.retichat.service.ConnectionStateManager
+import com.newendian.retichat.service.DistroManager
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -69,6 +72,17 @@ class ConversationViewModel(
     val isPendingInvite: StateFlow<Boolean> =
         repository.isPendingGroupInvite(chatId)
             .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    /**
+     * Who acts in this group from this device (GROUPS-DISTRO-DESIGN.md §8.7,
+     * §13): whether it is a D-group, whether its own address can be signed for
+     * now, and every self address ("You"). Null for a DM. Re-read when the
+     * group, its list or the distro held changes.
+     */
+    val groupActing: StateFlow<GroupActing?> =
+        combine(repository.chatById(chatId), repository.groupMembers(chatId), DistroManager.state) { chat, _, _ ->
+            chat?.takeIf { it.isGroup }?.let { repository.groupActing(it) }
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     fun acceptInvite() {
         viewModelScope.launch { repository.acceptGroupInvite(chatId) }

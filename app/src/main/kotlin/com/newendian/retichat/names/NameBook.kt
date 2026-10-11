@@ -19,6 +19,14 @@ data class NameBook(
     fun member(hashHex: String): String =
         if (selfHex.isNotEmpty() && hashHex.equals(selfHex, ignoreCase = true)) "You" else contact(hashHex)
 
+    /**
+     * Like [member], in a group whose self addresses are [selves] (the device,
+     * the group's distro and its known siblings, GROUPS-DISTRO-DESIGN.md §9.2):
+     * each of them reads "You".
+     */
+    fun member(hashHex: String, selves: Set<String>): String =
+        if (hashHex.lowercase() in selves) "You" else member(hashHex)
+
     /** A channel post, with that poster's channel name in this channel (or null). */
     fun channelPost(hashHex: String, channelName: String?): ChannelLabel =
         DisplayNames.channelPost(channelName, names(hashHex), hashHex)

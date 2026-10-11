@@ -108,6 +108,12 @@ data class GroupActing(
     val own: String,
     val selves: Set<String>,
 ) {
-    /** The group's own address cannot be signed for here: read only (§8.7). */
+    /**
+     * The group's own address cannot be signed for here now: no post, accept,
+     * decline or leave is offered (§8.7). Nothing is queued for later.
+     */
     val readOnly: Boolean get() = signer == GroupSelves.Signer.NOT_LOADED || signer == GroupSelves.Signer.FORMER
+
+    /** Its own address is a distro this device no longer holds: only "Delete from this device" is offered (§8.7, §13). */
+    val former: Boolean get() = signer == GroupSelves.Signer.FORMER
 }
