@@ -8,6 +8,7 @@ import com.newendian.retichat.bridge.PropagationLinkCallback
 import com.newendian.retichat.bridge.PropagationUploadCallback
 import com.newendian.retichat.bridge.RetichatBridge
 import com.newendian.retichat.bridge.LxmfFields
+import com.newendian.retichat.data.repository.DistroHolding
 import com.newendian.retichat.service.DistroCodec.toHex
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
@@ -100,23 +101,24 @@ object DistroOutboxRuntime {
         override fun error(message: String) { Log.e(TAG, message); _lastError.value = message }
     }
 
-    private fun heldDistro(): HeldDistro? =
-        DistroManager.state.value?.let { HeldDistro(it.deliveryHashHex, it.publicKeyHex) }
+    /** What the device holds of a distro: its holding, never the loaded state alone ([DistroOutbox]'s `holding`). */
+    private fun holding(): DistroHolding = DistroManager.holding.value
 
     /** The outbox, made and loaded from storage on first use. */
     private suspend fun outbox(context: Context): DistroOutbox = boxLock.withLock {
         box?.let { return@withLock it }
         val app = context.applicationContext as RetichatApp
         val jni = JniPropagationPort(app, scope)
-        val created = DistroOutbox(RoomOutboxStore(app.database.distroOutboxDao(), AndroidLog), jni, ::heldDistro, AndroidLog, scope)
+        val created = DistroOutbox(RoomOutboxStore(app.database.distroOutboxDao(), AndroidLog), jni, ::holding, AndroidLog, scope)
         withContext(serial) { created.start() }
         port = jni
         box = created
         if (!distroWatch) {
             distroWatch = true
-            // Every change of the distro held (forgotten, generated, imported), and once at load:
-            // the membership messages owed to a distro no longer held are dropped (James, 2026-10-03).
-            scope.launch { DistroManager.state.collect { created.onDistroChanged() } }
+            // Every change of the distro held (forgotten, generated, imported, a stored key the core
+            // rejected), and once at load: the membership messages owed to a distro no longer held
+            // are dropped (James, 2026-10-03), and none while it is held and not loaded.
+            scope.launch { DistroManager.holding.collect { created.onDistroChanged() } }
         }
         created
     }

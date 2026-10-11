@@ -1,5 +1,6 @@
 package com.newendian.retichat.service
 
+import com.newendian.retichat.data.repository.DistroHolding
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -138,9 +139,6 @@ class OwedEntry(
     override fun hashCode(): Int = 31 * id.hashCode() + msgHash.hashCode()
     override fun toString(): String = "OwedEntry($id, $label)"
 }
-
-/** The distro this device holds: its `lxmf.delivery` hash and public key (hex). */
-data class HeldDistro(val delivery: String, val publicKey: String)
 
 /** The propagation link the stack holds: its id (hex) and whether it is ACTIVE. */
 data class HeldLink(val id: String, val active: Boolean)
@@ -351,7 +349,12 @@ class UnprovedUploads {
 class DistroOutbox(
     private val store: OutboxStore,
     private val port: PropagationPort,
-    private val heldDistro: () -> HeldDistro?,
+    /**
+     * What this device holds of a distro now (DistroManager.holding): never the
+     * loaded state alone, whose null is start-up, or a stored key the core
+     * could not load, as often as a give-up.
+     */
+    private val holding: () -> DistroHolding,
     private val log: OutboxLog,
     private val scope: CoroutineScope,
     private val now: () -> Long = System::currentTimeMillis,
@@ -435,7 +438,8 @@ class DistroOutbox(
      * Load what a previous run left owed (the first start only) and begin to
      * take events again (after a stop). Membership messages owed to a distro
      * this device does not hold are dropped here, as on every change of the
-     * distro held (James, 2026-10-03).
+     * distro held (James, 2026-10-03); while the distro is held and not loaded,
+     * none is ([holdsDistro]).
      */
     suspend fun start() {
         if (!loaded) {
@@ -981,7 +985,24 @@ class DistroOutbox(
     private fun stillOwed(entry: OwedEntry): Boolean {
         if (entries[entry.id]?.msgHash != entry.msgHash) return false
         if (entry.kind != OwedKind.CHANNEL) return true
-        return heldDistro()?.delivery == entry.distro
+        return holdsDistro(entry.distro)
+    }
+
+    /**
+     * Whether this device holds [distro] for what it owes it, by [holding], as
+     * the repository reads it (DistroChanges.plan): with none held (given up,
+     * or never) it does not, and with another distro loaded it does not; while
+     * the distro is held and not loaded (start-up, before the stack has looked
+     * at the stored key, or a stored key the core could not load) it does, and
+     * nothing owed is dropped: a key still stored is held. Until 2026-10-11 the
+     * outbox read the loaded state alone, so every cold start that reached it
+     * before the key loaded, and every start with a key the core rejected,
+     * dropped the membership messages owed to D.
+     */
+    private fun holdsDistro(distro: String): Boolean = when (val held = holding()) {
+        DistroHolding.Unknown, DistroHolding.StoredNotLoaded -> true
+        DistroHolding.None -> false
+        is DistroHolding.Loaded -> held.delivery == distro
     }
 
     // ---- A distro given up ----
@@ -1004,8 +1025,7 @@ class DistroOutbox(
      * that too, because the node may prove that upload and fan it out.
      */
     fun dropMembershipOwedToOtherDistros() {
-        val held = heldDistro()?.delivery
-        val dropped = entries.values.filter { it.kind == OwedKind.CHANNEL && it.distro != held }
+        val dropped = entries.values.filter { it.kind == OwedKind.CHANNEL && !holdsDistro(it.distro) }
         for (entry in dropped) {
             entries.remove(entry.id)
             unproved.forget(entry)

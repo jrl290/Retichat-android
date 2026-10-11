@@ -1,5 +1,6 @@
 package com.newendian.retichat.service
 
+import com.newendian.retichat.data.repository.DistroHolding
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
@@ -19,6 +20,9 @@ import org.junit.Test
  * spec asks every client for ("Tests every client makes for the sending
  * device"). The mutation each guards is named where it is not obvious.
  */
+/** A distro the rig holds: its `lxmf.delivery` hash and public key (hex). */
+private data class HeldDistro(val delivery: String, val publicKey: String)
+
 class DistroOutboxTest {
     private val d1 = HeldDistro("d".repeat(32), "1".repeat(128))
     private val d2 = HeldDistro("e".repeat(32), "2".repeat(128))
@@ -120,11 +124,22 @@ class DistroOutboxTest {
         fun all() = info + warn + error
     }
 
-    private inner class Rig(scope: CoroutineScope, val store: FakeStore = FakeStore(), var distro: HeldDistro? = d1) {
+    /**
+     * [distro] loaded, or none held when it is null; [holding], when set, is what the device
+     * holds instead (start-up, or a key stored and not loaded), as DistroManager.holding says it.
+     */
+    private inner class Rig(
+        scope: CoroutineScope,
+        val store: FakeStore = FakeStore(),
+        var distro: HeldDistro? = d1,
+        var holding: DistroHolding? = null,
+    ) {
         val port = FakePort()
         val lines = Lines()
         var clock = 1_000L
-        val outbox = DistroOutbox(store, port, { distro }, lines, scope, now = { clock })
+        val outbox = DistroOutbox(
+            store, port, { holding ?: distro?.let { DistroHolding.Loaded(it.delivery) } ?: DistroHolding.None }, lines, scope, now = { clock },
+        )
         fun link(id: String, active: Boolean = true) { port.held = HeldLink(id, active) }
     }
 
@@ -250,6 +265,51 @@ class DistroOutboxTest {
         // the sibling joins a channel this device left); the copy goes once.
         assertEquals(1, rig.port.sent.count { it.entryId == copy.id })
         assertEquals(1, rig.port.sent.count { it.entryId == join.id })
+    }
+
+    @Test
+    fun aColdStartOrAKeyStoredAndNotLoadedDropsNothingOwedToD() = runBlocking {
+        // What a previous run left owed to D: a join, and a sent copy beside it.
+        val join = channel("join", "public.x", "join")
+        val copy = sentCopy("copy")
+        val store = FakeStore().apply { rows[join.id] = join; rows[copy.id] = copy }
+        // A cold start before the stack has looked at the stored key, then a key the core rejects:
+        // D is held, not loaded (DistroManager.init), so nothing is forgotten (DistroChanges.plan).
+        // Until 2026-10-11 the outbox read the loaded state, null in both, as "no distro held",
+        // and dropped the join at start and on the change.
+        val rig = Rig(this, store, distro = null, holding = DistroHolding.Unknown)
+        rig.outbox.start()
+        assertEquals(listOf(join, copy), rig.outbox.owed())
+        rig.holding = DistroHolding.StoredNotLoaded
+        rig.outbox.onDistroChanged()
+        assertEquals(listOf(join, copy), rig.outbox.owed())
+        assertTrue(store.rows.containsKey(join.id))
+        assertTrue(rig.lines.warn.none { it.contains("no longer holds") })
+        // Still owed while D is held and not loaded: packed and signed as D, it goes when the link comes up.
+        rig.link("L1")
+        rig.outbox.onLinkEstablished("L1")
+        assertEquals(1, rig.port.sent.count { it.entryId == join.id })
+        // D loads: still owed to it. Given up (no key stored): dropped, with its line.
+        rig.holding = null
+        rig.distro = d1
+        rig.outbox.onDistroChanged()
+        assertEquals(listOf(join, copy), rig.outbox.owed())
+        rig.distro = null
+        rig.outbox.onDistroChanged()
+        yield()
+        assertEquals(listOf(copy), rig.outbox.owed())
+        assertFalse(store.rows.containsKey(join.id))
+        assertTrue(rig.lines.warn.any { it.contains("no longer holds") && it.contains("the join of #public.x") })
+    }
+
+    @Test
+    fun theRuntimeHandsTheOutboxWhatTheDeviceHoldsNeverTheLoadedStateAlone() {
+        // DistroOutboxRuntime needs a Context to run; its wiring, checked in the source.
+        val runtime = java.io.File("src/main/kotlin/com/newendian/retichat/service/DistroOutboxRuntime.kt").readText()
+        assertTrue(runtime.contains("private fun holding(): DistroHolding = DistroManager.holding.value"))
+        assertTrue(runtime.contains("jni, ::holding, AndroidLog, scope)"))
+        assertTrue(runtime.contains("scope.launch { DistroManager.holding.collect { created.onDistroChanged() } }"))
+        assertFalse(runtime.contains("DistroManager.state"))
     }
 
     private fun groupSync(op: String, hash: String, distro: HeldDistro = d1) = OwedEntry(
