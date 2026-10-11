@@ -10,6 +10,7 @@ import com.newendian.retichat.RetichatApp
 import com.newendian.retichat.bridge.RetichatBridge
 import com.newendian.retichat.data.db.entity.ChatEntity
 import com.newendian.retichat.data.repository.GroupCreation
+import com.newendian.retichat.data.repository.GroupSelves
 import com.newendian.retichat.service.DistroCodec
 import com.newendian.retichat.service.UserPreferences
 import com.newendian.retichat.ui.conversation.OutgoingText
@@ -55,7 +56,8 @@ import kotlinx.coroutines.launch
  *   contact_status -> contact=<bool> allowlisted=<bool> key=<bool> row=<bool> hash=<hex>
  *   contact_forget -> true|NO_ROW hash=<hex>
  *   group_list: group=<id> chat=<chat id> name="<name>" me=<invited|accepted|left|-> held=<NONE|PENDING|JOINED> creator=<hex|-> members=<hex>=<status>,...
- *       (one line for each group, then)
+ *       (one line for each group, then; "me" and "held" are the user's own entry: the group's own address, D in a
+ *       group held as the distro, else this device, GroupSelves.ownMember)
  *   group_list -> <n> group(s)
  *   group_accept -> Accepted|Deferred|REFUSED|NOT_HELD group=<id> ...
  *   group_decline -> Declined|REFUSED|NOT_HELD group=<id> ...
@@ -130,10 +132,11 @@ class GroupDebugReceiver : BroadcastReceiver() {
 
             // The groups the chat list draws (chatPreviews), each with the members' statuses as this device holds them.
             "group_list" -> {
-                val self = repo.selfDestHash.hex()
+                val device = repo.selfDestHash.hex()
                 val chats = app.database.chatDao().chatPreviews().first().filter { it.isGroup }
                 for (preview in chats) {
                     val chat = app.database.chatDao().findById(preview.id) ?: continue
+                    val self = GroupSelves.ownMember(chat.ownMember, device)
                     val members = app.database.messageDao().groupMembersList(chat.id)
                     val statuses = members.map { it.destHashHex }.filter { it.isNotEmpty() }.distinct().sorted()
                         .joinToString(",") { "$it=${GroupMemberStatuses.statusOf(members, it)}" }
@@ -223,10 +226,11 @@ class GroupDebugReceiver : BroadcastReceiver() {
         return chat
     }
 
+    /** The user's own status in [chat]: its own address's (D in a group held as the distro, else this device's). */
     private suspend fun myStatus(app: RetichatApp, chat: ChatEntity): String? =
         GroupMemberStatuses.statusOf(
             app.database.messageDao().groupMembersList(chat.id),
-            app.repository.selfDestHash.hex(),
+            GroupSelves.ownMember(chat.ownMember, app.repository.selfDestHash.hex()),
         )
 
     private fun hashArg(intent: Intent): String? =
