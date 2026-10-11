@@ -570,7 +570,7 @@ class GroupRig(
         return when (action) {
             Action.ACCEPT, Action.LEAVE -> engine.takeDirect(
                 Arrival(u.hash.toHex(), src, chat!!, action, (u.timestamp * 1000).toLong(), u.signature, u.senderKey, receipt.packed)
-            )
+            ) == GroupStatusEngine.Taken.COUNTED
             Action.STATUS -> { lastTally = engine.takeStatuses(chat!!, fields.groupStatuses()); null }
             else -> null
         }

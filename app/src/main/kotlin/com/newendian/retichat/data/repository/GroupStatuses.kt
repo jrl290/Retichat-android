@@ -206,7 +206,13 @@ class GroupStatusEngine(
 ) {
     private val lock = Mutex()
 
-    private enum class Taken { COUNTED, HELD, IGNORED }
+    /** What [take] did with an accept or leave: counted it, held it for its key (stored), or ignored it (its signature does not verify). */
+    enum class Taken {
+        COUNTED, HELD, IGNORED;
+
+        /** Applied or stored (§6.2): an ignored one is judged again on its next copy. */
+        val kept: Boolean get() = this != IGNORED
+    }
 
     // ---- What any group message the rule kept brings ----
 
@@ -244,13 +250,13 @@ class GroupStatusEngine(
      * an accept that counted and carries a binding key, and no other
      * (RFed-spec Group.md, "The creator's answer"). Returns whether it counted.
      */
-    suspend fun takeDirect(arrival: Arrival): Boolean = lock.withLock {
+    suspend fun takeDirect(arrival: Arrival): Taken = lock.withLock {
         val taken = takeChange(arrival.chat, arrival.src, arrival.action, arrival.msgId, arrival.timestampMs, arrival.signature, arrival.packed, "directly")
         val counted = taken == Taken.COUNTED
         if (counted && arrival.action == GroupChatManager.Action.ACCEPT && arrival.senderKey != null) {
             answerAccept(arrival.chat, arrival.src)
         }
-        counted
+        taken
     }
 
     // ---- A status ----

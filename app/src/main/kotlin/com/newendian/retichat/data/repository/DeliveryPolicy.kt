@@ -195,6 +195,29 @@ object DeliveryPolicy {
         }
     }
 
+    /** A plain post the group rule kept, by its packet source (GROUPS-DISTRO-DESIGN.md §9.2). */
+    enum class GroupPost {
+        /** From a self address (a known sibling), its signature validated: the user's own, stored outgoing, SENT. */
+        OWN,
+        /** From a self address, its signature not validated: not the user's to show, and not kept. */
+        UNPROVEN_OWN,
+        /** Anyone else's, with text or an attachment: stored as theirs. */
+        MEMBER,
+        /** Anyone else's, with neither: nothing to store, and not kept. */
+        EMPTY;
+
+        /** Stored: its `grp:` key may be recorded (§6.2); otherwise it is judged again on its next copy. */
+        val kept: Boolean get() = this == OWN || this == MEMBER
+    }
+
+    /** [GroupPost] of a post from [sourceIsSelf] with [signature], carrying text or an attachment ([hasContent]). */
+    fun groupPost(sourceIsSelf: Boolean, signature: Int, hasContent: Boolean): GroupPost = when {
+        sourceIsSelf && signature == Signature.VALIDATED -> GroupPost.OWN
+        sourceIsSelf -> GroupPost.UNPROVEN_OWN
+        hasContent -> GroupPost.MEMBER
+        else -> GroupPost.EMPTY
+    }
+
     /**
      * Whom a kept group message is shown as from: its GROUP_SENDER only when
      * a current member of a joined group relays it ([sourceStatus]), signed

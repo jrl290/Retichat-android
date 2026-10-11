@@ -1735,8 +1735,13 @@ class ChatRepository(
             ensureContact(srcHex)
             acceptMessageName(srcHex, nameField, unverifiedReason, timestamp)
         }
-        handleGroupMessage(hash, srcHex, content, timestamp, fields, here, signature, keys.senderKey, keys.packed, viaDistro = true)
-        DistroGroupOutcome.KEPT
+        // §6.2: kept only when the handler applied or stored it; otherwise its key is not
+        // recorded and a later copy (one whose signature validates, say) is judged again.
+        val kept = handleGroupMessage(hash, srcHex, content, timestamp, fields, here, signature, keys.senderKey, keys.packed, viaDistro = true)
+        if (kept) DistroGroupOutcome.KEPT else {
+            Log.i(TAG, "$what not kept by the group handler: its key is not recorded, and its next copy is judged again (§6.2)")
+            DistroGroupOutcome.DROPPED
+        }
     }
 
     /**
@@ -2196,6 +2201,10 @@ class ChatRepository(
      * members are the creator's list, fixed; an accept or a leave is the
      * packet source's own; a leave (a decline's included) is final; a pending
      * group allows nobody and relays for nobody.
+     *
+     * Returns whether the message was kept: applied or stored. The distro path
+     * records its `grp:` key only then; a dropped one is judged again on its
+     * next copy (GROUPS-DISTRO-DESIGN.md §6.2).
      */
     private suspend fun handleGroupMessage(
         msgId: String,
@@ -2208,8 +2217,11 @@ class ChatRepository(
         senderKey: ByteArray?,
         packed: ByteArray?,
         viaDistro: Boolean,
-    ) {
-        val groupId = fields.group(GroupEntry.ID) ?: return
+    ): Boolean {
+        val groupId = fields.group(GroupEntry.ID) ?: run {
+            Log.w(TAG, "group message ${msgId.take(12)} from ${srcHex.take(8)} DROPPED: no group id")
+            return false
+        }
         val groupAction = fields.group(GroupEntry.ACTION)
 
         // What any group message the rule kept brings: the key an accept or
@@ -2219,12 +2231,14 @@ class ChatRepository(
         groupStatuses.onKept(srcHex, groupAction, signature, senderKey)
 
         if (groupAction == GroupChatManager.Action.INVITE) {
-            handleGroupInvite(srcHex, groupId, timestamp, fields, standing, viaDistro)
-            return
+            return handleGroupInvite(srcHex, groupId, timestamp, fields, standing, viaDistro)
         }
-        val chat = standing.chat ?: return
+        val chat = standing.chat ?: run {
+            Log.w(TAG, "group ${groupAction ?: "post"} ${msgId.take(12)} for ${groupId.take(8)} from ${srcHex.take(8)} DROPPED: the group is not held here")
+            return false
+        }
 
-        when (groupAction) {
+        return when (groupAction) {
             GroupChatManager.Action.ACCEPT, GroupChatManager.Action.LEAVE -> {
                 // The source's own accept or leave (the rule took it only from
                 // a current member naming nobody else, not forged). Verified
@@ -2233,6 +2247,7 @@ class ChatRepository(
                 // What it changes (a member that left stays left; a decline
                 // arrives as a leave from a member still invited), the
                 // creator's copy and answer are the engine's.
+                // Kept when counted or held for its key; an ignored one is not.
                 groupStatuses.takeDirect(
                     Arrival(
                         msgId = msgId,
@@ -2244,7 +2259,7 @@ class ChatRepository(
                         senderKey = senderKey,
                         packed = packed,
                     )
-                )
+                ).kept
             }
 
             GroupChatManager.Action.STATUS -> {
@@ -2253,6 +2268,7 @@ class ChatRepository(
                 // signed by it): each element is a member's own accept or
                 // leave, checked on its own.
                 groupStatuses.takeStatuses(chat, fields.groupStatuses())
+                true
             }
 
             GroupChatManager.Action.RELAY_REQUEST -> {
@@ -2266,7 +2282,7 @@ class ChatRepository(
                 ).filter { !standing.isSelf(it) }
                 val signer = groupSigner(chat) ?: run {
                     Log.w(TAG, "relay_req for ${chat.id}: no signer for its own address (${signerKind(chat)}, §8.7) — not relayed")
-                    return
+                    return false
                 }
                 groupChatManager?.performRelay(
                     signer    = signer,
@@ -2278,10 +2294,12 @@ class ChatRepository(
                     requesterHex           = srcHex,
                     allAcceptedMembers     = acceptedMembers,
                 ) ?: Log.w(TAG, "relay_req: stack offline, cannot relay")
+                true
             }
 
             GroupChatManager.Action.RELAY_DONE -> {
                 Log.i(TAG, "Relay done confirmed for group ${chat.id} by ${srcHex.take(8)}")
+                true
             }
 
             null -> {
@@ -2289,60 +2307,69 @@ class ChatRepository(
                 // known sibling (an older device of the user acting as its listed
                 // device entry) is the user's own: stored as an outgoing post,
                 // SENT, no notification, when its signature validated; otherwise
-                // it is not the user's to show, and is dropped.
-                if (standing.isSelf(srcHex)) {
-                    if (signature != Signature.VALIDATED) {
-                        Log.i(TAG, "group post ${msgId.take(12)} for ${chat.id} from the self address ${srcHex.take(8)} DROPPED: its signature did not validate")
-                        return
-                    }
-                    if (messageDao.findById(msgId) != null) return
-                    messageDao.upsert(
-                        MessageEntity(
-                            id = msgId,
-                            chatId = chat.id,
-                            senderHashHex = srcHex,
-                            content = content,
-                            timestamp = (timestamp * 1000).toLong(),
-                            isOutbound = true,
-                            state = RetichatBridge.MessageState.SENT,
-                        )
-                    )
-                    saveInboundAttachments(msgId, fields)
-                    Log.i(TAG, "group post ${msgId.take(12)} for ${chat.id} from the user's own device ${srcHex.take(8)}: stored as the user's own, SENT")
-                    return
-                }
-                // A plain post, kept for a group held here whoever sent it. It
-                // is shown as its GROUP_SENDER's only when a current member of
-                // a joined group relays a listed member's post; anyone else's
-                // is its own (a stranger's never takes a member's name).
-                val author = groupAuthor(fields, srcHex, standing, signature)
+                // it is not the user's to show, and is dropped. A plain post is
+                // kept for a group held here whoever sent it. It is shown as its
+                // GROUP_SENDER's only when a current member of a joined group
+                // relays a listed member's post; anyone else's is its own (a
+                // stranger's never takes a member's name).
                 val attachments = fields.getFileAttachments()
-                if (content.isNotBlank() || attachments.isNotEmpty()) {
-                    messageDao.upsert(
-                        MessageEntity(
-                            id = msgId,
-                            chatId = chat.id,
-                            senderHashHex = author,
-                            content = content,
-                            timestamp = (timestamp * 1000).toLong(),
-                            isOutbound = false,
-                            state = RetichatBridge.MessageState.DELIVERED,
+                val post = DeliveryPolicy.groupPost(standing.isSelf(srcHex), signature, content.isNotBlank() || attachments.isNotEmpty())
+                when (post) {
+                    DeliveryPolicy.GroupPost.UNPROVEN_OWN -> {
+                        Log.i(TAG, "group post ${msgId.take(12)} for ${chat.id} from the self address ${srcHex.take(8)} DROPPED: its signature did not validate")
+                    }
+                    DeliveryPolicy.GroupPost.OWN -> {
+                        if (messageDao.findById(msgId) == null) {
+                            messageDao.upsert(
+                                MessageEntity(
+                                    id = msgId,
+                                    chatId = chat.id,
+                                    senderHashHex = srcHex,
+                                    content = content,
+                                    timestamp = (timestamp * 1000).toLong(),
+                                    isOutbound = true,
+                                    state = RetichatBridge.MessageState.SENT,
+                                )
+                            )
+                            saveInboundAttachments(msgId, fields)
+                            Log.i(TAG, "group post ${msgId.take(12)} for ${chat.id} from the user's own device ${srcHex.take(8)}: stored as the user's own, SENT")
+                        }
+                    }
+                    DeliveryPolicy.GroupPost.EMPTY -> {
+                        Log.i(TAG, "group post ${msgId.take(12)} for ${chat.id} from ${srcHex.take(8)} DROPPED: no text and no attachment")
+                    }
+                    DeliveryPolicy.GroupPost.MEMBER -> {
+                        val author = groupAuthor(fields, srcHex, standing, signature)
+                        messageDao.upsert(
+                            MessageEntity(
+                                id = msgId,
+                                chatId = chat.id,
+                                senderHashHex = author,
+                                content = content,
+                                timestamp = (timestamp * 1000).toLong(),
+                                isOutbound = false,
+                                state = RetichatBridge.MessageState.DELIVERED,
+                            )
                         )
-                    )
-                    saveInboundAttachments(msgId, fields)
+                        saveInboundAttachments(msgId, fields)
 
-                    if (RetichatApp.activeChatId != chat.id) {
-                        val notifText = if (content.isNotBlank()) content
-                                        else "📎 ${attachments.size} attachment(s)"
-                        MessageNotificationHelper.notify(
-                            appContext, resolvedName(author), notifText, chat.id,
-                            conversationTitle = chat.name,
-                        )
+                        if (RetichatApp.activeChatId != chat.id) {
+                            val notifText = if (content.isNotBlank()) content
+                                            else "📎 ${attachments.size} attachment(s)"
+                            MessageNotificationHelper.notify(
+                                appContext, resolvedName(author), notifText, chat.id,
+                                conversationTitle = chat.name,
+                            )
+                        }
                     }
                 }
+                post.kept
             }
 
-            else -> Log.w(TAG, "handleGroupMessage: unrecognised action=$groupAction")
+            else -> {
+                Log.w(TAG, "handleGroupMessage: unrecognised action=$groupAction from ${srcHex.take(8)}: DROPPED")
+                false
+            }
         }
     }
 
@@ -2382,6 +2409,8 @@ class ChatRepository(
      * never added to a list that does not name them. Through the distro
      * ([viaDistro]) the invite must list D. The list is kept verbatim (a group
      * sync carries it as the invite did), and no key of a self address is kept.
+     * Returns whether the invite was kept (a group made, or a held one's keys
+     * taken), for the distro path's seen key (§6.2).
      */
     private suspend fun handleGroupInvite(
         srcHex: String,
@@ -2390,10 +2419,10 @@ class ChatRepository(
         fields: LxmfFields,
         standing: GroupStanding,
         viaDistro: Boolean,
-    ) {
+    ): Boolean {
         if (standing.chat == null && fields.group(GroupEntry.MEMBERS) == null) {
             Log.w(TAG, "invite for ${groupId.take(8)} from ${srcHex.take(8)} lists no members: ignored")
-            return
+            return false
         }
         val membersCsv = fields.group(GroupEntry.MEMBERS).orEmpty()
         val listed = DeliveryPolicy.members(membersCsv)
@@ -2403,11 +2432,11 @@ class ChatRepository(
         if (standing.chat == null) {
             if (own == null) {
                 Log.i(TAG, "invite for ${groupId.take(8)} from ${srcHex.take(8)} DROPPED: its list names neither this device nor the distro held here (§9.3)")
-                return
+                return false
             }
             if (viaDistro && own != heldD) {
                 Log.i(TAG, "invite for ${groupId.take(8)} from ${srcHex.take(8)} through the distro DROPPED: its list does not name the distro (§6.3)")
-                return
+                return false
             }
         }
         // Whose keys this invite may bring: the held list, or for a new group
@@ -2441,7 +2470,7 @@ class ChatRepository(
 
         if (standing.chat != null) {
             Log.i(TAG, "invite for held group ${standing.chat.id} from ${srcHex.take(8)}: member keys only")
-            return
+            return true
         }
 
         // A new group, PENDING (the user's own row invited) until the user
@@ -2501,6 +2530,7 @@ class ChatRepository(
                 chatId,
             )
         }
+        return true
     }
 
     // ---- Group invite accept / decline ----

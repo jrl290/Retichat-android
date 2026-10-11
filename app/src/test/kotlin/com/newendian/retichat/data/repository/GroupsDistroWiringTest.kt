@@ -145,11 +145,13 @@ class GroupsDistroWiringTest {
     @Test
     fun anOlderSiblingsValidatedPostIsTheUsersOwnOutgoingPostAndAnyOtherSelfSourcePostIsDropped() {
         val handle = body(repo, "handleGroupMessage")
+        // The post's kind is DeliveryPolicy.groupPost's (GroupMessageKeptTest runs it).
         inOrder(
             handle,
-            "if (standing.isSelf(srcHex)) {",
-            "if (signature != Signature.VALIDATED) {",
-            "return",
+            "val post = DeliveryPolicy.groupPost(standing.isSelf(srcHex), signature,",
+            "DeliveryPolicy.GroupPost.UNPROVEN_OWN -> {",
+            "DROPPED: its signature did not validate",
+            "DeliveryPolicy.GroupPost.OWN -> {",
             "isOutbound = true,",
             "state = RetichatBridge.MessageState.SENT,",
         )

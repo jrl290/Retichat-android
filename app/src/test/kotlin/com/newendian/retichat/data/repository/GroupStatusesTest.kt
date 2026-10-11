@@ -482,7 +482,7 @@ class GroupStatusesTest {
         val chat = r.store.chats.getValue(r.chatId)
         val counted = r.engine.takeDirect(
             Arrival("m1", id("bob").hashHex, chat, Action.ACCEPT, 1_000, Signature.VALIDATED, null, ByteArray(GroupStatuses.STATUS_PACKED_LIMIT + 1)),
-        )
+        ) == GroupStatusEngine.Taken.COUNTED
         assertTrue(counted)
         assertEquals(MemberStatus.ACCEPTED, r.status("bob"))
         assertNull(r.store.copyRows[r.chatId to id("bob").hashHex])
