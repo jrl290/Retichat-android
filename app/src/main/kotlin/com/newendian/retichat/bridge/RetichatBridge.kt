@@ -689,6 +689,13 @@ object RetichatBridge {
      * (base64 or null). The group receipt runs natively on the rebuilt
      * message, so the signature fields are its verdict and `sender_key` /
      * `packed` are what the direct path's receipt gives.
+     *
+     * `hash` is LXMF.py's: full_hash(dest | src | payload) over the payload
+     * bytes as received (packed again only to drop a stamp). For a payload not
+     * in rmpv's form (the web's G writes `at_ms` as int 64, 0xd3) it differs
+     * from what unpacking the packed bytes again computes, so key a group
+     * message, a G and an owed entry by this hash or the packer's, never by
+     * unpacking stored packed bytes again.
      */
     fun distroUnwrap(distroHandle: Long, blob: ByteArray): String? = nativeDistroUnwrap(distroHandle, blob)
 
