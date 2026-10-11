@@ -162,6 +162,12 @@ private fun DmConversationContent(
     val readOnly = acting?.readOnly == true
     // Why, for a former D, D not loaded yet, or the stack not running (§8.7).
     val unavailable = acting?.let { DistroGroupTexts.unavailable(it.signer, it.own) }
+    // Why the last group post was refused (the stack stopped, or D went, after the
+    // composer was enabled): its draft was put back. Forgotten when the group's
+    // standing changes, which then says why itself or can act again.
+    var refused by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(acting) { refused = null }
+    val notice = unavailable ?: refused
 
     // Pending attachment state
     var pendingAttachmentName by remember { mutableStateOf<String?>(null) }
@@ -406,11 +412,12 @@ private fun DmConversationContent(
                 Column(
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    // §8.7: read only here; the composer is disabled, and this says why.
-                    if (unavailable != null) {
+                    // §8.7: read only here; the composer is disabled, and this says why
+                    // (or why the last post was refused, its draft put back).
+                    if (notice != null) {
                         HorizontalDivider()
                         Text(
-                            text = unavailable,
+                            text = notice,
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
@@ -508,16 +515,31 @@ private fun DmConversationContent(
 
                         FilledIconButton(
                             onClick = {
+                                val sent = draft
                                 val attachName = pendingAttachmentName
                                 val attachData = pendingAttachmentData
-                                if (attachName != null && attachData != null) {
-                                    viewModel?.sendWithAttachment(draft, attachName, attachData)
-                                } else {
-                                    viewModel?.send(draft)
-                                }
+                                // Cleared before the send, so a refusal can only put it back.
                                 draft = ""
                                 pendingAttachmentName = null
                                 pendingAttachmentData = null
+                                refused = null
+                                // §8.7, alignment decision 5: a group post refused (the stack
+                                // stopped, or D went, since the composer was enabled) puts the
+                                // text back in front of anything typed since, and the attachment
+                                // unless another was picked, and says why.
+                                val keep: (String) -> Unit = { why ->
+                                    draft = sent + draft
+                                    if (pendingAttachmentName == null) {
+                                        pendingAttachmentName = attachName
+                                        pendingAttachmentData = attachData
+                                    }
+                                    refused = why
+                                }
+                                if (attachName != null && attachData != null) {
+                                    viewModel?.sendWithAttachment(sent, attachName, attachData, onRefused = keep)
+                                } else {
+                                    viewModel?.send(sent, onRefused = keep)
+                                }
                             },
                             enabled = !readOnly && (draft.isNotBlank() || pendingAttachmentName != null),
                             colors = IconButtonDefaults.filledIconButtonColors(

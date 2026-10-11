@@ -100,19 +100,26 @@ class ConversationViewModel(
         }
     }
 
-    fun send(content: String) {
+    /**
+     * Send [content]. [onRefused] hears why when a group post was refused with
+     * nothing stored or sent (GROUPS-DISTRO-DESIGN.md §8.7: the stack stopped,
+     * or D went, since the composer was enabled), so the screen can put the
+     * draft back (alignment decision 5, 2026-10-11). It runs on Main.
+     */
+    fun send(content: String, onRefused: (String) -> Unit = {}) {
         val text = OutgoingText.of(content)
         if (text.isEmpty()) return
         viewModelScope.launch {
-            repository.sendMessage(chatId, text)
+            repository.sendMessage(chatId, text)?.let { onRefused(DistroGroupTexts.refused(it)) }
         }
     }
 
-    fun sendWithAttachment(content: String, filename: String, data: ByteArray) {
+    /** As [send], with one attachment. */
+    fun sendWithAttachment(content: String, filename: String, data: ByteArray, onRefused: (String) -> Unit = {}) {
         val text = OutgoingText.of(content)
         viewModelScope.launch {
             try {
-                repository.sendMessage(chatId, text, listOf(filename to data))
+                repository.sendMessage(chatId, text, listOf(filename to data))?.let { onRefused(DistroGroupTexts.refused(it)) }
             } catch (e: PhotoLocationNotRemoved) {
                 // A photo leaves without where it was taken (James, 2026-10-05):
                 // nothing was stored or sent; say why (this runs on Main).

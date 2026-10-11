@@ -1,5 +1,6 @@
 package com.newendian.retichat.ui.conversation
 
+import com.newendian.retichat.data.repository.GroupPostRefused
 import com.newendian.retichat.data.repository.GroupSelves
 import com.newendian.retichat.names.DisplayNames
 
@@ -56,4 +57,11 @@ object DistroGroupTexts {
         GroupSelves.Signer.FORMER -> formerDistro(own)
         GroupSelves.Signer.DEVICE, GroupSelves.Signer.DISTRO -> null
     }
+
+    /**
+     * Why a group post was refused ([GroupPostRefused]), in the group view's
+     * words; a signer that can act there went between the check and the send
+     * (its identity gone with the stack): the stack is not running.
+     */
+    fun refused(refusal: GroupPostRefused): String = unavailable(refusal.signer, refusal.own) ?: NOT_RUNNING
 }

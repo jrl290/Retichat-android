@@ -678,7 +678,7 @@ class ChatRepository(
      * No other path needs it: a group relay forwards text only, and a queued
      * message's attachments are the files stored by the send below, cleaned.
      */
-    suspend fun sendMessage(chatId: String, content: String, attachmentFiles: List<Pair<String, ByteArray>> = emptyList()) {
+    suspend fun sendMessage(chatId: String, content: String, attachmentFiles: List<Pair<String, ByteArray>> = emptyList()): GroupPostRefused? {
         Log.d(TAG, "sendMessage: chatId=$chatId, content='${content.take(40)}', routerHandle=$routerHandle, selfDest=${selfDestHash.toHex().take(16)}")
         val attachments = attachmentFiles.map { (filename, data) ->
             filename to (PhotoMetadata.withoutLocation(data) ?: throw PhotoLocationNotRemoved(filename))
@@ -686,15 +686,16 @@ class ChatRepository(
         val chat = chatDao.findById(chatId)
         if (chat == null) {
             Log.e(TAG, "sendMessage: chat not found for id=$chatId")
-            return
+            return null
         }
 
-        if (chat.isGroup) {
+        return if (chat.isGroup) {
             sendGroupMessage(chat, content, attachments)
         } else {
             val destHash = chat.memberHashes.hexToBytes()
             Log.d(TAG, "sendMessage: direct to ${chat.memberHashes.take(16)}, destHash ${destHash.size} bytes")
             sendDirectMessage(chatId, destHash, content, attachments)
+            null
         }
     }
 
@@ -1330,16 +1331,20 @@ class ChatRepository(
      * D-group one `post` group sync is owed per post (§10.6), once the router
      * has accepted the first member envelope, or when the post is stored if no
      * member besides the user has accepted; never for a send that throws.
+     *
+     * A refusal is returned ([GroupPostRefused]): the composer was enabled when
+     * the user tapped, and the stack stopped or D went since, so the screen
+     * puts the draft back and says why (alignment decision 5, 2026-10-11).
      */
     private suspend fun sendGroupMessage(
         chat: ChatEntity,
         content: String,
         attachments: List<Pair<String, ByteArray>>,
-    ) {
-        val groupIdHex = chat.groupIdHex ?: return
+    ): GroupPostRefused? {
+        val groupIdHex = chat.groupIdHex ?: return null
         val signer = groupSigner(chat) ?: run {
-            Log.w(TAG, "sendGroupMessage: ${chat.id} refused: its own address ${chat.ownMember?.take(8)} has no signer on this device (${signerKind(chat)}, §8.7) — nothing stored or sent")
-            return
+            Log.w(TAG, "sendGroupMessage: ${chat.id} refused: its own address ${chat.ownMember?.take(8)} has no signer on this device (${signerKind(chat)}, §8.7) — nothing stored or sent; the draft goes back")
+            return GroupPostRefused(signerKind(chat), GroupSelves.ownMember(chat.ownMember, selfHex()))
         }
         val selfHex = signer.hex
         val members = messageDao.groupMembersList(chat.id)
@@ -1435,6 +1440,7 @@ class ChatRepository(
 
         // Optimistically mark as SENT (individual proofs update tracking)
         messageDao.updateState(groupMsgId, RetichatBridge.MessageState.SENT)
+        return null
     }
 
     /**

@@ -149,3 +149,11 @@ sealed class GroupCreation {
     /** [why] is [GroupSelves.Signer.NOT_READY] or [GroupSelves.Signer.NOT_LOADED] ([GroupSelves.createRefusal]). */
     data class Refused(val why: GroupSelves.Signer) : GroupCreation()
 }
+
+/**
+ * A group post refused with nothing stored, sent or queued (§8.7): the group's
+ * own address [own] has no signer here now, as [signer] says (the stack
+ * stopped, or D went or has not loaded, since the composer was enabled). The
+ * screen puts the draft back and says why (alignment decision 5, 2026-10-11).
+ */
+data class GroupPostRefused(val signer: GroupSelves.Signer, val own: String)

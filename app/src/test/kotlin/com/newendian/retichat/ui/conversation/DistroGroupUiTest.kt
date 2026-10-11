@@ -94,7 +94,10 @@ class DistroGroupUiTest {
         assertTrue(screen.contains("onClick = { viewModel?.acceptInvite() },\n                                enabled = !readOnly,"))
         // The text, in the invite bar and above the composer: why, for a former D, D not loaded yet, or the stack not running.
         assertTrue(screen.contains("val unavailable = acting?.let { DistroGroupTexts.unavailable(it.signer, it.own) }"))
-        assertEquals(2, Regex(Regex.escape("text = unavailable,")).findAll(screen).count())
+        assertEquals(1, Regex(Regex.escape("text = unavailable,")).findAll(screen).count())
+        // Above the composer: that, or why the last post was refused (GroupPostRefusedTest).
+        assertTrue(screen.contains("val notice = unavailable ?: refused"))
+        assertEquals(1, Regex(Regex.escape("text = notice,")).findAll(screen).count())
         assertFalse(screen.contains("if (acting?.former == true)"))
         // §13: the decline text of a D-group.
         assertTrue(screen.contains("Text(if (distroGroup) DistroGroupTexts.DECLINE_TITLE else \"Decline this group invite?\")"))
