@@ -17,7 +17,6 @@ import com.newendian.retichat.data.model.Contact
 import com.newendian.retichat.data.repository.GroupCreation
 import com.newendian.retichat.data.repository.GroupSelves
 import com.newendian.retichat.ui.components.AvatarCircle
-import com.newendian.retichat.ui.conversation.DistroGroupTexts
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -27,15 +26,15 @@ fun NewGroupScreen(
     onBack: () -> Unit,
     contacts: List<Contact> = emptyList(),
     createGroup: suspend (name: String, members: List<ByteArray>) -> GroupCreation = { _, _ -> GroupCreation.Refused(GroupSelves.Signer.NOT_READY) },
+    // Whether the start has finished, so a group can be signed and sent: Create is
+    // greyed, with no text, until it has (GROUPS-DISTRO-DESIGN.md §8.7; James, 2026-10-11).
+    started: Boolean = false,
 ) {
     var groupName by remember { mutableStateOf("") }
     var userEditedName by remember { mutableStateOf(false) }
     val selectedMembers = remember { mutableStateListOf<Contact>() }
     val scope = rememberCoroutineScope()
     var isCreating by remember { mutableStateOf(false) }
-    // Why the last create was refused (GROUPS-DISTRO-DESIGN.md §8.7): nothing was
-    // written; the name and the members stay for the next try.
-    var refusal by remember { mutableStateOf<String?>(null) }
 
     // Auto-generate group name from selected members' first names
     val defaultName = remember(selectedMembers.toList()) {
@@ -58,16 +57,17 @@ fun NewGroupScreen(
                     TextButton(
                         onClick = {
                             isCreating = true
-                            refusal = null
                             scope.launch {
                                 when (val created = createGroup(groupName, selectedMembers.map { it.destHash })) {
                                     is GroupCreation.Created -> onGroupCreated(created.chatId)
-                                    is GroupCreation.Refused -> refusal = DistroGroupTexts.createRefused(created.why)
+                                    // Nothing was written; nothing is said (James, 2026-10-11): the
+                                    // name and the members stay for the next try.
+                                    is GroupCreation.Refused -> Unit
                                 }
                                 isCreating = false
                             }
                         },
-                        enabled = groupName.isNotBlank() && selectedMembers.size >= 1 && !isCreating,
+                        enabled = started && groupName.isNotBlank() && selectedMembers.size >= 1 && !isCreating,
                     ) {
                         if (isCreating) {
                             CircularProgressIndicator(
@@ -102,11 +102,6 @@ fun NewGroupScreen(
                 shape = MaterialTheme.shapes.medium,
                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words),
             )
-
-            refusal?.let { why ->
-                Spacer(Modifier.height(8.dp))
-                Text(why, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-            }
 
             Spacer(Modifier.height(16.dp))
 

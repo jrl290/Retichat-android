@@ -65,11 +65,14 @@ class SendOrderingContractTest {
     @Test
     fun aSendThatQueuedLooksAtTheQueueAgain() {
         // Check after enqueue: the ready flush may have read the queue before
-        // this row became OUTBOUND.
+        // this row became OUTBOUND. The wait is StackRuntime.waitForStart, shared
+        // with group and channel posts (GroupPostWaitsTest), and it looks first.
         val send = body(repo, "sendDirectMessage")
         val queued = send.indexOf("updateState(localId, RetichatBridge.MessageState.OUTBOUND)")
-        val recheck = send.indexOf("if (StackRuntime.isReady) flushPendingMessages()")
+        val recheck = send.indexOf("StackRuntime.waitForStart(appContext, \"sendDirect\") { flushPendingMessages() }")
         assertTrue(queued >= 0 && recheck > queued)
+        val wait = body(stackRuntime, "waitForStart")
+        assertTrue(wait.trimStart().let { it.indexOf("if (isReady) flush()") in 0 until it.indexOf("if (!NetworkMonitor.isOnline.value)") })
     }
 
     @Test

@@ -78,6 +78,16 @@ interface MessageDao {
     @Query("UPDATE messages SET nativeHandle = :handle WHERE id = :id AND isOutbound = 1 AND state = 0x01 AND nativeHandle = 0")
     suspend fun claimPendingOutbound(id: String, handle: Long): Int
 
+    /**
+     * Take a group post queued at start-up (GROUPS-DISTRO-DESIGN.md §8.7) from
+     * the queue: set its [state] (SENDING, or FAILED when it cannot be signed
+     * now) and its [sender], the group's own address resolved now, only while
+     * the row still matches [pendingOutbound]. Returns 1 when this caller took
+     * it and 0 when it had already left the queue, so it is sent once.
+     */
+    @Query("UPDATE messages SET state = :state, senderHashHex = :sender WHERE id = :id AND isOutbound = 1 AND state = 0x01 AND nativeHandle = 0")
+    suspend fun claimQueuedGroupPost(id: String, state: Int, sender: String): Int
+
     // ---- Attachments ----
 
     @Insert

@@ -129,6 +129,41 @@ object StackRuntime {
     val isStarting: Boolean
         get() = readyDeferred?.isCompleted == false
 
+    /**
+     * Wait for the start for a send [what] that was just queued because the
+     * start had not finished: a DM, a group post or a channel post, which all
+     * wait the same way (James, 2026-10-11). [flush] sends that queue. The
+     * ready signal sends it when a start finishes (onStackReady), and the
+     * network's return does when it comes back; this covers the rest. No timer
+     * and no retry (DESIGN_PRINCIPLES §5): each step waits for a signal.
+     */
+    suspend fun waitForStart(context: Context, what: String, flush: suspend () -> Unit) {
+        // The ready signal may have flushed the queue between the caller's
+        // check and its write: look again now that the row is queued, or it
+        // waits for the next trigger.
+        if (isReady) flush()
+        if (!NetworkMonitor.isOnline.value) {
+            Log.i(TAG, "$what: offline — queued for later")
+            return
+        }
+        // A bootstrap already running flushes the queue when it finishes.
+        if (isStarting) {
+            Log.i(TAG, "$what: stack starting — queued until it is ready")
+            return
+        }
+        Log.i(TAG, "$what: stack not ready — queued, acquiring")
+        // Held only while it starts and the queue goes out: the stack then
+        // stays up (D7). Until 2026-09-25 this hold was never given back.
+        holding(context) { ready ->
+            if (!ready) {
+                Log.e(TAG, "$what: acquire failed — stays queued")
+                return@holding
+            }
+            // A stack that was already up sends no ready signal.
+            if (isReady) flush()
+        }
+    }
+
     /** Wait up to [timeoutMs] for the stack to be fully ready. */
     suspend fun awaitReady(timeoutMs: Long = 30_000L): Boolean {
         if (isReady) return true

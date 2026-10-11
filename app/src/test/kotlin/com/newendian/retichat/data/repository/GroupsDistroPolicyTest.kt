@@ -69,12 +69,14 @@ class GroupsDistroPolicyTest {
 
     @Test
     fun theSignerIsResolvedFromTheOwnAddressAndWhatIsHeldNowNeverTheDeviceForADGroup() {
-        assertEquals(GroupSelves.Signer.DEVICE, GroupSelves.signer(null, device, d, distroStored = true))
-        assertEquals(GroupSelves.Signer.DEVICE, GroupSelves.signer(device, device, null, distroStored = false))
-        assertEquals(GroupSelves.Signer.DISTRO, GroupSelves.signer(d, device, d, distroStored = true))
-        assertEquals("replaced by D'", GroupSelves.Signer.FORMER, GroupSelves.signer(d, device, d2, distroStored = true))
-        assertEquals("forgotten", GroupSelves.Signer.FORMER, GroupSelves.signer(d, device, null, distroStored = false))
-        assertEquals("stored, not loaded yet", GroupSelves.Signer.NOT_LOADED, GroupSelves.signer(d, device, null, distroStored = true))
+        assertEquals(GroupSelves.Signer.DEVICE, GroupSelves.signer(null, device, d))
+        assertEquals(GroupSelves.Signer.DEVICE, GroupSelves.signer(device, device, null))
+        assertEquals(GroupSelves.Signer.DISTRO, GroupSelves.signer(d, device, d))
+        assertEquals("replaced by D'", GroupSelves.Signer.FORMER, GroupSelves.signer(d, device, d2))
+        assertEquals("forgotten", GroupSelves.Signer.FORMER, GroupSelves.signer(d, device, null))
+        // A stored key is loaded before the start finishes (DistroManager.init): one
+        // not loaded once it has is a former distro, never "not loaded yet" (James, 2026-10-11).
+        assertEquals("stored, not loaded", GroupSelves.Signer.FORMER, GroupSelves.signer(d, device, null))
         assertTrue(GroupSelves.isDistroGroup(d, device))
         assertFalse(GroupSelves.isDistroGroup(null, device))
         assertFalse(GroupSelves.isDistroGroup(device, device))

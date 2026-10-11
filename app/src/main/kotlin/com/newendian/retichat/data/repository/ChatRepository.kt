@@ -85,10 +85,14 @@ class ChatRepository(
     private val _groupActionsReady = MutableStateFlow(false)
     /**
      * The stack is up ([configure] gave a router, the device identity and its
-     * address): a group send can be signed and go. False while it starts,
-     * after it failed to start, and once it is stopped; no group action is
-     * offered then ([GroupSelves.Signer.NOT_READY], GROUPS-DISTRO-DESIGN.md
-     * §8.7), and the screens re-read what they offer when this changes.
+     * address): a group action can be signed and go. False while it starts,
+     * after it failed to start, and once it is stopped
+     * ([GroupSelves.Signer.NOT_READY], GROUPS-DISTRO-DESIGN.md §8.7): accept,
+     * decline, leave and create are greyed then, with no text, and a group post
+     * waits as a DM does (James, 2026-10-11); the screens re-read what they
+     * offer when this changes. A stored distro key is loaded before configure
+     * ([DistroManager.init]), so one not loaded once this is true is a former
+     * distro, never "not loaded yet".
      */
     val groupActionsReady: StateFlow<Boolean> = _groupActionsReady
 
@@ -501,12 +505,13 @@ class ChatRepository(
      * (§10.6), so every other device of D holds the group too. Otherwise as the
      * device, as before.
      *
-     * Refused, with nothing written or sent, while the stack is not up or a
-     * distro is stored but has not loaded yet ([GroupSelves.createRefusal],
-     * §8.7): the screen says why ([GroupCreation.Refused]). Until 2026-10-11 the
-     * group was written anyway: with the stack down, one whose invites were
-     * never sent; with D not loaded, one as the device that the user's other
-     * devices never hear of.
+     * Refused, with nothing written or sent, while the start has not finished
+     * ([GroupSelves.createRefusal], §8.7); Create is greyed then, with no text,
+     * and a refusal says nothing (James, 2026-10-11). A stored distro key that
+     * cannot be loaded is not waited for: it was loaded, if it ever will be,
+     * before the start finished, so it is a former distro and the group is
+     * created as the device. Until 2026-10-11 the group was written anyway with
+     * the stack down, one whose invites were never sent.
      */
     suspend fun createGroupChat(
         name: String,
@@ -514,7 +519,7 @@ class ChatRepository(
     ): GroupCreation {
         // The user's own entry: the distro held now, else the device (§8.1).
         val distro = DistroManager.signing()?.first
-        GroupSelves.createRefusal(if (groupActionsReady.value) selfHex() else "", distro?.deliveryHashHex, DistroManager.isStored(appContext))?.let { why ->
+        GroupSelves.createRefusal(if (groupActionsReady.value) selfHex() else "")?.let { why ->
             Log.w(TAG, "createGroupChat refused: $why (§8.7) — nothing written or sent")
             return GroupCreation.Refused(why)
         }
@@ -547,9 +552,8 @@ class ChatRepository(
         val manager = groupChatManager
         if (signer == null || manager == null) {
             val kind = signerKind(chat)
-            val why = if (kind == GroupSelves.Signer.NOT_LOADED) kind else GroupSelves.Signer.NOT_READY
             Log.w(TAG, "createGroupChat refused: ${if (manager == null) "stack offline" else "no signer for ${own.take(8)} ($kind)"} (§8.7) — nothing written or sent")
-            return GroupCreation.Refused(why)
+            return GroupCreation.Refused(if (manager == null) GroupSelves.Signer.NOT_READY else kind)
         }
         chatDao.upsert(chat)
 
@@ -607,9 +611,10 @@ class ChatRepository(
 
     /**
      * Send all messages that were queued while offline or while the stack was
-     * starting (state == OUTBOUND, no native handle). Called when the stack is
-     * ready ([onStackReady]), when network becomes available, and by a send
-     * that queued while the stack was starting. These can fire together, so
+     * starting (state == OUTBOUND, no native handle): DMs, and group posts
+     * ([holdGroupPost]). Called when the stack is ready ([onStackReady]), when
+     * network becomes available, and by a send that queued while the stack was
+     * starting ([StackRuntime.waitForStart]). These can fire together, so
      * flushes are serialized and a flush that waited re-reads the queue (and
      * readiness) after the one before it has ended.
      */
@@ -631,10 +636,16 @@ class ChatRepository(
                 continue
             }
             if (chat.isGroup) {
-                // Group messages are fan-out; re-sending properly would need
-                // the original member list.  For now, mark failed so the user
-                // can resend manually.
-                messageDao.updateState(msg.id, RetichatBridge.MessageState.FAILED)
+                // A group post typed while the start had not finished
+                // ([holdGroupPost], §8.7): sent now as the group's own address
+                // resolved now, through the group send. Until 2026-10-11 a group
+                // row found here was failed for the user to resend.
+                try {
+                    releaseHeldGroupPost(chat, msg)
+                } catch (e: Exception) {
+                    Log.e(TAG, "flushPending: group post ${msg.id} failed: ${e.message}")
+                    messageDao.updateState(msg.id, RetichatBridge.MessageState.FAILED)
+                }
                 continue
             }
 
@@ -736,32 +747,10 @@ class ChatRepository(
                 // are registered; configure() comes before both.
                 if (!stackReady()) {
                     messageDao.updateState(localId, RetichatBridge.MessageState.OUTBOUND)
-                    // The ready signal may have flushed the queue between the
-                    // check above and the write: look again now that the row
-                    // is queued, or it waits for the next trigger.
-                    if (StackRuntime.isReady) flushPendingMessages()
-                    if (!NetworkMonitor.isOnline.value) {
-                        Log.i(TAG, "sendDirect: offline — queued for later")
-                        return@launch
-                    }
-                    // A bootstrap already running flushes the queue when it
-                    // finishes.
-                    if (StackRuntime.isStarting) {
-                        Log.i(TAG, "sendDirect: stack starting — queued until it is ready")
-                        return@launch
-                    }
-                    Log.i(TAG, "sendDirect: stack not ready — queued, acquiring")
-                    // Held only while it starts and the queue goes out: the
-                    // stack then stays up (D7). Until 2026-09-25 this hold was
-                    // never given back.
-                    StackRuntime.holding(appContext) { ready ->
-                        if (!ready) {
-                            Log.e(TAG, "sendDirect: acquire failed — message stays queued")
-                            return@holding
-                        }
-                        // A stack that was already up sends no ready signal.
-                        if (StackRuntime.isReady) flushPendingMessages()
-                    }
+                    // Queued: the start, or the network's return, sends it. The
+                    // same wait a group post and a channel post typed at start-up
+                    // go through (James, 2026-10-11).
+                    StackRuntime.waitForStart(appContext, "sendDirect") { flushPendingMessages() }
                     return@launch
                 }
                 dispatch(localId, destHash, content, attachments, fromQueue = false)
@@ -1322,19 +1311,19 @@ class ChatRepository(
     }
 
     /**
-     * A post in group [chat], as the group's own address resolved now
-     * ([groupSigner], GROUPS-DISTRO-DESIGN.md §8.1): refused, with nothing
-     * stored, sent or queued, when it resolves to nothing (a D-group whose D
-     * this device no longer holds, or has not loaded yet: §8.7, the composer is
-     * disabled there). The targets are the accepted members without any self
-     * address (§9.2); a member that is a distro gets no app link (§8.4). In a
-     * D-group one `post` group sync is owed per post (§10.6), once the router
-     * has accepted the first member envelope, or when the post is stored if no
-     * member besides the user has accepted; never for a send that throws.
+     * A post in group [chat] (GROUPS-DISTRO-DESIGN.md §8.1, §8.7; James's UI
+     * rulings, 2026-10-11), decided by [GroupSelves.post]:
      *
-     * A refusal is returned ([GroupPostRefused]): the composer was enabled when
-     * the user tapped, and the stack stopped or D went since, so the screen
-     * puts the draft back and says why (alignment decision 5, 2026-10-11).
+     * - While the start has not finished, it waits exactly as a DM does
+     *   ([holdGroupPost]): stored now with the DM's pending clock, and sent when
+     *   the start finishes, or shown failed, the DM failed state, if it cannot
+     *   be signed then. Until 2026-10-11 the composer was greyed at start-up.
+     * - In a group whose own address is a distro this device no longer holds (a
+     *   former distro), refused with nothing stored, sent or queued: a
+     *   [GroupPostRefused] is returned, and the screen puts the draft back and
+     *   says nothing; the former-distro bar is what it shows.
+     * - Otherwise stored and sent now, as the group's own address resolved now
+     *   ([groupSigner]), through [fanOutGroupPost].
      */
     private suspend fun sendGroupMessage(
         chat: ChatEntity,
@@ -1342,21 +1331,18 @@ class ChatRepository(
         attachments: List<Pair<String, ByteArray>>,
     ): GroupPostRefused? {
         val groupIdHex = chat.groupIdHex ?: return null
+        when (GroupSelves.post(signerKind(chat), stackReady())) {
+            GroupSelves.Post.WAIT -> {
+                holdGroupPost(chat, content, attachments)
+                return null
+            }
+            GroupSelves.Post.REFUSE, GroupSelves.Post.SEND -> Unit
+        }
         val signer = groupSigner(chat) ?: run {
             Log.w(TAG, "sendGroupMessage: ${chat.id} refused: its own address ${chat.ownMember?.take(8)} has no signer on this device (${signerKind(chat)}, §8.7) — nothing stored or sent; the draft goes back")
             return GroupPostRefused(signerKind(chat), GroupSelves.ownMember(chat.ownMember, selfHex()))
         }
-        val selfHex = signer.hex
-        val members = messageDao.groupMembersList(chat.id)
-        val self = groupSelf(chat, members)
-        val memberHexes = GroupMemberStatuses.acceptedMemberHexes(members = members, selfHex = selfHex)
-            .filter { !self.isSelf(it) }
         val postedAt = System.currentTimeMillis()
-        // §10.6: the post's group sync, in a D-group only, owed once.
-        val postSync: GroupSync? = if (GroupSelves.isDistroGroup(chat.ownMember, selfHex())) {
-            GroupSync(DistroGroupSync.POST, groupIdHex, postedAt, text = content, left = UserPreferences.groupsLeftBy(appContext, signer.hex))
-        } else null
-        val postSyncOwed = java.util.concurrent.atomic.AtomicBoolean(postSync == null)
 
         // Create the outbound message record once (shared ID for the group msg)
         val groupMsgId = "grp_${System.currentTimeMillis()}_${(0..999).random()}"
@@ -1365,21 +1351,117 @@ class ChatRepository(
             MessageEntity(
                 id = groupMsgId,
                 chatId = chat.id,
-                senderHashHex = selfHex,
+                senderHashHex = signer.hex,
                 content = content,
                 timestamp = postedAt,
                 isOutbound = true,
                 state = RetichatBridge.MessageState.SENDING,
             )
         )
-        // Nothing to submit: no member besides the user has accepted. The post's sync is owed now.
-        if (memberHexes.isEmpty() && postSync != null && postSyncOwed.compareAndSet(false, true)) {
-            DistroOutboxRuntime.oweGroupSync(appContext, signer.hex, postSync)
-        }
 
         // Save outbound attachments to disk + DB so they display in the bubble
         if (attachments.isNotEmpty()) {
             saveOutboundAttachments(groupMsgId, attachments)
+        }
+
+        fanOutGroupPost(chat, groupIdHex, groupMsgId, content, attachments, postedAt, signer)
+        return null
+    }
+
+    /**
+     * A group post typed while the start has not finished (§8.7; James,
+     * 2026-10-11): it waits exactly as a DM does ([sendDirectMessage]). Stored
+     * now, with its attachments, then queued (OUTBOUND, no native handle: the
+     * DM's pending clock), and [StackRuntime.waitForStart] has the queue
+     * flushed when the start finishes; [flushPendingMessages] hands it to
+     * [releaseHeldGroupPost]. Who it goes as, and to whom, is decided then. Its
+     * sender is filled in then: the group's own address is not known before.
+     */
+    private suspend fun holdGroupPost(
+        chat: ChatEntity,
+        content: String,
+        attachments: List<Pair<String, ByteArray>>,
+    ) {
+        val groupMsgId = "grp_${System.currentTimeMillis()}_${(0..999).random()}"
+        messageDao.upsert(
+            MessageEntity(
+                id = groupMsgId,
+                chatId = chat.id,
+                senderHashHex = "",
+                content = content,
+                timestamp = System.currentTimeMillis(),
+                isOutbound = true,
+                state = RetichatBridge.MessageState.GENERATING,
+            )
+        )
+        // Stored before it is queued, so the queue never takes it without them.
+        if (attachments.isNotEmpty()) {
+            saveOutboundAttachments(groupMsgId, attachments)
+        }
+        messageDao.updateState(groupMsgId, RetichatBridge.MessageState.OUTBOUND)
+        Log.i(TAG, "sendGroupMessage: ${chat.id} — the start has not finished; $groupMsgId queued as a DM is (§8.7)")
+        scope.launch(Dispatchers.IO) {
+            StackRuntime.waitForStart(appContext, "sendGroupMessage") { flushPendingMessages() }
+        }
+    }
+
+    /**
+     * The group post [msg], queued by [holdGroupPost], now the start has
+     * finished (§8.7): taken from the queue once (a second flush finds it
+     * gone), as the group's own address resolved now, and sent through
+     * [fanOutGroupPost] to the members accepted now. When it cannot be signed
+     * now (a former distro), it is taken as failed, the DM failed state, and
+     * nothing is sent. Left queued if the start stopped again meanwhile. This
+     * is ordering (DESIGN_PRINCIPLES §5): the post is sent once, never retried.
+     */
+    private suspend fun releaseHeldGroupPost(chat: ChatEntity, msg: MessageEntity) {
+        if (GroupSelves.post(signerKind(chat), stackReady()) == GroupSelves.Post.WAIT) {
+            Log.i(TAG, "flushPending: group post ${msg.id} — the stack stopped again; left queued")
+            return
+        }
+        val signer = groupSigner(chat)
+        val groupIdHex = chat.groupIdHex
+        val state = if (signer == null || groupIdHex == null) RetichatBridge.MessageState.FAILED else RetichatBridge.MessageState.SENDING
+        if (messageDao.claimQueuedGroupPost(msg.id, state, signer?.hex ?: "") == 0) return
+        if (signer == null || groupIdHex == null) {
+            Log.w(TAG, "flushPending: group post ${msg.id} failed: its own address ${chat.ownMember?.take(8)} has no signer on this device (${signerKind(chat)}, §8.7) — nothing sent")
+            return
+        }
+        fanOutGroupPost(chat, groupIdHex, msg.id, msg.content, queuedAttachments(msg.id), msg.timestamp, signer)
+    }
+
+    /**
+     * Send the stored group post [groupMsgId] to the group's members, as
+     * [signer] (§8.1): sent at once by [sendGroupMessage], or released from the
+     * queue by [releaseHeldGroupPost]. The targets are the accepted members
+     * without any self address (§9.2); a member that is a distro gets no app
+     * link (§8.4). In a D-group one `post` group sync is owed per post (§10.6),
+     * once the router has accepted the first member envelope, or now if no
+     * member besides the user has accepted; never for a send that throws.
+     */
+    private suspend fun fanOutGroupPost(
+        chat: ChatEntity,
+        groupIdHex: String,
+        groupMsgId: String,
+        content: String,
+        attachments: List<Pair<String, ByteArray>>,
+        postedAt: Long,
+        signer: GroupSigner,
+    ) {
+        val selfHex = signer.hex
+        val members = messageDao.groupMembersList(chat.id)
+        val self = groupSelf(chat, members)
+        val memberHexes = GroupMemberStatuses.acceptedMemberHexes(members = members, selfHex = selfHex)
+            .filter { !self.isSelf(it) }
+        // §10.6: the post's group sync, in a D-group only, owed once.
+        val postSync: GroupSync? = if (GroupSelves.isDistroGroup(chat.ownMember, selfHex())) {
+            GroupSync(DistroGroupSync.POST, groupIdHex, postedAt, text = content, left = UserPreferences.groupsLeftBy(appContext, signer.hex))
+        } else null
+        val postSyncOwed = java.util.concurrent.atomic.AtomicBoolean(postSync == null)
+
+        // Nothing to submit: no member besides the user has accepted. The post's sync is owed now.
+        if (memberHexes.isEmpty() && postSync != null && postSyncOwed.compareAndSet(false, true)) {
+            DistroOutboxRuntime.oweGroupSync(appContext, signer.hex, postSync)
         }
 
         // Track delivery per member
@@ -1440,7 +1522,6 @@ class ChatRepository(
 
         // Optimistically mark as SENT (individual proofs update tracking)
         messageDao.updateState(groupMsgId, RetichatBridge.MessageState.SENT)
-        return null
     }
 
     /**
@@ -2256,7 +2337,7 @@ class ChatRepository(
      * (§8.1, §8.7): [GroupSelves.Signer.NOT_READY] while the stack is not up.
      */
     fun signerKind(chat: ChatEntity): GroupSelves.Signer =
-        GroupSelves.signer(chat.ownMember, if (groupActionsReady.value) selfHex() else "", DistroManager.signing()?.first?.deliveryHashHex, DistroManager.isStored(appContext))
+        GroupSelves.signer(chat.ownMember, if (groupActionsReady.value) selfHex() else "", DistroManager.signing()?.first?.deliveryHashHex)
 
     /**
      * `groupSigner(ownMember)` (GROUPS-DISTRO-DESIGN.md §8.1): who every send
@@ -2276,7 +2357,7 @@ class ChatRepository(
                 GroupSigner(state.deliveryHashHex, hash, handle, DistroCodec.hexToBytes(state.publicKeyHex))
             }
         }
-        GroupSelves.Signer.NOT_LOADED, GroupSelves.Signer.FORMER, GroupSelves.Signer.NOT_READY -> null
+        GroupSelves.Signer.FORMER, GroupSelves.Signer.NOT_READY -> null
     }
 
     /**

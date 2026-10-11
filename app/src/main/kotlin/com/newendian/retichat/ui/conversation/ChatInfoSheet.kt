@@ -113,9 +113,10 @@ fun ChatInfoSheet(
     }
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var showLeaveConfirm by remember { mutableStateOf(false) }
-    var showLocalDeleteConfirm by remember { mutableStateOf(false) }
     // A D-group: its decline, leave and delete are D's, on all the user's devices (§13).
     val distroGroup = acting?.distroGroup == true
+    // A former D (§8.7): the bar with its text and "Delete from this device" in place of Leave.
+    val formerOwn = acting?.takeIf { it.former }?.own
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -289,32 +290,17 @@ fun ChatInfoSheet(
 
             item {
                 ChatInfoCard {
-                    if (isGroup && acting?.former == true) {
-                        // §8.7: only "Delete from this device"; no leave can be signed here.
-                        TextButton(
-                            onClick = { showLocalDeleteConfirm = true },
-                            colors = ButtonDefaults.textButtonColors(
-                                contentColor = MaterialTheme.colorScheme.error,
-                            ),
-                            modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                androidx.compose.material3.Icon(
-                                    Icons.Default.Delete,
-                                    contentDescription = null,
-                                )
-                                Spacer(Modifier.padding(horizontal = 6.dp))
-                                Text(DistroGroupTexts.LOCAL_DELETE, style = MaterialTheme.typography.bodyLarge)
-                            }
-                        }
+                    if (isGroup && formerOwn != null) {
+                        // §8.7: no leave can be signed here; only "Delete from this device".
+                        FormerDistroBar(own = formerOwn, onDeleteFromThisDevice = {
+                            onDismiss()
+                            onDeleteFromThisDevice()
+                        })
                     } else if (isGroup) {
+                        // §8.7: greyed, with no text, until the start finishes (James, 2026-10-11).
                         TextButton(
                             onClick = { showLeaveConfirm = true },
-                            // §8.7: not offered until the distro is loaded (start-up); nothing is queued.
-                            enabled = acting?.readOnly != true,
+                            enabled = acting?.canAct == true,
                             colors = ButtonDefaults.textButtonColors(
                                 contentColor = MaterialTheme.colorScheme.error,
                             ),
@@ -458,17 +444,49 @@ fun ChatInfoSheet(
             },
         )
     }
+}
 
-    if (showLocalDeleteConfirm) {
+/**
+ * A group whose own address is a distro this device no longer holds
+ * (GROUPS-DISTRO-DESIGN.md §8.7; James, 2026-10-11): what replaces the composer,
+ * accept, decline and leave, in the conversation and in chat info. The text and
+ * "Delete from this device", whose confirmation keeps its words. Nothing is
+ * sent: [onDeleteFromThisDevice] is the repository's local-only delete.
+ */
+@Composable
+fun FormerDistroBar(own: String, onDeleteFromThisDevice: () -> Unit, modifier: Modifier = Modifier) {
+    var confirm by remember { mutableStateOf(false) }
+    Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(DistroGroupTexts.formerDistro(own), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        TextButton(
+            onClick = { confirm = true },
+            colors = ButtonDefaults.textButtonColors(
+                contentColor = MaterialTheme.colorScheme.error,
+            ),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                androidx.compose.material3.Icon(
+                    Icons.Default.Delete,
+                    contentDescription = null,
+                )
+                Spacer(Modifier.padding(horizontal = 6.dp))
+                Text(DistroGroupTexts.LOCAL_DELETE, style = MaterialTheme.typography.bodyLarge)
+            }
+        }
+    }
+    if (confirm) {
         AlertDialog(
-            onDismissRequest = { showLocalDeleteConfirm = false },
+            onDismissRequest = { confirm = false },
             title = { Text("${DistroGroupTexts.LOCAL_DELETE}?") },
             text = { Text(DistroGroupTexts.LOCAL_DELETE_TEXT) },
             confirmButton = {
                 TextButton(
                     onClick = {
-                        showLocalDeleteConfirm = false
-                        onDismiss()
+                        confirm = false
                         onDeleteFromThisDevice()
                     },
                     colors = ButtonDefaults.textButtonColors(
@@ -479,7 +497,7 @@ fun ChatInfoSheet(
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showLocalDeleteConfirm = false }) {
+                TextButton(onClick = { confirm = false }) {
                     Text("Cancel")
                 }
             },

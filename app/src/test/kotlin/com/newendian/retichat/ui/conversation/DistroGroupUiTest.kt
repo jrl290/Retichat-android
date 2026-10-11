@@ -13,8 +13,9 @@ import java.io.File
  * What a group whose own address is the user's distro D shows
  * (GROUPS-DISTRO-DESIGN.md §8.7, §9.2, §13): the "on all your devices" texts
  * for decline, leave and delete; in a group whose D this device no longer
- * holds, the read-only text, no composer, accept, decline or leave, and only
- * "Delete from this device"; every self address shown as "You".
+ * holds, the former-distro bar (its text and "Delete from this device") in
+ * place of the composer, accept, decline and leave; every self address shown
+ * as "You". At start-up, nothing is said (James, 2026-10-11).
  */
 class DistroGroupUiTest {
     private fun src(path: String) = File("src/main/kotlin/com/newendian/retichat/$path").readText()
@@ -37,25 +38,56 @@ class DistroGroupUiTest {
         assertEquals("Delete from this device", DistroGroupTexts.LOCAL_DELETE)
         assertEquals("This removes the group from this device only. You stay in the group on your other devices and for the other members.",
             DistroGroupTexts.LOCAL_DELETE_TEXT)
-        assertEquals("This group uses your distro address d0d0d0d0…, which this device no longer holds. " +
-            "You can read it here, but cannot post or change your membership from this device.", DistroGroupTexts.formerDistro(d))
+        // James, 2026-10-11: the only text for a group that cannot act here, the same on every client.
+        assertEquals(
+            "This group uses your distro address d0d0d0d0…, which is no longer on this device. " +
+                "New messages in it don't reach this device, and you can't post, join or leave from here. " +
+                "Import that distro again to use the group here.",
+            DistroGroupTexts.formerDistro(d),
+        )
+        assertEquals("the first 8 hex, lowercased, and U+2026", DistroGroupTexts.formerDistro(d.uppercase()), DistroGroupTexts.formerDistro(d))
     }
 
     @Test
-    fun theGroupViewSaysWhyNothingIsOfferedInTheAlignedWordsForEachSignerThatCannotAct() {
-        // Alignment decision 3 (2026-10-11): the same words on iOS, Android and the web.
-        assertEquals("Retichat isn't running on this device right now. You can post and change your membership once it is.",
-            DistroGroupTexts.unavailable(GroupSelves.Signer.NOT_READY, d))
-        assertEquals("Your distro address hasn't loaded on this device yet. You can post and change your membership once it has.",
-            DistroGroupTexts.unavailable(GroupSelves.Signer.NOT_LOADED, d))
-        assertEquals(DistroGroupTexts.formerDistro(d), DistroGroupTexts.unavailable(GroupSelves.Signer.FORMER, d))
-        assertEquals(null, DistroGroupTexts.unavailable(GroupSelves.Signer.DEVICE, device))
-        assertEquals(null, DistroGroupTexts.unavailable(GroupSelves.Signer.DISTRO, d))
-        // Each signer that cannot act is read only, and only those.
+    fun aFormerDistroGroupShowsTheBarInPlaceOfTheComposerAcceptDeclineAndLeave() {
+        // One bar, with the text and "Delete from this device" and its confirmation, in both places.
+        val at = sheet.indexOf("fun FormerDistroBar(")
+        assertTrue("fun FormerDistroBar in ChatInfoSheet.kt", at >= 0)
+        val bar = sheet.substring(at)
+        val text = bar.indexOf("Text(DistroGroupTexts.formerDistro(own)")
+        val button = bar.indexOf("Text(DistroGroupTexts.LOCAL_DELETE, style")
+        assertTrue(text >= 0 && button > text)
+        assertTrue(bar.contains("title = { Text(\"\${DistroGroupTexts.LOCAL_DELETE}?\") },"))
+        assertTrue(bar.contains("text = { Text(DistroGroupTexts.LOCAL_DELETE_TEXT) },"))
+        // The conversation: the bar first, then the invite card or the composer.
+        val inConversation = screen.indexOf("if (formerOwn != null) {")
+        assertTrue(inConversation >= 0)
+        assertTrue(screen.indexOf("FormerDistroBar(", inConversation) in inConversation until screen.indexOf("} else if (isPendingInvite) {", inConversation))
+        assertEquals(1, Regex(Regex.escape("FormerDistroBar(")).findAll(screen).count())
+        // Chat info: the bar in place of Leave.
+        val inSheet = sheet.indexOf("if (isGroup && formerOwn != null) {")
+        assertTrue(inSheet >= 0 && sheet.indexOf("FormerDistroBar(", inSheet) < sheet.indexOf("} else if (isGroup) {", inSheet))
+        // Both delete from this device only: no leave is sent.
+        assertEquals(1, Regex(Regex.escape("app.repository.deleteGroupFromThisDevice(chatId)")).findAll(screen).count())
+        // The former-distro text is said nowhere else.
+        assertEquals(1, Regex(Regex.escape("DistroGroupTexts.formerDistro(")).findAll(sheet).count())
+        assertFalse(screen.contains("DistroGroupTexts.formerDistro("))
+    }
+
+    @Test
+    fun onlyTheDeviceOrTheDistroHeldCanActAndOnlyAFormerDistroIsShown() {
+        // James, 2026-10-11: at start-up accept, decline and leave are greyed with no
+        // text; only a former distro shows anything (its bar).
         for (signer in GroupSelves.Signer.values()) {
-            val acting = GroupActing(distroGroup = true, signer = signer, own = d, selves = setOf(d, device))
-            assertEquals(signer.toString(), acting.readOnly, DistroGroupTexts.unavailable(signer, d) != null)
+            val acting = GroupActing(distroGroup = signer != GroupSelves.Signer.DEVICE, signer = signer, own = d, selves = setOf(d, device))
+            assertEquals(signer.toString(), signer == GroupSelves.Signer.DEVICE || signer == GroupSelves.Signer.DISTRO, acting.canAct)
+            assertEquals(signer.toString(), signer == GroupSelves.Signer.FORMER, acting.former)
         }
+        assertEquals(
+            listOf(GroupSelves.Signer.DEVICE, GroupSelves.Signer.DISTRO, GroupSelves.Signer.FORMER, GroupSelves.Signer.NOT_READY),
+            GroupSelves.Signer.values().toList(),
+        )
+        assertTrue(model.contains("chat?.takeIf { it.isGroup }?.let { repository.groupActing(it) }"))
     }
 
     @Test
@@ -71,34 +103,19 @@ class DistroGroupUiTest {
     }
 
     @Test
-    fun onlyAFormerDistroGroupIsReadOnlyAndOffersTheLocalDelete() {
-        fun acting(signer: GroupSelves.Signer) = GroupActing(distroGroup = signer != GroupSelves.Signer.DEVICE, signer = signer, own = d, selves = setOf(d, device))
-        assertFalse(acting(GroupSelves.Signer.DEVICE).readOnly)
-        assertFalse(acting(GroupSelves.Signer.DISTRO).readOnly)
-        assertTrue(acting(GroupSelves.Signer.NOT_LOADED).readOnly)
-        assertFalse(acting(GroupSelves.Signer.NOT_LOADED).former)
-        assertTrue(acting(GroupSelves.Signer.FORMER).readOnly)
-        assertTrue(acting(GroupSelves.Signer.FORMER).former)
-        assertTrue(model.contains("chat?.takeIf { it.isGroup }?.let { repository.groupActing(it) }"))
-    }
-
-    @Test
-    fun theConversationDisablesWhatWouldSendAndSaysWhyInAFormerDistroGroup() {
-        assertTrue(screen.contains("val readOnly = acting?.readOnly == true"))
-        // The composer: field, attach and send.
-        assertTrue(screen.contains("onValueChange = { draft = it },\n                            enabled = !readOnly,"))
-        assertTrue(screen.contains("IconButton(onClick = { filePickerLauncher.launch(\"*/*\") }, enabled = !readOnly)"))
-        assertTrue(screen.contains("enabled = !readOnly && (draft.isNotBlank() || pendingAttachmentName != null),"))
+    fun theConversationNeverGreysTheComposerAndGreysAcceptAndDeclineWithNoText() {
+        assertTrue(screen.contains("val canAct = acting?.canAct == true"))
+        // The composer: field, attach and send, never greyed for the group (a post waits, GroupPostWaitsTest).
+        assertTrue(screen.contains("onValueChange = { draft = it },\n                            modifier = Modifier.weight(1f),"))
+        assertTrue(screen.contains("IconButton(onClick = { filePickerLauncher.launch(\"*/*\") }) {"))
+        assertTrue(screen.contains("enabled = draft.isNotBlank() || pendingAttachmentName != null,"))
         // Accept and decline.
-        assertTrue(screen.contains("onClick = { showDeclineConfirm = true },\n                                enabled = !readOnly,"))
-        assertTrue(screen.contains("onClick = { viewModel?.acceptInvite() },\n                                enabled = !readOnly,"))
-        // The text, in the invite bar and above the composer: why, for a former D, D not loaded yet, or the stack not running.
-        assertTrue(screen.contains("val unavailable = acting?.let { DistroGroupTexts.unavailable(it.signer, it.own) }"))
-        assertEquals(1, Regex(Regex.escape("text = unavailable,")).findAll(screen).count())
-        // Above the composer: that, or why the last post was refused (GroupPostRefusedTest).
-        assertTrue(screen.contains("val notice = unavailable ?: refused"))
-        assertEquals(1, Regex(Regex.escape("text = notice,")).findAll(screen).count())
-        assertFalse(screen.contains("if (acting?.former == true)"))
+        assertTrue(screen.contains("onClick = { showDeclineConfirm = true },\n                                enabled = canAct,"))
+        assertTrue(screen.contains("onClick = { viewModel?.acceptInvite() },\n                                enabled = canAct,"))
+        // No text says why: no state is described.
+        for (gone in listOf("readOnly", "unavailable", "val notice", "text = notice", "if (acting?.former == true)")) {
+            assertFalse(gone, screen.contains(gone))
+        }
         // §13: the decline text of a D-group.
         assertTrue(screen.contains("Text(if (distroGroup) DistroGroupTexts.DECLINE_TITLE else \"Decline this group invite?\")"))
         assertTrue(screen.contains("Text(if (distroGroup) DistroGroupTexts.DECLINE_TEXT else \"You won't be able to join this group later.\")"))
@@ -106,11 +123,12 @@ class DistroGroupUiTest {
 
     @Test
     fun theInfoSheetOffersOnlyTheLocalDeleteInAFormerDistroGroupAndTheAllDevicesTextsInADGroup() {
-        val actions = sheet.indexOf("if (isGroup && acting?.former == true) {")
+        val actions = sheet.indexOf("if (isGroup && formerOwn != null) {")
         assertTrue(actions >= 0)
-        assertTrue(actions < sheet.indexOf("Text(DistroGroupTexts.LOCAL_DELETE, style"))
-        assertTrue(sheet.indexOf("Text(DistroGroupTexts.LOCAL_DELETE, style") < sheet.indexOf("} else if (isGroup) {"))
-        assertTrue(sheet.contains("enabled = acting?.readOnly != true,"))
+        assertTrue(actions < sheet.indexOf("FormerDistroBar(own = formerOwn"))
+        assertTrue(sheet.indexOf("FormerDistroBar(own = formerOwn") < sheet.indexOf("} else if (isGroup) {"))
+        // Leave: greyed, with no text, until the start finishes.
+        assertTrue(sheet.contains("onClick = { showLeaveConfirm = true },\n                            enabled = acting?.canAct == true,"))
         assertTrue(sheet.contains("onDeleteFromThisDevice()"))
         assertTrue(sheet.contains("Text(DistroGroupTexts.LOCAL_DELETE_TEXT)"))
         assertTrue(sheet.contains("if (distroGroup) DistroGroupTexts.LEAVE_TITLE else \"Leave this group?\""))

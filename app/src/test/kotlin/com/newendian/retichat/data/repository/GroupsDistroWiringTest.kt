@@ -169,11 +169,16 @@ class GroupsDistroWiringTest {
         val send = body(repo, "sendGroupMessage")
         // Refused before anything is stored when the own address has no signer here (§8.7).
         inOrder(send, "val signer = groupSigner(chat) ?: run {", "return", "messageDao.upsert(")
-        assertTrue(send.contains("srcHash = signer.hash,"))
-        assertTrue(send.contains("identityHandle = signer.identity,"))
-        assertTrue(send.contains("GroupFields.set(handle, GroupEntry.SENDER, selfHex)"))
-        assertTrue(send.contains("val selfHex = signer.hex"))
-        assertFalse(send.contains("selfDestHash"))
+        // The fan-out, for a post sent at once and one released from the queue at start-up.
+        val fanOut = body(repo, "fanOutGroupPost")
+        assertTrue(fanOut.contains("srcHash = signer.hash,"))
+        assertTrue(fanOut.contains("identityHandle = signer.identity,"))
+        assertTrue(fanOut.contains("GroupFields.set(handle, GroupEntry.SENDER, selfHex)"))
+        assertTrue(fanOut.contains("val selfHex = signer.hex"))
+        assertTrue(send.contains("senderHashHex = signer.hex,"))
+        for (path in listOf(send, fanOut, body(repo, "holdGroupPost"), body(repo, "releaseHeldGroupPost"))) {
+            assertFalse(path.contains("selfDestHash"))
+        }
         // The control messages too: the manager holds no identity of its own.
         val checked = body(gcm, "sendChecked")
         assertTrue(checked.contains("srcHash = signer.hash,"))
@@ -185,7 +190,7 @@ class GroupsDistroWiringTest {
         assertTrue(signer.contains("DistroManager.signing()"))
         assertTrue(signer.contains("if (state.deliveryHashHex != chat.ownMember) null"))
         // NOT_READY: the stack is not up (review of 8d330c4; GroupActionsReadyTest).
-        assertTrue(signer.contains("GroupSelves.Signer.NOT_LOADED, GroupSelves.Signer.FORMER, GroupSelves.Signer.NOT_READY -> null"))
+        assertTrue(signer.contains("GroupSelves.Signer.FORMER, GroupSelves.Signer.NOT_READY -> null"))
         assertFalse(signer.contains("sendingIdentity"))
         assertFalse(send.contains("sendingIdentity"))
         assertFalse(gcm.contains("DistroManager.sendingIdentity("))
@@ -201,7 +206,7 @@ class GroupsDistroWiringTest {
         val checked = body(gcm, "sendChecked")
         inOrder(checked, "if (!DistroAddresses.isDistro(appContext, destBytes)) {", "RetichatBridge.appLinkOpen(routerHandle, destBytes, \"lxmf\", \"delivery\")")
         assertEquals(1, count(gcm, "RetichatBridge.appLinkOpen("))
-        val send = body(repo, "sendGroupMessage")
+        val send = body(repo, "fanOutGroupPost")
         inOrder(send, "if (!DistroAddresses.isDistro(appContext, destHash)) {", "RetichatBridge.appLinkOpen(routerHandle, destHash, \"lxmf\", \"delivery\")")
         assertEquals(1, count(send, "RetichatBridge.appLinkOpen("))
         val isDistro = gcm.substring(gcm.indexOf("object DistroAddresses"))
@@ -210,7 +215,7 @@ class GroupsDistroWiringTest {
 
     @Test
     fun aDGroupPostOwesOnePostSyncOnceItsFirstEnvelopeLeftAndNoSentCopy() {
-        val send = body(repo, "sendGroupMessage")
+        val send = body(repo, "fanOutGroupPost")
         assertTrue(send.contains("val postSync: GroupSync? = if (GroupSelves.isDistroGroup(chat.ownMember, selfHex())) {"))
         assertTrue(send.contains("GroupSync(DistroGroupSync.POST, groupIdHex, postedAt, text = content, left = UserPreferences.groupsLeftBy(appContext, signer.hex))"))
         // Owed once: after the router accepted the first envelope, or at once when no member is a target.

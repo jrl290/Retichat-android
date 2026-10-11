@@ -158,16 +158,19 @@ private fun DmConversationContent(
     // GROUPS-DISTRO-DESIGN.md §8.7, §13: a group whose own address is a distro D.
     val acting = viewModel?.groupActing?.collectAsState()?.value
     val distroGroup = acting?.distroGroup == true
-    // Its own address cannot be signed for here now: nothing is offered that would send.
-    val readOnly = acting?.readOnly == true
-    // Why, for a former D, D not loaded yet, or the stack not running (§8.7).
-    val unavailable = acting?.let { DistroGroupTexts.unavailable(it.signer, it.own) }
-    // Why the last group post was refused (the stack stopped, or D went, after the
-    // composer was enabled): its draft was put back. Forgotten when the group's
-    // standing changes, which then says why itself or can act again.
-    var refused by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(acting) { refused = null }
-    val notice = unavailable ?: refused
+    // Accept and decline can be signed and sent now: greyed, with no text, until the
+    // start finishes (§8.7; James, 2026-10-11). The composer is not: a post waits as a DM does.
+    val canAct = acting?.canAct == true
+    // A former D (§8.7): a bar with its text and "Delete from this device" replaces the
+    // composer, accept and decline. Never at start-up.
+    val formerOwn = acting?.takeIf { it.former }?.own
+    // The local-only delete (§8.7): no leave is sent; the screen closes.
+    val deleteFromThisDevice: () -> Unit = {
+        scope.launch {
+            app.repository.deleteGroupFromThisDevice(chatId)
+            onBack()
+        }
+    }
 
     // Pending attachment state
     var pendingAttachmentName by remember { mutableStateOf<String?>(null) }
@@ -357,8 +360,22 @@ private fun DmConversationContent(
                 }
             }
 
-            // Input bar (or invite prompt for pending group invites)
-            if (isPendingInvite) {
+            // Input bar (or invite prompt for pending group invites), or a former D's bar
+            if (formerOwn != null) {
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceContainer,
+                    tonalElevation = 0.dp,
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        HorizontalDivider()
+                        FormerDistroBar(
+                            own = formerOwn,
+                            onDeleteFromThisDevice = deleteFromThisDevice,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                        )
+                    }
+                }
+            } else if (isPendingInvite) {
                 Surface(
                     color = MaterialTheme.colorScheme.surfaceContainer,
                     tonalElevation = 0.dp,
@@ -374,14 +391,6 @@ private fun DmConversationContent(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(top = 8.dp),
                         )
-                        if (unavailable != null) {
-                            Text(
-                                text = unavailable,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                            )
-                        }
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -391,13 +400,13 @@ private fun DmConversationContent(
                         ) {
                             OutlinedButton(
                                 onClick = { showDeclineConfirm = true },
-                                enabled = !readOnly,
+                                enabled = canAct,
                                 modifier = Modifier.weight(1f).height(48.dp),
                                 shape = RoundedCornerShape(10.dp),
                             ) { Text("Decline") }
                             Button(
                                 onClick = { viewModel?.acceptInvite() },
-                                enabled = !readOnly,
+                                enabled = canAct,
                                 modifier = Modifier.weight(1f).height(48.dp),
                                 shape = RoundedCornerShape(10.dp),
                             ) { Text("Accept") }
@@ -412,17 +421,6 @@ private fun DmConversationContent(
                 Column(
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    // §8.7: read only here; the composer is disabled, and this says why
-                    // (or why the last post was refused, its draft put back).
-                    if (notice != null) {
-                        HorizontalDivider()
-                        Text(
-                            text = notice,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                        )
-                    }
                     // Pending attachment preview
                     if (pendingAttachmentName != null) {
                         Row(
@@ -483,7 +481,7 @@ private fun DmConversationContent(
                             .padding(horizontal = 8.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        IconButton(onClick = { filePickerLauncher.launch("*/*") }, enabled = !readOnly) {
+                        IconButton(onClick = { filePickerLauncher.launch("*/*") }) {
                             Icon(
                                 Icons.Default.AttachFile,
                                 contentDescription = "Attach",
@@ -497,7 +495,6 @@ private fun DmConversationContent(
                         OutlinedTextField(
                             value = draft,
                             onValueChange = { draft = it },
-                            enabled = !readOnly,
                             modifier = Modifier.weight(1f),
                             placeholder = { Text("Message") },
                             shape = MaterialTheme.shapes.large,
@@ -522,18 +519,16 @@ private fun DmConversationContent(
                                 draft = ""
                                 pendingAttachmentName = null
                                 pendingAttachmentData = null
-                                refused = null
-                                // §8.7, alignment decision 5: a group post refused (the stack
-                                // stopped, or D went, since the composer was enabled) puts the
-                                // text back in front of anything typed since, and the attachment
-                                // unless another was picked, and says why.
-                                val keep: (String) -> Unit = { why ->
+                                // §8.7 (James, 2026-10-11): a group post refused after Send (its
+                                // distro went since the screen was drawn) says nothing: the text goes
+                                // back in front of anything typed since, and the attachment unless
+                                // another was picked, and the former-distro bar shows.
+                                val keep: () -> Unit = {
                                     draft = sent + draft
                                     if (pendingAttachmentName == null) {
                                         pendingAttachmentName = attachName
                                         pendingAttachmentData = attachData
                                     }
-                                    refused = why
                                 }
                                 if (attachName != null && attachData != null) {
                                     viewModel?.sendWithAttachment(sent, attachName, attachData, onRefused = keep)
@@ -541,7 +536,7 @@ private fun DmConversationContent(
                                     viewModel?.send(sent, onRefused = keep)
                                 }
                             },
-                            enabled = !readOnly && (draft.isNotBlank() || pendingAttachmentName != null),
+                            enabled = draft.isNotBlank() || pendingAttachmentName != null,
                             colors = IconButtonDefaults.filledIconButtonColors(
                                 containerColor = MaterialTheme.colorScheme.primary,
                                 contentColor = MaterialTheme.colorScheme.onPrimary,
@@ -623,12 +618,7 @@ private fun DmConversationContent(
                     if (app.repository.leaveGroupChat(chatId)) onBack()
                 }
             },
-            onDeleteFromThisDevice = {
-                scope.launch {
-                    app.repository.deleteGroupFromThisDevice(chatId)
-                    onBack()
-                }
-            },
+            onDeleteFromThisDevice = deleteFromThisDevice,
         )
     }
 }

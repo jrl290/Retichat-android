@@ -1,7 +1,5 @@
 package com.newendian.retichat.ui.conversation
 
-import com.newendian.retichat.data.repository.GroupPostRefused
-import com.newendian.retichat.data.repository.GroupSelves
 import com.newendian.retichat.names.DisplayNames
 
 /**
@@ -9,11 +7,13 @@ import com.newendian.retichat.names.DisplayNames
  * (GROUPS-DISTRO-DESIGN.md §8.7, §13). A decline, leave or delete there is
  * signed as D, so it is final at every member and, through the group sync, on
  * every device of D; a group whose D this device no longer holds can only be
- * read, or deleted from this device. A device-listed group keeps today's texts.
- * Also why nothing that would send is offered in any group, or a create or a
- * post was refused, while the stack is not running or D has not loaded yet
- * (§8.7): the same words on iOS, Android and the web (alignment decision 3,
- * 2026-10-11).
+ * deleted from this device. A device-listed group keeps today's texts.
+ *
+ * James, 2026-10-11: no text describes an internal state. At start-up nothing
+ * is said (a post waits as a DM does; the other actions are greyed), and a post
+ * refused after Send says nothing either (its draft stays). [formerDistro] is the
+ * only text for a group that cannot act here, the same words on iOS, Android
+ * and the web.
  */
 object DistroGroupTexts {
     const val DECLINE_TITLE = "Decline this invitation?"
@@ -28,44 +28,14 @@ object DistroGroupTexts {
     const val LOCAL_DELETE = "Delete from this device"
     const val LOCAL_DELETE_TEXT = "This removes the group from this device only. You stay in the group on your other devices and for the other members."
 
-    /** §8.7: shown in a group whose own address is the former distro [distroHex]. */
+    /**
+     * §8.7: the bar of a group whose own address is the former distro
+     * [distroHex] (forgotten, replaced, or a stored key that cannot be loaded),
+     * with "Delete from this device". [distroHex] is shown as its first 8 hex
+     * characters and "…" (U+2026).
+     */
     fun formerDistro(distroHex: String): String =
-        "This group uses your distro address ${DisplayNames.shortHash(distroHex)}, which this device no longer holds. " +
-            "You can read it here, but cannot post or change your membership from this device."
-
-    /** §8.7: the group view while the stack is not running ([GroupSelves.Signer.NOT_READY]). */
-    const val NOT_RUNNING = "Retichat isn't running on this device right now. You can post and change your membership once it is."
-
-    /** §8.7: the group view of a D-group while D is stored but not loaded yet ([GroupSelves.Signer.NOT_LOADED]). */
-    const val NOT_LOADED = "Your distro address hasn't loaded on this device yet. You can post and change your membership once it has."
-
-    /** §8.7: a create refused while D is stored but not loaded yet. */
-    const val CREATE_NOT_LOADED = "Your distro address hasn't loaded on this device yet. Create the group once it has."
-
-    /** §8.7: a create refused while the stack is not running. */
-    const val CREATE_NOT_RUNNING = "Retichat isn't running on this device right now. Create the group once it is."
-
-    /** Why a create was refused ([GroupSelves.createRefusal]): D not loaded yet, else the stack not running. */
-    fun createRefused(why: GroupSelves.Signer): String =
-        if (why == GroupSelves.Signer.NOT_LOADED) CREATE_NOT_LOADED else CREATE_NOT_RUNNING
-
-    /**
-     * Why nothing that would send (post, accept, decline, leave) is offered in
-     * a group whose own address is [own], acting as [signer] (§8.7), or null
-     * when it can act. The words are the same on iOS, Android and the web
-     * (alignment decision 3, 2026-10-11).
-     */
-    fun unavailable(signer: GroupSelves.Signer, own: String): String? = when (signer) {
-        GroupSelves.Signer.NOT_READY -> NOT_RUNNING
-        GroupSelves.Signer.NOT_LOADED -> NOT_LOADED
-        GroupSelves.Signer.FORMER -> formerDistro(own)
-        GroupSelves.Signer.DEVICE, GroupSelves.Signer.DISTRO -> null
-    }
-
-    /**
-     * Why a group post was refused ([GroupPostRefused]), in the group view's
-     * words; a signer that can act there went between the check and the send
-     * (its identity gone with the stack): the stack is not running.
-     */
-    fun refused(refusal: GroupPostRefused): String = unavailable(refusal.signer, refusal.own) ?: NOT_RUNNING
+        "This group uses your distro address ${DisplayNames.shortHash(distroHex)}, which is no longer on this device. " +
+            "New messages in it don't reach this device, and you can't post, join or leave from here. " +
+            "Import that distro again to use the group here."
 }

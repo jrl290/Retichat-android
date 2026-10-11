@@ -1,7 +1,6 @@
 package com.newendian.retichat.ui.newchat
 
 import com.newendian.retichat.data.repository.GroupSelves
-import com.newendian.retichat.ui.conversation.DistroGroupTexts
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -10,17 +9,16 @@ import org.junit.Test
 import java.io.File
 
 /**
- * Creating a group is refused, with nothing written or sent, while the stack is
- * not running or the distro this device holds has not loaded yet
- * (GROUPS-DISTRO-DESIGN.md §8.5, §8.7; alignment decision 3, 2026-10-11), and
- * the New Group screen says why in the words iOS and the web use. Until then
- * Android wrote the group anyway: with the stack down, a group of nobody's
- * whose invites were never sent; with D not loaded, a group as the device that
- * the user's other devices never hear of.
+ * New group › Create (James's UI rulings, 2026-10-11; GROUPS-DISTRO-DESIGN.md
+ * §8.1, §8.5, §8.7): greyed, with no text, until the start finishes; then
+ * created as the distro this device holds, else as the device, a stored distro
+ * key that cannot be loaded included (that is a former distro, never "not
+ * loaded yet"). Nothing is written or sent for a create refused because the
+ * start has not finished. Until 2026-10-11 Create was refused only after the
+ * tap, with a text, while the stack was starting or a stored key had not loaded.
  */
 class GroupCreateRefusalTest {
     private val device = "0123456789abcdef0123456789abcdef"
-    private val d = "d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0"
 
     private fun src(path: String) = File("src/main/kotlin/com/newendian/retichat/$path").readText()
     private val nextMember = Regex("\n    (/\\*\\*|//|private |internal |fun |suspend fun |val |var |@)")
@@ -33,22 +31,11 @@ class GroupCreateRefusalTest {
     }
 
     @Test
-    fun aCreateIsRefusedWhileTheStackIsNotRunningOrDIsStoredButNotLoaded() {
-        assertEquals(GroupSelves.Signer.NOT_READY, GroupSelves.createRefusal("", null, distroStored = false))
-        assertEquals("not running comes first", GroupSelves.Signer.NOT_READY, GroupSelves.createRefusal("", null, distroStored = true))
-        assertEquals(GroupSelves.Signer.NOT_READY, GroupSelves.createRefusal("", d, distroStored = true))
-        assertEquals(GroupSelves.Signer.NOT_LOADED, GroupSelves.createRefusal(device, null, distroStored = true))
-        // D loaded: created as D; no distro at all: created as the device.
-        assertNull(GroupSelves.createRefusal(device, d, distroStored = true))
-        assertNull(GroupSelves.createRefusal(device, null, distroStored = false))
-    }
-
-    @Test
-    fun theRefusalsAreTheAlignedWordsWordForWord() {
-        assertEquals("Your distro address hasn't loaded on this device yet. Create the group once it has.",
-            DistroGroupTexts.createRefused(GroupSelves.Signer.NOT_LOADED))
-        assertEquals("Retichat isn't running on this device right now. Create the group once it is.",
-            DistroGroupTexts.createRefused(GroupSelves.Signer.NOT_READY))
+    fun aCreateIsRefusedOnlyWhileTheStartHasNotFinished() {
+        assertEquals(GroupSelves.Signer.NOT_READY, GroupSelves.createRefusal(""))
+        // Started: created as the distro held then (D loaded), else as the device, a
+        // stored key that cannot be loaded included; nothing about a distro refuses it.
+        assertNull(GroupSelves.createRefusal(device))
     }
 
     @Test
@@ -57,9 +44,10 @@ class GroupCreateRefusalTest {
         assertTrue(create.contains("): GroupCreation {"))
         val upsert = create.indexOf("chatDao.upsert(chat)")
         assertTrue(upsert >= 0)
-        // The refusal from what is held now, before the group id is even made.
-        val check = create.indexOf("GroupSelves.createRefusal(if (groupActionsReady.value) selfHex() else \"\", distro?.deliveryHashHex, DistroManager.isStored(appContext))")
+        // The refusal from whether the start has finished, before the group id is even made.
+        val check = create.indexOf("GroupSelves.createRefusal(if (groupActionsReady.value) selfHex() else \"\")")
         assertTrue(check in 0 until create.indexOf("SecureRandom"))
+        assertFalse("a stored key that is not loaded refuses nothing", create.contains("DistroManager.isStored("))
         // The signer and the manager resolved before the first write: a stack that stopped since refuses too.
         val resolved = create.indexOf("if (signer == null || manager == null) {")
         assertTrue(resolved in check until upsert)
@@ -69,12 +57,16 @@ class GroupCreateRefusalTest {
     }
 
     @Test
-    fun theNewGroupScreenSaysWhyAndStays() {
+    fun createIsGreyedUntilTheStartFinishesAndARefusalSaysNothing() {
         val screen = src("ui/newchat/NewGroupScreen.kt")
+        assertTrue(screen.contains("enabled = started && groupName.isNotBlank() && selectedMembers.size >= 1 && !isCreating,"))
         assertTrue(screen.contains("is GroupCreation.Created -> onGroupCreated(created.chatId)"))
-        assertTrue(screen.contains("is GroupCreation.Refused -> refusal = DistroGroupTexts.createRefused(created.why)"))
-        assertTrue(screen.contains("refusal?.let { why ->"))
+        // Refused (the start stopped between the screen and the tap): the name and the members stay; no text.
+        assertTrue(screen.contains("is GroupCreation.Refused -> Unit"))
+        for (gone in listOf("refusal", "DistroGroupTexts", "colorScheme.error")) assertFalse(gone, screen.contains(gone))
         val nav = src("ui/navigation/NavGraph.kt")
         assertTrue(nav.contains("repository.createGroupChat(name, members)"))
+        assertTrue(nav.contains("val started by repository.groupActionsReady.collectAsState()"))
+        assertTrue(nav.contains("started = started,"))
     }
 }

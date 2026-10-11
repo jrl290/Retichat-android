@@ -151,6 +151,8 @@ fun RetichatNavHost(navController: NavHostController) {
             val allContacts by contactsFlow.collectAsState(initial = emptyList())
             val selfHex = remember { repository.selfDestHash.joinToString("") { "%02x".format(it) } }
             val dmContacts = remember(allContacts, selfHex) { pickableContacts(allContacts, selfHex) }
+            // Create is greyed, with no text, until the start finishes (§8.7).
+            val started by repository.groupActionsReady.collectAsState()
             NewGroupScreen(
                 onGroupCreated = { chatId ->
                     if (entry.isCurrent()) navController.navigate(Routes.conversation(chatId)) {
@@ -162,6 +164,7 @@ fun RetichatNavHost(navController: NavHostController) {
                 createGroup = { name, members ->
                     repository.createGroupChat(name, members)
                 },
+                started = started,
             )
         }
 

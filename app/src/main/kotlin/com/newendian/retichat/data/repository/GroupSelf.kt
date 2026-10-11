@@ -71,15 +71,20 @@ object GroupSelves {
         DEVICE,
         /** The own address is the distro this device holds, loaded: `DistroManager.signing()`. */
         DISTRO,
-        /** The own address is a distro, none is loaded yet but one is stored (start-up): nothing is offered until it is (§8.7). */
-        NOT_LOADED,
-        /** The own address is a distro this device no longer holds (forgotten or replaced): nothing, ever, from here (§8.7). */
+        /**
+         * The own address is a distro this device does not hold now: forgotten,
+         * replaced, or a stored key that cannot be loaded. The stored key is
+         * loaded before the stack is up (StackRuntime.bootstrap), so one not
+         * loaded by then never loads by itself: it is a former distro, never
+         * "not loaded yet" (James, 2026-10-11). Nothing, ever, from here; only
+         * "Delete from this device" is offered (§8.7).
+         */
         FORMER,
         /**
-         * The stack is not up (starting, failed to start, or stopped): no group
-         * send can be signed or go, so nothing is offered until it is up, as for
-         * [NOT_LOADED] (§8.7, DESIGN_PRINCIPLES §5); nothing is queued. Which
-         * group is the device's cannot be told then either.
+         * Start-up: the stack has not finished starting (or failed to, or is
+         * being restarted from Settings), so which group is the device's cannot
+         * be told yet. A post waits as a DM does ([post]); accept, decline,
+         * leave and create are greyed; nothing says why (§8.7; James, 2026-10-11).
          */
         NOT_READY,
     }
@@ -87,32 +92,51 @@ object GroupSelves {
     /**
      * [Signer] for a group whose persisted own address is [persisted], with
      * [loadedD] the distro loaded now (its `lxmf.delivery` hash, from the strict
-     * helper, or null) and [distroStored] whether a distro key is stored though
-     * not loaded. Never the device for a D-group: a group send never falls back
-     * (members would drop it as unlisted, and the user would be shown an action
-     * that did not happen). [device] is empty while the stack is not up:
-     * [Signer.NOT_READY], whatever the group.
+     * helper, or null). Never the device for a D-group: a group send never falls
+     * back (members would drop it as unlisted, and the user would be shown an
+     * action that did not happen). [device] is empty until the start has
+     * finished: [Signer.NOT_READY], whatever the group.
      */
-    fun signer(persisted: String?, device: String, loadedD: String?, distroStored: Boolean): Signer = when {
+    fun signer(persisted: String?, device: String, loadedD: String?): Signer = when {
         device.isEmpty() -> Signer.NOT_READY
         !isDistroGroup(persisted, device) -> Signer.DEVICE
         loadedD == persisted -> Signer.DISTRO
-        loadedD == null && distroStored -> Signer.NOT_LOADED
         else -> Signer.FORMER
+    }
+
+    /** What a group post does when the user sends it ([post]; §8.7, James, 2026-10-11). */
+    enum class Post {
+        /** Sent now, as the group's own address. */
+        SEND,
+        /**
+         * Start-up: it waits exactly as a DM does, with the same pending clock;
+         * it is sent when the start finishes, as the group's own address resolved
+         * then, or shown failed, the DM failed state, if it cannot be signed then.
+         * Ordering (DESIGN_PRINCIPLES §5), not a retry.
+         */
+        WAIT,
+        /** A former distro: nothing is stored or sent; no notice, and the draft stays in the composer. */
+        REFUSE,
+    }
+
+    /**
+     * [Post] for a group post whose signer is [signer] now, [started] whether
+     * the start has finished by the DM queue's own test (`ChatRepository.stackReady`).
+     */
+    fun post(signer: Signer, started: Boolean): Post = when {
+        signer == Signer.FORMER -> Post.REFUSE
+        signer == Signer.NOT_READY || !started -> Post.WAIT
+        else -> Post.SEND
     }
 
     /**
      * Why a group cannot be created now (§8.5, §8.7), or null: [Signer.NOT_READY]
-     * while the stack is not up ([device] empty), [Signer.NOT_LOADED] while a
-     * distro is stored but none is loaded ([loadedD] null): created then, the
-     * group would be the device's, and the user's other devices would never
-     * hear of it. Nothing is written or sent for a refused create.
+     * until the start has finished ([device] empty); Create is greyed then, with
+     * no text. Otherwise it is created as the distro this device holds, else as
+     * the device (§8.1): a stored key that cannot be loaded is no distro held.
+     * Nothing is written or sent for a refused create.
      */
-    fun createRefusal(device: String, loadedD: String?, distroStored: Boolean): Signer? = when {
-        device.isEmpty() -> Signer.NOT_READY
-        loadedD == null && distroStored -> Signer.NOT_LOADED
-        else -> null
-    }
+    fun createRefusal(device: String): Signer? = if (device.isEmpty()) Signer.NOT_READY else null
 
     /** Targets of a group send: [members] without any self address (§8.2, §9.2). */
     fun targets(members: Collection<String>, self: GroupSelf): List<String> =
@@ -131,14 +155,19 @@ data class GroupActing(
     val selves: Set<String>,
 ) {
     /**
-     * The group's own address cannot be signed for here now, or the stack is
-     * not up: no post, accept, decline or leave is offered (§8.7). Nothing is
-     * queued for later.
+     * Accept, decline and leave can be signed and sent now. Greyed otherwise,
+     * with no text: at start-up until the start finishes ([GroupSelves.Signer.NOT_READY]);
+     * in a former distro the former-distro bar replaces them ([former]). The
+     * composer is never greyed for this: a post at start-up waits as a DM does
+     * ([GroupSelves.post]); James, 2026-10-11.
      */
-    val readOnly: Boolean get() = signer == GroupSelves.Signer.NOT_LOADED || signer == GroupSelves.Signer.FORMER ||
-        signer == GroupSelves.Signer.NOT_READY
+    val canAct: Boolean get() = signer == GroupSelves.Signer.DEVICE || signer == GroupSelves.Signer.DISTRO
 
-    /** Its own address is a distro this device no longer holds: only "Delete from this device" is offered (§8.7, §13). */
+    /**
+     * Its own address is a distro this device no longer holds: the bar with
+     * §8.7's text and "Delete from this device" replaces the composer, accept,
+     * decline and leave. Never at start-up.
+     */
     val former: Boolean get() = signer == GroupSelves.Signer.FORMER
 }
 
@@ -146,14 +175,14 @@ data class GroupActing(
 sealed class GroupCreation {
     data class Created(val chatId: String) : GroupCreation()
 
-    /** [why] is [GroupSelves.Signer.NOT_READY] or [GroupSelves.Signer.NOT_LOADED] ([GroupSelves.createRefusal]). */
+    /** The start has not finished, or stopped since Create was offered; [why] is for the log ([GroupSelves.createRefusal]). */
     data class Refused(val why: GroupSelves.Signer) : GroupCreation()
 }
 
 /**
  * A group post refused with nothing stored, sent or queued (§8.7): the group's
- * own address [own] has no signer here now, as [signer] says (the stack
- * stopped, or D went or has not loaded, since the composer was enabled). The
- * screen puts the draft back and says why (alignment decision 5, 2026-10-11).
+ * own address [own] cannot be signed for here, as [signer] says (its distro went
+ * since the screen was drawn). The screen keeps the draft and says nothing: the
+ * former-distro bar shows (James, 2026-10-11).
  */
 data class GroupPostRefused(val signer: GroupSelves.Signer, val own: String)
