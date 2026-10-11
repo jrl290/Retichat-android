@@ -50,8 +50,18 @@ object DeliveryPolicy {
 
     private val HEX32 = Regex("^[0-9a-f]{32}$")
 
+    /**
+     * The invite parser's space (GROUPS-DISTRO-DESIGN.md §10.2; the vectors'
+     * `invite_space`): Unicode Zs and U+0009, exactly Swift's
+     * `CharacterSet.whitespaces` and LXMF-rust `is_invite_space`, and no other.
+     * Kotlin's `trim()` also took newlines, U+000B-U+000D, U+001C-U+001F,
+     * U+0085, U+2028 and U+2029, so an entry wrapped in one named D here and
+     * not on iOS or in a group sync's `members`.
+     */
+    fun isInviteSpace(c: Char): Boolean = c == '\t' || Character.getType(c) == Character.SPACE_SEPARATOR.toInt()
+
     /** A member hash as it must travel, 32 lowercase hex; anything else is no hash (null). */
-    fun hash(value: String?): String? = value?.trim()?.takeIf { HEX32.matches(it) }
+    fun hash(value: String?): String? = value?.trim(::isInviteSpace)?.takeIf { HEX32.matches(it) }
 
     /** The members an invite lists (GROUP_MEMBERS): its well-formed hashes, once each. */
     fun members(csv: String?): List<String> =
@@ -128,6 +138,60 @@ object DeliveryPolicy {
             GroupChatManager.Action.ACCEPT, GroupChatManager.Action.LEAVE ->
                 isCurrent(sourceStatus) && !namesOther && !forged
             else -> held == Held.JOINED && isCurrent(sourceStatus) && proven
+        }
+    }
+
+    /**
+     * The three rules that come first for a group message, on the distro path
+     * and the direct path alike (GROUPS-DISTRO-DESIGN.md §6.3), before the
+     * action's own rule: null when none drops it, else why (for the log line).
+     *
+     * - A forged message ([signature] invalid) is dropped, in every group: it
+     *   is never held and never notified. D's key is announced, so anyone can
+     *   encrypt a post to D claiming a member's source.
+     * - A message naming a self address ([selves]) as its GROUP_SENDER while
+     *   its packet source [srcHex] is not one is never the user's own: dropped.
+     * - A group message from the distro itself ([echoes]: the D this device
+     *   holds, and the group's own distro) is the user's own echo: sends exclude
+     *   every self address, so it is unexpected, and dropped. A known sibling's
+     *   is the user's own act, and goes on.
+     */
+    fun firstRules(signature: Int, srcHex: String, groupSender: String?, selves: Set<String>, echoes: Set<String>): String? {
+        if (signature == Signature.INVALID) return "its signature is invalid (forged)"
+        val named = hash(groupSender)
+        if (named != null && named in selves && srcHex !in selves) {
+            return "it names the user (${named.take(8)}) as its sender, but its source ${srcHex.take(8)} is not the user's"
+        }
+        if (srcHex in echoes) return "its source is the user's own distro: the user's own echo"
+        return null
+    }
+
+    /**
+     * Whether a group message the rule dropped on the distro path is held
+     * instead (GROUPS-DISTRO-DESIGN.md §6.5): only when the group not being
+     * joined here is the sole reason. Never an invite or a relay request, never
+     * for a group joined ([held]), closed or filtered here, never a forged one or
+     * one whose packet source is a self address. For a group held pending, the
+     * rule evaluated as if it were joined must keep it ([keptIfJoined]); for one
+     * not held here nothing about membership can be checked, so only a proven
+     * message (its signature validated) is held.
+     */
+    fun holdable(
+        action: String?,
+        held: Held,
+        closed: Boolean,
+        filtered: Boolean,
+        signature: Int,
+        sourceIsSelf: Boolean,
+        keptIfJoined: Boolean,
+    ): Boolean {
+        if (action == GroupChatManager.Action.INVITE || action == GroupChatManager.Action.RELAY_REQUEST) return false
+        if (held == Held.JOINED || closed || filtered || sourceIsSelf) return false
+        if (signature == Signature.INVALID) return false
+        return when (held) {
+            Held.NONE -> signature == Signature.VALIDATED
+            Held.PENDING -> keptIfJoined
+            Held.JOINED -> false
         }
     }
 

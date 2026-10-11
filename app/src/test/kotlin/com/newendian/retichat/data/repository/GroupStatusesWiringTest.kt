@@ -62,7 +62,8 @@ class GroupStatusesWiringTest {
         assertEquals(1, count("store\\.setMemberStatus\\(", engine))
         assertEquals(2, count("keepCopy\\(", engine))        // its definition and applyChange
         assertTrue(apply.indexOf("keepCopy(") in 0 until apply.indexOf("store.setMemberStatus("))
-        assertTrue("only the creator keeps copies", apply.contains("chat.creatorHex == self"))
+        // GROUPS-DISTRO-DESIGN.md §12.2: a creator that is self keeps copies, on every device of a distro creator.
+        assertTrue("only the creator keeps copies", apply.contains("self.isSelf(chat.creatorHex)"))
         // Every element is checked by the same group rule as a message arriving directly.
         assertTrue(body(engine, "takeElement").contains("DeliveryPolicy.groupMessage("))
         // Forwarded elements teach no display names: the engine never touches a name.
@@ -77,8 +78,9 @@ class GroupStatusesWiringTest {
         assertTrue(direct.contains("counted && arrival.action == GroupChatManager.Action.ACCEPT && arrival.senderKey != null"))
         assertTrue(direct.contains("answerAccept(arrival.chat, arrival.src)"))
         val answer = body(engine, "answerAccept")
-        assertTrue(answer.contains("if (chat.creatorHex != self) return"))
-        assertTrue("never its own copy nor the recipient's", answer.contains("it.memberHex != self && it.memberHex != memberHex"))
+        // §12.1: the creator test is "creator is self" (any device of a distro creator answers).
+        assertTrue(answer.contains("if (!self.isSelf(chat.creatorHex)) return"))
+        assertTrue("never its own copy nor the recipient's", answer.contains("!self.isSelf(it.memberHex) && it.memberHex != memberHex"))
         assertTrue(answer.contains(".sortedBy { it.memberHex }"))
         // The repository sends it through the one group send path, once: nothing sends a status twice.
         assertTrue(repo.contains("manager.sendStatus(groupId, member, statuses)"))

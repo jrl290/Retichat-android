@@ -224,7 +224,8 @@ class GroupModelTest {
         // A member's own accept lets it through only in a group the user joined: the engine's, not the pending group's.
         assertFalse(body(repo, "handleGroupMessage").contains("ensureAllowlistedContact("))
         val apply = body(File("src/main/kotlin/com/newendian/retichat/data/repository/GroupStatuses.kt").readText(), "applyChange")
-        assertTrue(apply.contains("if (accepted && src != self && GroupMemberStatuses.held(true, members, self) == DeliveryPolicy.Held.JOINED) {"))
+        // GROUPS-DISTRO-DESIGN.md §9.2: no self address is allowlisted; joined is read from the own address's row.
+        assertTrue(apply.contains("if (accepted && !self.isSelf(src) && GroupMemberStatuses.held(true, members, self.own) == DeliveryPolicy.Held.JOINED) {"))
         assertTrue(apply.contains("store.allow(src)"))
     }
 }

@@ -477,16 +477,28 @@ class GroupRig(
     val me: String,
     val switched: Boolean = false,
     holds: Collection<String> = emptyList(),
+    /**
+     * When set, [me] is a distro D (the group's own address) and this is the
+     * device that holds it, not listed (GROUPS-DISTRO-DESIGN.md §9.1); with
+     * [siblings], the self addresses of the group.
+     */
+    val device: String? = null,
+    val siblings: Set<String> = emptySet(),
 ) {
     val native = FakeGroupNative()
     val store = MemoryGroupStatusStore()
     val answers = mutableListOf<Answer>()
     val logs = mutableListOf<String>()
+    /** The group's own address: the device, or D when [device] is set. */
     val self: String = v.hashOf(me)
+    private val deviceHex: String = device ?: self
+    val selves: Set<String> = setOf(self, deviceHex) + siblings
     val engine = GroupStatusEngine(
-        store, native, { self },
+        store, native, { deviceHex },
         { chat, member, statuses -> answers += Answer(chat.id, member, statuses) },
         switched, { logs += it },
+        selves = { GroupSelf(self, if (device != null) self else null, selves) },
+        isSelfAnywhere = { it in selves },
     )
 
     /** What the rule dropped: the action and the source's name. */

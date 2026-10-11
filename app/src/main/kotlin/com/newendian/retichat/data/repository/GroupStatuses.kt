@@ -192,6 +192,17 @@ class GroupStatusEngine(
     /** `GROUP_ENTRIES_IN_RETICHAT_FIELD`: from the switch an unverifiable accept or leave is held, not counted. */
     private val switched: Boolean = LxmfFields.GROUP_ENTRIES_IN_RETICHAT_FIELD,
     private val log: (String) -> Unit = {},
+    /**
+     * Who the user is in [ChatEntity]'s group (GROUPS-DISTRO-DESIGN.md §9.1):
+     * its own address, whose row says pending or joined, and every self
+     * address. The creator test is "creator is self", so any device of a
+     * distro that created the group answers (§12.1); an element about any self
+     * address is skipped as the user's own; no self address is allowlisted.
+     * The device alone by default (a group with no distro).
+     */
+    private val selves: suspend (ChatEntity) -> GroupSelf = { GroupSelf(selfHex(), null, setOf(selfHex())) },
+    /** Any self address of this device, in any group: its key is never remembered (§9.2). */
+    private val isSelfAnywhere: (String) -> Boolean = { it == selfHex() },
 ) {
     private val lock = Mutex()
 
@@ -264,7 +275,7 @@ class GroupStatusEngine(
         var counted = 0
         var held = 0
         var skipped = all.size - minOf(all.size, memberCount)
-        val joined = GroupMemberStatuses.held(true, members, selfHex()) == DeliveryPolicy.Held.JOINED
+        val joined = GroupMemberStatuses.held(true, members, selves(chat).own) == DeliveryPolicy.Held.JOINED
         all.take(memberCount).forEachIndexed { index, element ->
             val result = if (joined) takeElement(chat, groupId, element) else "the user has not accepted the group"
             when (result) {
@@ -307,13 +318,13 @@ class GroupStatusEngine(
             return "the action is ${action ?: "none"}, not an accept or a leave"
         }
         val src = unpacked.source.toHex()
-        val self = selfHex()
-        if (src == self) return "about this device"
+        val self = selves(chat)
+        if (self.isSelf(src)) return "about the user (${src.take(8)} is a self address)"
         val members = store.members(chat.id)
         val allowed = DeliveryPolicy.groupMessage(
             action = action,
             sourceAllowed = false,
-            held = GroupMemberStatuses.held(true, members, self),
+            held = GroupMemberStatuses.held(true, members, self.own),
             sourceStatus = GroupMemberStatuses.statusOf(members, src),
             namesOther = DeliveryPolicy.namesOther(fields.group(GroupEntry.SENDER), src),
             closed = false,
@@ -375,9 +386,9 @@ class GroupStatusEngine(
         timestampMs: Long,
         packed: ByteArray?,
     ) {
-        val self = selfHex()
+        val self = selves(chat)
         val members = store.members(chat.id)
-        if (packed != null && chat.creatorHex == self) {
+        if (packed != null && self.isSelf(chat.creatorHex)) {
             keepCopy(chat, GroupMemberStatuses.statusOf(members, src), src, action, packed)?.let {
                 log("No copy kept of the $action of ${src.take(12)} for group ${chat.id}: $it")
             }
@@ -394,7 +405,7 @@ class GroupStatusEngine(
         // filter, as the user's own accept made every member. A pending group
         // lets nobody through: the members pass from the user's accept (and the
         // creator's answer to it brings back what the filter dropped).
-        if (accepted && src != self && GroupMemberStatuses.held(true, members, self) == DeliveryPolicy.Held.JOINED) {
+        if (accepted && !self.isSelf(src) && GroupMemberStatuses.held(true, members, self.own) == DeliveryPolicy.Held.JOINED) {
             store.allow(src)
         }
         val groupId = chat.groupIdHex.orEmpty()
@@ -436,14 +447,17 @@ class GroupStatusEngine(
      * each other listed member's newest counted accept or leave (neither this
      * device's own nor the recipient's), by member hash ascending. A member that
      * has not answered is absent: still invited. An empty list is a valid
-     * answer. Only the creator answers: any other device sends nothing.
+     * answer. Only the creator answers: any other device sends nothing. The
+     * creator test is "creator is self" (GROUPS-DISTRO-DESIGN.md §12.1): when the
+     * creator is the user's distro, every device of it that holds the group
+     * answers, each with the copies it kept, and no copy of a self address goes.
      */
     private suspend fun answerAccept(chat: ChatEntity, memberHex: String) {
-        val self = selfHex()
-        if (chat.creatorHex != self) return
+        val self = selves(chat)
+        if (!self.isSelf(chat.creatorHex)) return
         val listed = store.members(chat.id).map { it.destHashHex }.toSet()
         val statuses = store.copies(chat.id)
-            .filter { it.memberHex != self && it.memberHex != memberHex && it.memberHex in listed }
+            .filter { !self.isSelf(it.memberHex) && it.memberHex != memberHex && it.memberHex in listed }
             .sortedBy { it.memberHex }
             .map { it.packed }
         answer(chat, memberHex, statuses)
@@ -514,7 +528,7 @@ class GroupStatusEngine(
      * device's own key is never kept.
      */
     private suspend fun remember(src: String, key: ByteArray) {
-        if (src == selfHex()) return
+        if (isSelfAnywhere(src)) return
         if (!native.rememberKey(src, key)) {
             log("Ignored mismatched member key for ${src.take(8)}")
             return
