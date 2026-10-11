@@ -2,10 +2,8 @@ package com.newendian.retichat.data.repository
 
 import com.newendian.retichat.data.repository.DistroChanges.Arrivals
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import java.io.File
 
 /**
  * What a change of the distro held forgets (GROUPS-DISTRO-DESIGN.md §6.5,
@@ -58,30 +56,6 @@ class DistroChangeTest {
         assertTrue(plans.all { it.forgetSiblingsOf.isEmpty() })
     }
 
-    // ---- The wiring: what the collector reads, and what the distro says it holds ----
-
-    private fun src(path: String) = File("src/main/kotlin/com/newendian/retichat/$path").readText()
-
-    @Test
-    fun theRepositoryActsOnWhatTheDeviceHoldsNeverOnTheLoadedStateAlone() {
-        val repo = src("data/repository/ChatRepository.kt")
-        assertTrue(repo.contains("DistroManager.holding.collect { onDistroChanged(it) }"))
-        assertFalse("a null loaded state is start-up as often as a give-up", repo.contains("DistroManager.state.map { it?.deliveryHashHex }"))
-        assertTrue(repo.contains("DistroChanges.plan("))
-        assertFalse(repo.contains("if (heldDistro == null) groupStatusDao.dropAllArrivals()"))
-    }
-
-    @Test
-    fun theDistroSaysNoneOnlyWhenNoKeyIsStoredAndStartsUnknown() {
-        val dm = src("service/DistroManager.kt")
-        assertTrue(dm.contains("MutableStateFlow<DistroHolding>(DistroHolding.Unknown)"))
-        val init = dm.substringAfter("fun init(context: Context)").substringBefore("fun generate(")
-        assertTrue("no key file: none held", init.contains("_holding.value = DistroHolding.None"))
-        assertTrue("a key the core rejects is still held", init.contains("_holding.value = DistroHolding.StoredNotLoaded"))
-        val adopt = dm.substringAfter("private fun adopt(").substringBefore("private fun file(")
-        assertTrue(adopt.contains("_holding.value = DistroHolding.Loaded("))
-        // Given up: said only once the key file is gone.
-        val forget = dm.substringAfter("fun forget(context: Context)").substringBefore("fun signing()")
-        assertTrue(forget.indexOf("file(context).delete()") in 0 until forget.indexOf("_holding.value ="))
-    }
+    // The wiring (what the repository collects, and what the distro says it holds) is pinned by
+    // ColdStartTest, which references nothing b8bb597 added, so it runs on a tree without it too.
 }
