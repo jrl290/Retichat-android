@@ -228,6 +228,23 @@ class DistroGroupSyncTest {
         assertFalse("the oldest is forgotten first", full.last() in next)
     }
 
+    @Test
+    fun aReceivedLeaveRecordsItsOwnIdThenItsLeftInGOrderInOneStepAsEveryClientMust() {
+        // The rule the review of 8d330c4 asks all three clients to share, so that a full list
+        // forgets the same ids everywhere: [op id] + the G's `left` in its order, in one call,
+        // moved to the front, each once, cut to 32. A leave G for 9 with left [9, a, b, c] on [0].
+        val (g9, a, b, c, g0) = listOf("9", "a", "b", "c", "0").map { it.repeat(32) }
+        assertEquals(listOf(g9, a, b, c, g0), DistroGroupSync.recordLeft(listOf(g0), listOf(g9) + listOf(g9, a, b, c)))
+        // An id already on the list moves to the front.
+        assertEquals(listOf(g9, a, g0, b), DistroGroupSync.recordLeft(listOf(g0, a, b), listOf(g9, a)))
+        // applyGroupSync builds that list: the op's id first, then `left` in G order, one call.
+        val repo = File("src/main/kotlin/com/newendian/retichat/data/repository/ChatRepository.kt").readText()
+        val apply = repo.substring(repo.indexOf("private suspend fun applyGroupSync("), repo.indexOf("private suspend fun holdGroupFromSync("))
+        assertTrue(apply.indexOf("leftNow += sync.groupId") in 0 until apply.indexOf("for (id in sync.left) {"))
+        assertEquals(1, Regex("UserPreferences\\.recordGroupsLeft\\(").findAll(apply).count())
+        assertTrue(apply.indexOf("for (id in sync.left) {") < apply.indexOf("UserPreferences.recordGroupsLeft(appContext, distro, leftNow)"))
+    }
+
     // ---- §6.1 routing and §6.2 keys ----
 
     @Test
