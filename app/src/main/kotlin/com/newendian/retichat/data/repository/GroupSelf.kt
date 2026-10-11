@@ -101,6 +101,19 @@ object GroupSelves {
         else -> Signer.FORMER
     }
 
+    /**
+     * Why a group cannot be created now (§8.5, §8.7), or null: [Signer.NOT_READY]
+     * while the stack is not up ([device] empty), [Signer.NOT_LOADED] while a
+     * distro is stored but none is loaded ([loadedD] null): created then, the
+     * group would be the device's, and the user's other devices would never
+     * hear of it. Nothing is written or sent for a refused create.
+     */
+    fun createRefusal(device: String, loadedD: String?, distroStored: Boolean): Signer? = when {
+        device.isEmpty() -> Signer.NOT_READY
+        loadedD == null && distroStored -> Signer.NOT_LOADED
+        else -> null
+    }
+
     /** Targets of a group send: [members] without any self address (§8.2, §9.2). */
     fun targets(members: Collection<String>, self: GroupSelf): List<String> =
         members.filter { !self.isSelf(it) }.distinct()
@@ -127,4 +140,12 @@ data class GroupActing(
 
     /** Its own address is a distro this device no longer holds: only "Delete from this device" is offered (§8.7, §13). */
     val former: Boolean get() = signer == GroupSelves.Signer.FORMER
+}
+
+/** What `ChatRepository.createGroupChat` did: the group [Created], or [Refused] with nothing written or sent (§8.7). */
+sealed class GroupCreation {
+    data class Created(val chatId: String) : GroupCreation()
+
+    /** [why] is [GroupSelves.Signer.NOT_READY] or [GroupSelves.Signer.NOT_LOADED] ([GroupSelves.createRefusal]). */
+    data class Refused(val why: GroupSelves.Signer) : GroupCreation()
 }

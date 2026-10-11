@@ -492,17 +492,29 @@ class ChatRepository(
      * contacts); and one `create` group sync is owed once the chunks are built
      * (§10.6), so every other device of D holds the group too. Otherwise as the
      * device, as before.
+     *
+     * Refused, with nothing written or sent, while the stack is not up or a
+     * distro is stored but has not loaded yet ([GroupSelves.createRefusal],
+     * §8.7): the screen says why ([GroupCreation.Refused]). Until 2026-10-11 the
+     * group was written anyway: with the stack down, one whose invites were
+     * never sent; with D not loaded, one as the device that the user's other
+     * devices never hear of.
      */
     suspend fun createGroupChat(
         name: String,
         members: List<ByteArray>,
-    ): String {
+    ): GroupCreation {
+        // The user's own entry: the distro held now, else the device (§8.1).
+        val distro = DistroManager.signing()?.first
+        GroupSelves.createRefusal(if (groupActionsReady.value) selfHex() else "", distro?.deliveryHashHex, DistroManager.isStored(appContext))?.let { why ->
+            Log.w(TAG, "createGroupChat refused: $why (§8.7) — nothing written or sent")
+            return GroupCreation.Refused(why)
+        }
+
         // Generate a random group ID (16 bytes → 32-char hex)
         val groupIdBytes = ByteArray(16).also { java.security.SecureRandom().nextBytes(it) }
         val groupIdHex = groupIdBytes.toHex()
 
-        // The user's own entry: the distro held now, else the device (§8.1).
-        val distro = DistroManager.signing()?.first
         val own = distro?.deliveryHashHex ?: selfHex()
         val ownHash = DistroCodec.hexToBytes(own) ?: selfDestHash
         // The user's own entry in the canonical member list
@@ -520,6 +532,17 @@ class ChatRepository(
             creatorHex = own,
             ownMember = own,
         )
+        // As the group's own address, resolved before anything is written: a
+        // stack that stopped (or a D that went) since the check above refuses
+        // the same way, rather than leaving a group whose invites never left.
+        val signer = groupSigner(chat)
+        val manager = groupChatManager
+        if (signer == null || manager == null) {
+            val kind = signerKind(chat)
+            val why = if (kind == GroupSelves.Signer.NOT_LOADED) kind else GroupSelves.Signer.NOT_READY
+            Log.w(TAG, "createGroupChat refused: ${if (manager == null) "stack offline" else "no signer for ${own.take(8)} ($kind)"} (§8.7) — nothing written or sent")
+            return GroupCreation.Refused(why)
+        }
         chatDao.upsert(chat)
 
         val allMemberHexes = sorted.map { it.toHex() }
@@ -550,13 +573,7 @@ class ChatRepository(
                 if (publicKey?.length == 128) put(hashHex, publicKey.lowercase())
             }
         }
-        val signer = groupSigner(chat)
-        val manager = groupChatManager
-        val built = when {
-            manager == null -> { Log.w(TAG, "createGroupChat: stack offline, invites not sent"); false }
-            signer == null -> { Log.w(TAG, "createGroupChat: no signer for ${own.take(8)} (${signerKind(chat)}), invites not sent"); false }
-            else -> manager.sendInvites(signer, groupIdHex, name, allMemberHexes, memberPublicKeys, GroupSelves.targets(allMemberHexes, self))
-        }
+        val built = manager.sendInvites(signer, groupIdHex, name, allMemberHexes, memberPublicKeys, GroupSelves.targets(allMemberHexes, self))
         // §10.6: one `create` group sync, after the invite chunks are built, for a group created as D.
         if (built && distro != null) {
             val keys = allMemberHexes.mapNotNull { hex ->
@@ -572,7 +589,7 @@ class ChatRepository(
         }
 
         Log.i(TAG, "createGroupChat: id=$chatId, groupId=$groupIdHex, ${sorted.size} members, as ${if (distro != null) "the distro ${own.take(8)}" else "the device"}")
-        return chatId
+        return GroupCreation.Created(chatId)
     }
 
     // ---- Messages ----

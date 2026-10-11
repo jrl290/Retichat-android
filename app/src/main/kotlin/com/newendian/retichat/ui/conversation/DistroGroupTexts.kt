@@ -34,6 +34,16 @@ object DistroGroupTexts {
     /** §8.7: the group view of a D-group while D is stored but not loaded yet ([GroupSelves.Signer.NOT_LOADED]). */
     const val NOT_LOADED = "Your distro address hasn't loaded on this device yet. You can post and change your membership once it has."
 
+    /** §8.7: a create refused while D is stored but not loaded yet. */
+    const val CREATE_NOT_LOADED = "Your distro address hasn't loaded on this device yet. Create the group once it has."
+
+    /** §8.7: a create refused while the stack is not running. */
+    const val CREATE_NOT_RUNNING = "Retichat isn't running on this device right now. Create the group once it is."
+
+    /** Why a create was refused ([GroupSelves.createRefusal]): D not loaded yet, else the stack not running. */
+    fun createRefused(why: GroupSelves.Signer): String =
+        if (why == GroupSelves.Signer.NOT_LOADED) CREATE_NOT_LOADED else CREATE_NOT_RUNNING
+
     /**
      * Why nothing that would send (post, accept, decline, leave) is offered in
      * a group whose own address is [own], acting as [signer] (§8.7), or null
