@@ -147,6 +147,38 @@ class GroupStatusesTest {
     }
 
     @Test
+    fun aLaterAcceptFromAMemberWhoLeftIsIgnoredWhileTheSameAcceptWithNoLeaveBeforeItCounts() = runBlocking {
+        // James, 2026-10-01: once a member has left, that member cannot rejoin. The web's 3c, on Android.
+        for (switched in bothForms) for (keyed in bothForms) {
+            val leave = msg("bob", Action.LEAVE)
+            val accept = msg("bob", key = keyed) // made after the leave: a later accept
+            // Control: the very same accept, with no leave before it, counts.
+            val control = rig(switched = switched, holds = listOf("bob").takeIf { !keyed && switched }.orEmpty())
+            control.hold()
+            assertEquals("control, keyed=$keyed switched=$switched", true, control.receive(accept))
+            assertEquals(MemberStatus.ACCEPTED, control.status("bob"))
+            assertEquals(listOf("joined"), control.store.lines.values.map { if (it.joined) "joined" else "left" })
+            // After the leave, it is ignored: nothing changes, no line, no key remembered for it.
+            val r = rig(switched = switched)
+            r.hold()
+            assertEquals(true, r.receive(leave))
+            assertEquals(MemberStatus.LEFT, r.status("bob"))
+            val lines = r.store.lines.values.map { if (it.joined) "joined" else "left" }
+            val remembered = r.native.remembered.size
+            assertNull("after the leave, keyed=$keyed switched=$switched", r.receive(accept))
+            assertEquals(MemberStatus.LEFT, r.status("bob"))
+            assertEquals(listOf("left"), lines)
+            assertEquals("no joined line", lines, r.store.lines.values.map { if (it.joined) "joined" else "left" })
+            assertEquals(remembered, r.native.remembered.size)
+            assertEquals(listOf("accept from bob"), r.dropped)
+        }
+        // The status rule behind the group rule: a leave is final whatever comes after it.
+        assertNull(com.newendian.retichat.GroupMemberStatuses.statusChange(MemberStatus.LEFT, Action.ACCEPT))
+        assertNull(com.newendian.retichat.GroupMemberStatuses.statusChange(MemberStatus.LEFT, Action.LEAVE))
+        assertEquals(MemberStatus.ACCEPTED, com.newendian.retichat.GroupMemberStatuses.statusChange(MemberStatus.INVITED, Action.ACCEPT))
+    }
+
+    @Test
     fun aForgedAcceptOrLeaveCarryingItsSendersRealKeyIsDroppedUnprovedAndTheMembersOwnMessageStillCounts() = runBlocking {
         for (switched in bothForms) for (action in listOf(Action.ACCEPT, Action.LEAVE)) {
             val r = rig(switched = switched)
