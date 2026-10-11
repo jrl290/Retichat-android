@@ -8,8 +8,10 @@ import com.newendian.retichat.bridge.NativeRefusal
  */
 sealed class DistroUnwrapOutcome {
     /**
-     * Refused whole: the message's payload holds a map that repeats a key
-     * (RFed SPEC §17.14 "Repeated keys", [NativeRefusal]). LXMF-rust logged
+     * Refused whole: Python LXMF refuses the message's payload (a map in it
+     * repeats a key or has a key Python cannot hash, or it nests past depth
+     * 493: RFed SPEC §17.14 "Repeated keys", "Unhashable keys", "Nesting";
+     * [NativeRefusal]). LXMF-rust logged
      * the one line; the blob is dropped with nothing stored, marked as seen
      * or applied, and no second line.
      */

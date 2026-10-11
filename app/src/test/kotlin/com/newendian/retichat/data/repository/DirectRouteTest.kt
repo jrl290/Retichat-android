@@ -20,8 +20,9 @@ import java.io.File
  * their marker_* cases a GROUP_ID beside each of the four distro markers.
  * Until 2026-10-11 a `rfed.distro.channel` or `rfed.distro.group` marker
  * beside a GROUP_ID made the message a DM on this path. A message whose
- * fields repeat a key is refused whole before any of this (RFed SPEC §17.14
- * "Repeated keys"), and nesting in a field nothing reads never empties the map.
+ * fields Python LXMF refuses whole is refused before any of this (RFed SPEC
+ * §17.14 "Repeated keys", "Unhashable keys", "Nesting"), and nesting in a
+ * field nothing reads never empties the map: it is read to depth 493.
  */
 class DirectRouteTest {
     @Suppress("UNCHECKED_CAST")
@@ -114,23 +115,36 @@ class DirectRouteTest {
     }
 
     @Test
-    fun aMessageWhoseFieldsRepeatAKeyIsRefusedWholeNeverADm() {
-        // The router refuses each of these before the app sees it (LXMF-rust 16a9902). A native
-        // library built before that delivers them; the app then refuses them itself, whatever
-        // else they carry, and never files one as a DM (as 4d337d1 did, silently).
+    fun aMessageTheReferenceRefusesIsRefusedWholeNeverADm() {
+        // The router refuses each of these before the app sees it (LXMF-rust 16a9902 for a repeated
+        // key, b873c00 for a key Python cannot hash and nesting past depth 493). A native library
+        // built before that delivers them; the app then refuses them itself, whatever else they
+        // carry, for the reference's reason, and never files one as a DM (as 4d337d1 did, silently).
+        // Until 2026-10-11 (this change) it refused only a repeated integer key.
         val refused = list("refused")
-        assertEquals(11, refused.size)
-        for (vector in refused) {
+        assertEquals(22, refused.size)
+        val vectors = refused + list("key_equality").filter { it["refused"] == true } + list("nesting").filter { it["refused"] == true }
+        assertEquals(22 + 15 + 6, vectors.size)
+        for (vector in vectors) {
             val raw = DistroCodec.hexToBytes(vector["fields_hex"] as String)!!
             var reported: Throwable? = null
             val route = DeliveryPolicy.directRoute(LxmfFields.receive(raw, onFailure = { reported = it }))
             assertTrue("${vector["name"]}: $route", route is DirectRoute.Refused)
-            assertTrue("${vector["name"]}: ${(route as DirectRoute.Refused).why}", route.why.contains("repeats the key"))
+            val words = when (vector["reason"] ?: "repeated_key") {
+                "repeated_key" -> "repeats a key"
+                "unhashable_key" -> "has a key Python cannot hash"
+                else -> "is nested past depth 493"
+            }
+            assertTrue("${vector["name"]}: ${(route as DirectRoute.Refused).why}", route.why.contains(words))
             // A refusal, not an unreadable map: nothing is stored, so there is no "storing it without them" line.
             assertEquals(vector["name"].toString(), null, reported)
         }
-        // A map without a repeat is read.
+        // A map without a repeat is read, and so is every key_equality pair the reference reads.
         assertEquals(DirectRoute.Group(id), DeliveryPolicy.directRoute(LxmfFields.receive(map(key(0xA0) to str(id)))))
+        for (vector in list("key_equality").filter { it["refused"] == false }) {
+            val raw = DistroCodec.hexToBytes(vector["fields_hex"] as String)!!
+            assertEquals(vector["name"].toString(), DirectRoute.Direct, DeliveryPolicy.directRoute(LxmfFields.receive(raw)))
+        }
     }
 
     @Test
@@ -160,7 +174,7 @@ class DirectRouteTest {
     }
 
     @Test
-    fun nestingInAFieldNothingReadsNeverEmptiesTheMap() {
+    fun nestingInAFieldNothingReadsIsReadToTheLimitAndRefusedPastIt() {
         // {0xA0: id, 0x09: 70 nested one-element arrays}: LXMF-rust and Python accept it, and iOS and
         // the web read its GROUP_ID. Until 2026-10-11 this reader stopped at 64 containers, read the
         // map as no fields, and filed it as a DM, silently.
@@ -168,9 +182,19 @@ class DirectRouteTest {
         assertEquals(DirectRoute.Group(id), deepRoute(id, 70))
         assertEquals(DirectRoute.Group(id), deepRoute(id.uppercase(), 70))
         assertEquals(DirectRoute.BadGroupId, deepRoute("xyz", 70))
-        // As deep as the bytes allow, without recursion: no StackOverflowError, the id still read.
-        assertEquals(DirectRoute.Group(id), deepRoute(id, 200_000))
-        assertEquals(DirectRoute.BadGroupId, deepRoute("xyz", 200_000))
+        // RFed SPEC §17.14 "Nesting": 492 arrays in a field, the innermost empty at depth 493, are
+        // read; one more is refused whole, whatever the GROUP_ID, as Python LXMF refuses it.
+        assertEquals(DirectRoute.Group(id), deepRoute(id, 492))
+        for (groupId in listOf(id, "xyz")) {
+            val past = deepRoute(groupId, 493)
+            assertTrue("$past", past is DirectRoute.Refused && past.why.contains("a value at depth 494 is nested past depth 493"))
+        }
+        // Far past it: refused at depth 494, its later bytes never walked, and no StackOverflowError.
+        // Until 2026-10-11 (this change) the id was read from 200 000 nested arrays.
+        for (groupId in listOf(id, "xyz")) {
+            val far = deepRoute(groupId, 200_000)
+            assertTrue("$far", far is DirectRoute.Refused && far.why.contains("a value at depth 494 is nested past depth 493"))
+        }
     }
 
     @Test

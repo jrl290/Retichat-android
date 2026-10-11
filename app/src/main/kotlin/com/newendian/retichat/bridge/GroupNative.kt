@@ -14,8 +14,8 @@ interface GroupNative {
      * checked as if it had arrived directly: what its signature is worth under
      * the key held for its source, else under the key it carries for its own
      * sender when that binds ([UnpackedGroupMessage.signature]). Nothing is
-     * remembered. [GroupUnpack.Refused] when its payload repeats a key
-     * ([NativeRefusal]), [GroupUnpack.NotLxmf] when it is not an LXMF message.
+     * remembered. [GroupUnpack.Refused] when Python LXMF refuses its payload
+     * whole ([NativeRefusal]), [GroupUnpack.NotLxmf] when it is not an LXMF message.
      */
     fun unpack(packed: ByteArray): GroupUnpack
 
@@ -42,9 +42,12 @@ sealed class GroupUnpack {
     data class Unpacked(val message: UnpackedGroupMessage) : GroupUnpack()
 
     /**
-     * Refused whole: its payload holds a map that repeats a key (RFed SPEC
-     * §17.14 "Repeated keys", [NativeRefusal]). The native layer has logged
-     * it; it is never counted, held or applied.
+     * Refused whole: Python LXMF refuses its payload (a map in it repeats a
+     * key or has a key Python cannot hash, or it nests past depth 493: RFed
+     * SPEC §17.14 "Repeated keys", "Unhashable keys", "Nesting";
+     * [NativeRefusal]). The native layer has logged it, with the reason; it is
+     * never counted, held or applied. The skip reason below is the same words
+     * as iOS's (GroupStatuses.swift), whatever the reason.
      */
     object Refused : GroupUnpack() { override fun toString() = "refused whole: a map in it repeats a key, as Python LXMF refuses it (RFed SPEC §17.14)" }
 

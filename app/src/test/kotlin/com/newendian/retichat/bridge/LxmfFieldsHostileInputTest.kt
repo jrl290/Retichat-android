@@ -88,21 +88,29 @@ class LxmfFieldsHostileInputTest {
     }
 
     @Test
-    fun nestingIsSteppedOverSoItCannotOverflowTheStackOrEmptyTheMap() {
+    fun nestingIsSteppedOverToDepth493SoItCannotOverflowTheStackOrEmptyTheMap() {
         // {0x05: [[[...[]...]]], 0x02: 7}: containers below the deepest an accessor
         // reads (3: map, 0x05 array, [name, data]) are stepped over whole, without
-        // recursion and without a limit, and the rest of the map is read in step.
+        // recursion, and the rest of the map is read in step, down to depth 493 (RFed SPEC
+        // §17.14 "Nesting": 0x05's value at depth 2, so `depth` + 1 arrays end at depth + 2).
         // Until 2026-10-11 a container below 64 made the whole map unreadable.
-        for (depth in listOf(3, 62, 63, 200_000)) {
+        for (depth in listOf(3, 62, 63, 491)) {
             val fields = decode("8205" + "91".repeat(depth) + "90" + "0207")
             assertEquals("$depth deep", 2, fields.size)
             assertTrue(fields.has(LxmfFields.FIELD_FILE_ATTACHMENTS))
             assertTrue(fields.getFileAttachments().isEmpty())
             assertEquals("$depth deep", 7L, fields.getInt(0x02))
         }
-        // An attachment pair at its own depth is read, whatever is nested beside it.
+        // One level more, or far more, is refused whole, as Python LXMF refuses it: no fields, and
+        // no StackOverflowError. Until the b873c00 round 200 000 levels were stepped over and read.
+        for (depth in listOf(492, 200_000)) {
+            assertEquals("$depth deep", 0, decode("8205" + "91".repeat(depth) + "90" + "0207").size)
+            val received = LxmfFields.receive(hex("8205" + "91".repeat(depth) + "90" + "0207"))
+            assertTrue("$depth deep: $received", received is LxmfFields.Received.Refused && received.why.contains("a value at depth 494 is nested past depth 493"))
+        }
+        // An attachment pair at its own depth is read, whatever is nested beside it (to the limit).
         val pair = "92" + "a161" + "c40101"          // ["a", b"\x01"]
-        val withDeep = decode("8205" + "92" + pair + "91".repeat(1000) + "90" + "0207")
+        val withDeep = decode("8205" + "92" + pair + "91".repeat(490) + "90" + "0207")
         assertEquals(1, withDeep.getFileAttachments().size)
         assertEquals("a", withDeep.getFileAttachments()[0].first)
     }

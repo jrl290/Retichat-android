@@ -143,15 +143,18 @@ class LxmfFields private constructor(
     sealed class Received {
         /**
          * The fields as read: [EMPTY] when there were none, or when they could
-         * not be read for any reason but a repeated key (then reported to
+         * not be read for any reason but a refusal (then reported to
          * `onFailure`).
          */
         data class Read(val fields: LxmfFields) : Received()
 
         /**
-         * A map in them repeats a key ([RepeatedKeyException], [why] says
-         * where): the message is refused whole, with one log line, never shown,
-         * stored or applied (RFed SPEC §17.14 "Repeated keys").
+         * Python LXMF refuses the message whole for them ([RefusedPayloadException]):
+         * a map in them repeats a key or has a key Python cannot hash, or a
+         * value is nested past depth 493 (RFed SPEC §17.14 "Repeated keys",
+         * "Unhashable keys", "Nesting"). [why] is the reference's first reason,
+         * in LXMF-rust's words ([MsgpackKeys.Refusal.why]). The message is
+         * refused whole, with one log line, never shown, stored or applied.
          */
         data class Refused(val why: String) : Received()
     }
@@ -244,9 +247,9 @@ class LxmfFields private constructor(
 
         /**
          * Read a msgpack-encoded fields map from raw bytes, throwing on bytes
-         * that cannot be read: [RepeatedKeyException] for a map that repeats a
-         * key, another Exception for anything else malformed. Null or empty
-         * input, or a value that is not a map, is [EMPTY].
+         * that cannot be read: [RefusedPayloadException] for bytes Python LXMF
+         * refuses whole, another Exception for anything else malformed. Null or
+         * empty input, or a value that is not a map, is [EMPTY].
          *
          * The bytes are the sender's (a distro message's map as packed, a
          * direct message's re-encoded by rmpv, which keeps ext values), so no
@@ -260,32 +263,39 @@ class LxmfFields private constructor(
          * made the whole map unreadable, so a group message was filed as a
          * fieldless DM.
          *
-         * A map that repeats a key is never read here (RFed SPEC §17.14
-         * "Repeated keys"; James, 2026-10-11: parity with Python LXMF). The
-         * native layer refuses such a message whole, with its one log line,
-         * before the app is given any of its bytes: the router's unpack on the
-         * direct path, the distro unwrap, the group receipt and the channel
-         * codec (LXMF-rust `msgpack_keys`, with Python's key equality). This
-         * reader is the backstop for a native library built before that
-         * (LXMF-rust 16a9902): a map it reads (down to [KEPT_DEPTH]) that
-         * repeats an integer key, the keys it compares, throws
-         * [RepeatedKeyException], and a receive path ([receive]) refuses the
-         * message whole for it. It never picks one entry of a repeated key.
-         * From 2026-10-11 (5f9edff's copy) to 4d337d1 it kept the first entry,
-         * and 0xFB-0xFD of the fields map from their last; before that the last
-         * of every key. From 4d337d1 to this change a repeat gave [EMPTY], and
-         * the message went on as a fieldless DM.
+         * Bytes Python LXMF refuses whole are never read here (RFed SPEC
+         * §17.14 "Repeated keys", James, 2026-10-11: parity with Python LXMF;
+         * "Unhashable keys" and "Nesting", decided 2026-10-11): a map, at any
+         * depth, that repeats a key or has a key Python cannot hash, or a value
+         * nested past depth 493. The native layer refuses such a message whole,
+         * with its one log line, before the app is given any of its bytes: the
+         * router's unpack on the direct path, the distro unwrap, the group
+         * receipt and the channel codec (LXMF-rust `msgpack_keys`). This reader
+         * is the backstop for a native library built before that (LXMF-rust
+         * 16a9902 for a repeated key, b873c00 for the other two): the bytes are
+         * judged first, whole, as LXMF-rust judges them ([MsgpackKeys.refusal],
+         * Python's key equality, every depth, the fields map at depth 1), and a
+         * refusal throws [RefusedPayloadException], which a receive path
+         * ([receive]) takes as the message refused whole. It never picks one
+         * entry of a repeated key. From 2026-10-11 (5f9edff's copy) to 4d337d1
+         * it kept the first entry, and 0xFB-0xFD of the fields map from their
+         * last; before that the last of every key. From 4d337d1 to 5bad677 a
+         * repeat gave [EMPTY], and the message went on as a fieldless DM. From
+         * 5bad677 to this change only a repeated integer key, in a map down to
+         * [KEPT_DEPTH], was refused here; an unhashable key, nesting past 493
+         * and a repeat of any other key were read.
          */
         fun read(raw: ByteArray?): LxmfFields {
             if (raw == null || raw.isEmpty()) return EMPTY
-            val map = readMap(ByteBuffer.wrap(raw), 1) ?: return EMPTY
+            MsgpackKeys.refusal(raw, MsgpackKeys.FIELDS_DEPTH)?.let { throw RefusedPayloadException(it) }
+            val map = readMap(ByteBuffer.wrap(raw), MsgpackKeys.FIELDS_DEPTH) ?: return EMPTY
             return LxmfFields(map)
         }
 
         /**
-         * [read], with [EMPTY] for bytes it cannot read, a repeated key
-         * included. Not for a receive path: a message's fields are read with
-         * [receive], which refuses a repeated key and reports the rest.
+         * [read], with [EMPTY] for bytes it cannot read, a refusal included.
+         * Not for a receive path: a message's fields are read with [receive],
+         * which refuses what Python LXMF refuses and reports the rest.
          */
         fun decode(raw: ByteArray?): LxmfFields = try {
             read(raw)
@@ -296,8 +306,9 @@ class LxmfFields private constructor(
         /**
          * A message's fields as every receive path reads them (ChatRepository's
          * direct and distro paths, a `status` element): [read] behind a
-         * backstop. A repeated key is [Received.Refused], and the caller drops
-         * the message with one log line. Anything else the decoder throws, an
+         * backstop. Bytes Python LXMF refuses whole ([RefusedPayloadException])
+         * are [Received.Refused], and the caller drops the message with one log
+         * line. Anything else the decoder throws, an
          * Error included, is reported to [onFailure] and read as no fields: the
          * message is still stored, without its attachments. Before 2026-09-29 a
          * stranger's map made the decoder throw OutOfMemoryError out of
@@ -313,8 +324,8 @@ class LxmfFields private constructor(
             onFailure: (Throwable) -> Unit = {},
         ): Received = try {
             Received.Read(decoder(raw))
-        } catch (e: RepeatedKeyException) {
-            Received.Refused(e.message ?: "a map repeats a key")
+        } catch (e: RefusedPayloadException) {
+            Received.Refused(e.refusal.why)
         } catch (t: Throwable) {
             onFailure(t)
             Received.Read(EMPTY)
@@ -353,13 +364,12 @@ class LxmfFields private constructor(
                 // Integer keys of any width holding 0..Int.MAX_VALUE. A
                 // negative or larger key (a uint64 above 2^63 reads as
                 // negative) matches nothing, rather than wrapping onto a
-                // small one; string keys never match (§10).
+                // small one; string keys never match (§10). No two keys are
+                // one here: [read] refused a repeat before reading.
                 val intKey = when (key) {
                     is Long -> if (key in 0L..Int.MAX_VALUE.toLong()) key.toInt() else return@repeat
                     else -> return@repeat
                 }
-                // A repeated key: the message is refused whole, never read from one of its entries ([read], [receive]).
-                if (intKey in result) throw RepeatedKeyException("a map at depth $depth repeats the key $intKey")
                 result[intKey] = value
             }
             return result
@@ -502,8 +512,8 @@ class LxmfFields private constructor(
          * `skipValue`): [pending] counts the values still to step over, and a
          * container adds its elements (a map two per entry). Each value takes a
          * byte at least, so more pending than bytes left is malformed, and
-         * nothing is allocated. Maps stepped over are not read, so their keys
-         * are not compared here; the native layer refuses a repeat in them.
+         * nothing is allocated. Maps stepped over are not read; their keys and
+         * their depth were judged before reading ([MsgpackKeys.refusal]).
          */
         private fun skipValue(buf: ByteBuffer) {
             var pending = 1L
@@ -540,10 +550,11 @@ class LxmfFields private constructor(
 }
 
 /**
- * A map the fields reader reads repeats a key ([LxmfFields.read]): the
- * message is refused whole (RFed SPEC §17.14 "Repeated keys").
+ * Bytes the fields reader is given are refused whole by Python LXMF
+ * ([LxmfFields.read], [MsgpackKeys.refusal]): the message is refused whole
+ * (RFed SPEC §17.14 "Repeated keys", "Unhashable keys", "Nesting").
  */
-class RepeatedKeyException(message: String) : IllegalArgumentException(message)
+class RefusedPayloadException(val refusal: MsgpackKeys.Refusal) : IllegalArgumentException(refusal.why)
 
 /**
  * [LxmfFields.groupEntries]: the keys LXMF-rust's distro unwrap reports for

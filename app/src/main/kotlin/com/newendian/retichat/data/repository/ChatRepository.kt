@@ -1593,13 +1593,15 @@ class ChatRepository(
         val received = LxmfFields.receive(fieldsRaw, onFailure = {
             Log.w(TAG, "onMessageReceived: fields from ${srcHash.toHex().take(8)} unreadable (${it::class.java.simpleName}: ${it.message}) — storing the message without them")
         })
-        // What it is (DeliveryPolicy.directRoute). A message whose payload repeats a key
-        // is refused by the router whole, with its one log line, and never gets here
-        // (RFed SPEC §17.14 "Repeated keys"); one that does all the same (a native
-        // library built before LXMF-rust 16a9902) is refused here, never a DM.
+        // What it is (DeliveryPolicy.directRoute). A message Python LXMF refuses whole (a
+        // map in its payload repeats a key or has a key Python cannot hash, or it nests
+        // past depth 493) is refused by the router whole, with its one log line, and never
+        // gets here (RFed SPEC §17.14 "Repeated keys", "Unhashable keys", "Nesting"); one
+        // that does all the same (a native library built before LXMF-rust b873c00) is
+        // refused here, never a DM.
         val route = DeliveryPolicy.directRoute(received)
         if (route is DeliveryPolicy.DirectRoute.Refused) {
-            Log.w(TAG, "onMessageReceived: REFUSED the message from ${srcHash.toHex().take(8)} whole: ${route.why} (RFed SPEC §17.14 \"Repeated keys\")")
+            Log.w(TAG, "onMessageReceived: REFUSED the message from ${srcHash.toHex().take(8)} whole: ${route.why}")
             return
         }
         val fields = (received as? LxmfFields.Received.Read)?.fields ?: return
@@ -1723,10 +1725,11 @@ class ChatRepository(
         val fields = when (val received = LxmfFields.receive(fieldsRaw, onFailure = {
             Log.w(TAG, "onDistroMessageReceived: fields from ${srcHex.take(8)} unreadable (${it::class.java.simpleName}: ${it.message}) — storing the message without its attachments")
         })) {
-            // The distro unwrap refuses it first (RFed SPEC §17.14 "Repeated keys"); here
-            // only from a native library built before LXMF-rust 16a9902. Never a DM.
+            // The distro unwrap refuses it first (RFed SPEC §17.14 "Repeated keys",
+            // "Unhashable keys", "Nesting"); here only from a native library built before
+            // LXMF-rust b873c00. Never a DM.
             is LxmfFields.Received.Refused -> {
-                Log.w(TAG, "onDistroMessageReceived: REFUSED the message from ${srcHex.take(8)} whole: ${received.why} (RFed SPEC §17.14 \"Repeated keys\")")
+                Log.w(TAG, "onDistroMessageReceived: REFUSED the message from ${srcHex.take(8)} whole: ${received.why}")
                 return
             }
             is LxmfFields.Received.Read -> received.fields
@@ -1851,7 +1854,7 @@ class ChatRepository(
         })) {
             // The distro unwrap refuses it first; here only from an older native library.
             is LxmfFields.Received.Refused -> {
-                Log.w(TAG, "distro group message ${hash.take(12)} from ${srcHex.take(8)} REFUSED whole: ${received.why} (RFed SPEC §17.14 \"Repeated keys\")")
+                Log.w(TAG, "distro group message ${hash.take(12)} from ${srcHex.take(8)} REFUSED whole: ${received.why}")
                 return@withContext DistroGroupOutcome.DROPPED
             }
             is LxmfFields.Received.Read -> received.fields

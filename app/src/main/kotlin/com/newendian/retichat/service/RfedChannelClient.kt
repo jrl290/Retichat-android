@@ -1299,8 +1299,8 @@ class RfedChannelClient(
 
             val raw = RetichatBridge.channelLxmUnpack(channel.channelName, lxmfData) ?: run {
                 val error = RetichatBridge.lastError()
-                // RFed SPEC §17.14 "Repeated keys": a post whose LXMF payload repeats a key is
-                // refused whole, as Python LXMF refuses it; LXMF-rust logged its one line.
+                // RFed SPEC §17.14 "Repeated keys", "Unhashable keys", "Nesting": a post whose
+                // LXMF payload Python LXMF refuses is refused whole; LXMF-rust logged its one line.
                 if (NativeRefusal.isRefusal(error)) return@withContext
                 val key = channelHashHex.hashCode() xor innerBlob.contentHashCode()
                 if (failedBlobKeys.add(key)) {

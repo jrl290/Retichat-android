@@ -271,8 +271,9 @@ object DeliveryPolicy {
     /** What a message that arrived directly, on the device's own address, is ([directRoute]). */
     sealed class DirectRoute {
         /**
-         * Refused whole: a map in its fields repeats a key ([LxmfFields.Received.Refused];
-         * RFed SPEC §17.14 "Repeated keys"). Dropped with one log line before anything
+         * Refused whole: Python LXMF refuses its fields ([LxmfFields.Received.Refused];
+         * RFed SPEC §17.14 "Repeated keys", "Unhashable keys", "Nesting"; [why] says which).
+         * Dropped with one log line before anything
          * else is looked at, never a DM, a group, a transfer or a sent copy.
          */
         data class Refused(val why: String) : DirectRoute()
@@ -290,8 +291,8 @@ object DeliveryPolicy {
 
     /**
      * [directRoute] for fields as a receive path reads them
-     * ([LxmfFields.receive]): a message whose fields repeat a key is
-     * [DirectRoute.Refused], before anything else is looked at.
+     * ([LxmfFields.receive]): a message whose fields Python LXMF refuses whole
+     * is [DirectRoute.Refused], before anything else is looked at.
      */
     fun directRoute(received: LxmfFields.Received): DirectRoute = when (received) {
         is LxmfFields.Received.Refused -> DirectRoute.Refused(received.why)

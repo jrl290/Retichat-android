@@ -516,8 +516,8 @@ object RetichatBridge {
      * checked as if it had arrived directly (see [UnpackedGroupMessage]):
      * the signature under the key held for its source, else under the key it
      * carries when that binds. Nothing is remembered. [GroupUnpack.Refused]
-     * when its payload repeats a key (the native layer has logged it,
-     * [NativeRefusal]); [GroupUnpack.NotLxmf] when it is not an LXMF message
+     * when Python LXMF refuses its payload whole (the native layer has logged
+     * it, [NativeRefusal]); [GroupUnpack.NotLxmf] when it is not an LXMF message
      * of that size.
      */
     fun groupUnpackPacked(packed: ByteArray): GroupUnpack {

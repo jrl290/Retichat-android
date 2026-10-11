@@ -322,13 +322,13 @@ class GroupStatusEngine(
         if (element.size <= GroupStatuses.PACKED_HEADER_LENGTH || element.size > GroupStatuses.STATUS_PACKED_LIMIT) {
             return "${element.size} bytes is not the size of an accept or leave"
         }
-        // A refused element (its payload repeats a key) is skipped as such: the
+        // A refused element (Python LXMF refuses its payload whole) is skipped as such: the
         // native layer logged the refusal, and nothing of it is counted or held.
         val unpacked = when (val u = native.unpack(element)) {
             is GroupUnpack.Unpacked -> u.message
             GroupUnpack.Refused, GroupUnpack.NotLxmf -> return u.toString()
         }
-        // Refused by the receipt first; here only from a native library built before LXMF-rust 16a9902.
+        // Refused by the receipt first; here only from a native library built before LXMF-rust b873c00.
         val fields = when (val received = LxmfFields.receive(unpacked.fieldsRaw)) {
             is LxmfFields.Received.Refused -> return "refused whole: ${received.why}"
             is LxmfFields.Received.Read -> received.fields

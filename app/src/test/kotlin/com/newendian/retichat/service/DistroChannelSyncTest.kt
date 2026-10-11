@@ -234,21 +234,32 @@ class DistroChannelSyncTest {
     }
 
     @Test
-    fun aMembershipMessageWhoseFieldsRepeatAKeyIsRefusedNeverReadFromOneEntry() {
+    fun aMembershipMessageThePythonReferenceRefusesIsRefusedNeverReadFromOneEntry() {
         // RFed SPEC §17.14 "Repeated keys", which settles §17.12's readers too (James,
-        // 2026-10-11): the distro unwrap refuses such a message whole first; given one anyway,
-        // this reader reads none of its entries. Until 2026-10-11 it read the first.
-        fun refused(c: ByteArray, key: Int) {
+        // 2026-10-11), and "Unhashable keys": the distro unwrap refuses such a message whole first;
+        // given one anyway (a native library built before LXMF-rust b873c00), this reader reads none
+        // of its entries and gives the reference's reason. Until 2026-10-11 it read the first entry
+        // of a key; until this change it refused only a repeated integer key of the fields map.
+        fun refused(c: ByteArray, says: String) {
             val marker = DistroChannelSync.read(c)!!
             assertNull(marker.sync)
             assertEquals("", marker.byHex)
-            assertTrue(marker.problem!!, marker.problem!!.startsWith("its fields map repeats the key 0x${key.toString(16)}: refused whole"))
+            assertTrue(marker.problem!!, marker.problem!!.startsWith("refused whole: $says, as Python LXMF refuses it (umsgpack "))
         }
         val join = array(str("join"), str("public.first"), fixint(1))
-        refused(map(key(0xfb) to str(DistroChannelSync.TYPE), key(0xfc) to join, key(0xfc) to array(str("leave"), str("public.second"), fixint(2))), 0xfc)
-        refused(map(key(0xfb) to str("app.example"), key(0xfb) to str(DistroChannelSync.TYPE), key(0xfc) to join), 0xfb)
-        refused(map(key(0xfb) to str(DistroChannelSync.TYPE), key(0xfc) to join, key(0xfd) to str(device), key(0xfd) to str(sibling)), 0xfd)
-        refused(map(key(0x0c) to bin(ByteArray(0)), key(0x0c) to bin(ByteArray(0)), key(0xfb) to str(DistroChannelSync.TYPE), key(0xfc) to join), 0xc)
+        val c = key(0xfb) to str(DistroChannelSync.TYPE)
+        refused(map(c, key(0xfc) to join, key(0xfc) to array(str("leave"), str("public.second"), fixint(2))), "a map at depth 1 repeats a key (252)")
+        refused(map(key(0xfb) to str("app.example"), c, key(0xfc) to join), "a map at depth 1 repeats a key (251)")
+        refused(map(c, key(0xfc) to join, key(0xfd) to str(device), key(0xfd) to str(sibling)), "a map at depth 1 repeats a key (253)")
+        refused(map(key(0x0c) to bin(ByteArray(0)), key(0x0c) to bin(ByteArray(0)), c, key(0xfc) to join), "a map at depth 1 repeats a key (12)")
+        // Python's key equality, not the integer's encoding: 0xFC as uint 16, and as the float 252.0.
+        refused(map(c, key(0xfc) to join, uint16(0xfc) to join), "a map at depth 1 repeats a key (252)")
+        refused(map(c, key(0xfc) to join, float64(252.0) to join), "a map at depth 1 repeats a key (252.0)")
+        // In a map no accessor reads, and with a str key.
+        refused(map(c, key(0xfc) to join, key(0x09) to array(map(str("k") to fixint(1), str("k") to fixint(2)))), "a map at depth 3 repeats a key (\"k\")")
+        // A key Python cannot hash: a map, or an array holding one at any depth.
+        refused(map(c, key(0xfc) to join, bytes(0x80) to fixint(0)), "a map at depth 1 has a key Python cannot hash (map 80)")
+        refused(map(c, key(0xfc) to join, array(fixint(1), array(bytes(0x80))) to fixint(0)), "a map at depth 1 has a key Python cannot hash (array 92019180)")
         // A repeat in a message no entry of whose 0xFB names C: no membership message.
         assertNull(DistroChannelSync.read(map(key(0xfb) to str("app.example"), key(0xfb) to str("app.other"), key(0xfc) to join)))
     }

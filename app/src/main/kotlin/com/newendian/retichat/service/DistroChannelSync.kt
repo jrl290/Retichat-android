@@ -1,5 +1,7 @@
 package com.newendian.retichat.service
 
+import com.newendian.retichat.bridge.MsgpackKeys
+import com.newendian.retichat.bridge.NativeRefusal
 import java.nio.ByteBuffer
 import java.nio.charset.CharacterCodingException
 import java.nio.charset.CodingErrorAction
@@ -74,13 +76,16 @@ object DistroChannelSync {
      * are ignored. The name rules of a join are the disposition's, not this
      * reader's: a leave is not held to them. Never throws.
      *
-     * A fields map that repeats a key is never read (RFed SPEC §17.14
-     * "Repeated keys", which settles it for §17.12 too: James, 2026-10-11).
-     * The distro unwrap refuses such a message whole, with its one log line,
-     * before the app is given its fields; one whose 0xFB names [TYPE] in any
-     * entry and whose map repeats an integer key would get here only if it did
-     * not, and is then a C with that problem (rule 4), never one read from one
-     * of its entries. Until 2026-10-11 the first entry of a key was read.
+     * A fields map Python LXMF refuses whole is never read (RFed SPEC §17.14
+     * "Repeated keys", which settles it for §17.12 too: James, 2026-10-11;
+     * "Unhashable keys", "Nesting"). The distro unwrap refuses such a message
+     * whole, with its one log line, before the app is given its fields; one
+     * whose 0xFB names [TYPE] in any entry would get here only from a native
+     * library built before LXMF-rust b873c00, and is then a C with the
+     * reference's reason as its problem (rule 4, [MsgpackKeys.refusal]),
+     * never one read from one of its entries. Until 2026-10-11 the first entry
+     * of a key was read; until the b873c00 round only a repeated integer key of
+     * the fields map was refused here.
      */
     fun read(fieldsMap: ByteArray?): Marker? {
         if (fieldsMap == null || fieldsMap.isEmpty()) return null
@@ -88,8 +93,6 @@ object DistroChannelSync {
         val typePositions = ArrayList<Int>()
         var dataPos = -1
         var metaPos = -1
-        val keys = HashSet<Long>()
-        var repeated: Long? = null
         try {
             val map = readHead(b, 0)
             if (map.kind != Kind.MAP) return null
@@ -98,7 +101,6 @@ object DistroChannelSync {
                 val key = readHead(b, pos)
                 pos = skip(b, pos, 0)
                 if (key.kind == Kind.INT && !key.overflow) {
-                    if (!keys.add(key.int) && repeated == null) repeated = key.int
                     when (key.int) {
                         FIELD_CUSTOM_TYPE.toLong() -> typePositions += pos
                         FIELD_CUSTOM_DATA.toLong() -> dataPos = pos
@@ -112,9 +114,7 @@ object DistroChannelSync {
             // Too broken to name its type: no membership message.
             return null
         }
-        if (repeated != null) {
-            return Marker("", null, "its fields map repeats the key 0x${repeated.toString(16)}: refused whole (RFed SPEC §17.14 \"Repeated keys\")")
-        }
+        MsgpackKeys.refusal(b, MsgpackKeys.FIELDS_DEPTH)?.let { return Marker("", null, "${NativeRefusal.REFUSED_WHOLE} ${it.why}") }
         var byHex = ""
         fun bad(problem: String) = Marker(byHex, null, problem)
         try {
