@@ -1663,10 +1663,11 @@ class ChatRepository(
      * message is held), [keys] the unwrap's group keys, [groupId] its well-formed
      * id. The same admission as the direct path, with the packet's own source and
      * signature verdict ([unverifiedReason]): the three first rules (§6.3), a
-     * relay request never acted on (§12.3), an invite only past the privacy
-     * filter and only listing D (an invite to D the filter drops puts its id in
-     * the filtered-invite set), then the group rule. What the rule drops only
-     * because the group is not joined here is held (§6.5). An admitted message
+     * relay request never acted on (§12.3), an invite only listing D and only
+     * past the privacy filter (an invite to D the filter drops for a group not
+     * held here puts its id in the filtered-invite set), then the group rule.
+     * What the rule drops only because the group is not joined here is held
+     * (§6.5). The decision is [DistroGroupAdmission.decide]'s. An admitted message
      * makes the sender's name row and nothing of a DM (§6.4), then goes to the
      * group handler with the LXMF hash as its id. Runs inline: the caller
      * records the seen key from the outcome.
@@ -1697,53 +1698,37 @@ class ChatRepository(
         val action = fields.group(GroupEntry.ACTION)
         val what = "group ${action ?: "message"} ${hash.take(12)} for ${groupId.take(8)} from ${srcHex.take(8)} via the distro"
         val here = groupStanding(groupId, srcHex)
-        DeliveryPolicy.firstRules(signature, srcHex, fields.group(GroupEntry.SENDER), here.selves, here.echoes)?.let { why ->
-            Log.i(TAG, "$what DROPPED: $why")
-            return@withContext DistroGroupOutcome.DROPPED
-        }
-        if (action == GroupChatManager.Action.RELAY_REQUEST) {
-            Log.i(TAG, "$what DROPPED: a relay request through the distro is never acted on, by any device of it (§12.3)")
-            return@withContext DistroGroupOutcome.DROPPED
-        }
-        var sourceAllowed = false
-        if (action == GroupChatManager.Action.INVITE) {
-            val listed = DeliveryPolicy.members(fields.group(GroupEntry.MEMBERS))
-            if (here.chat == null && distro !in listed) {
-                Log.i(TAG, "$what DROPPED: the invite does not list the distro ${distro.take(8)} (§9.3)")
-                return@withContext DistroGroupOutcome.DROPPED
-            }
-            sourceAllowed = allowlisted(srcHex)
-            if (!sourceAllowed) {
-                UserPreferences.filterInvite(appContext, groupId)
-                Log.i(TAG, "$what DROPPED by the privacy filter: its id joins the filtered-invite set, and its group's traffic is not held (§6.5)")
-                return@withContext DistroGroupOutcome.DROPPED
-            }
-        }
-        val namesOther = DeliveryPolicy.namesOther(fields.group(GroupEntry.SENDER), srcHex)
-        val allowed = DeliveryPolicy.groupMessage(
-            action = action,
-            sourceAllowed = sourceAllowed,
-            held = here.held,
-            sourceStatus = here.sourceStatus,
-            namesOther = namesOther,
-            closed = here.closed,
-            signature = signature,
-            sourceIsCreator = here.sourceIsCreator,
+        val isInvite = action == GroupChatManager.Action.INVITE
+        val verdict = DistroGroupAdmission.decide(
+            DistroGroupAdmission.Facts(
+                action = action,
+                signature = signature,
+                srcHex = srcHex,
+                groupSender = fields.group(GroupEntry.SENDER),
+                listed = if (isInvite) DeliveryPolicy.members(fields.group(GroupEntry.MEMBERS)) else emptyList(),
+                distro = distro,
+                heldHere = here.chat != null,
+                held = here.held,
+                sourceStatus = here.sourceStatus,
+                closed = here.closed,
+                sourceIsCreator = here.sourceIsCreator,
+                selves = here.selves,
+                echoes = here.echoes,
+                sourceAllowed = isInvite && allowlisted(srcHex),
+                filtered = { UserPreferences.isInviteFiltered(appContext, groupId) },
+            )
         )
-        if (!allowed) {
-            val keptIfJoined = DeliveryPolicy.groupMessage(
-                action, false, DeliveryPolicy.Held.JOINED, here.sourceStatus, namesOther, false, signature, here.sourceIsCreator,
-            )
-            val holdable = DeliveryPolicy.holdable(
-                action, here.held, here.closed, UserPreferences.isInviteFiltered(appContext, groupId),
-                signature, here.isSelf(srcHex), keptIfJoined,
-            )
-            if (holdable) {
+        when (verdict) {
+            is DistroGroupAdmission.Verdict.Drop -> {
+                if (verdict.filterId) UserPreferences.filterInvite(appContext, groupId)
+                Log.i(TAG, "$what DROPPED: ${verdict.why}")
+                return@withContext DistroGroupOutcome.DROPPED
+            }
+            DistroGroupAdmission.Verdict.Hold -> {
                 val held = holdArrival(blob, groupId, srcHex, hash, signature == Signature.VALIDATED, isPostSync = false, distro)
                 return@withContext if (held) DistroGroupOutcome.HELD else DistroGroupOutcome.DROPPED
             }
-            Log.i(TAG, "$what DROPPED (group ${here.held}, source ${here.sourceStatus ?: "not listed"}, closed=${here.closed}, signature=$signature)")
-            return@withContext DistroGroupOutcome.DROPPED
+            DistroGroupAdmission.Verdict.Admit -> Unit
         }
         // §6.4: the sender's name row, as the direct path makes it; nothing of a DM.
         if (!here.isSelf(srcHex)) {
@@ -2485,6 +2470,13 @@ class ChatRepository(
                     inviteStatus = if (memberHex == srcHex) MemberStatus.ACCEPTED else MemberStatus.INVITED,
                 )
             )
+        }
+        // The privacy filter admitted this group (its inviter is allowed): any id an earlier
+        // invite from another source put in the filtered-invite set leaves it, so the group's
+        // traffic is held while it is pending (GROUPS-DISTRO-DESIGN.md §6.5).
+        if (UserPreferences.isInviteFiltered(appContext, groupId)) {
+            UserPreferences.unfilterInvite(appContext, groupId)
+            Log.i(TAG, "group ${groupId.take(8)} left the filtered-invite set: an invite the filter allowed made it held here (§6.5)")
         }
         Log.i(TAG, "Created PENDING group from invite: chatId=$chatId, groupId=$groupId, own address ${own?.take(8)}${if (viaDistro) " (through the distro)" else ""}")
 

@@ -113,20 +113,23 @@ class GroupsDistroWiringTest {
         val gm = body(repo, "onDistroGroupMessage")
         assertFalse(gm.contains("handleDirectMessage("))
         assertFalse(gm.contains("onDistroMessageReceived("))
+        // The first rules, the relay request, the invite's list and filter, the group rule and
+        // holding are DistroGroupAdmission.decide's (DistroGroupAdmissionTest runs them).
         inOrder(
             gm,
-            "DeliveryPolicy.firstRules(signature, srcHex, fields.group(GroupEntry.SENDER), here.selves, here.echoes)",
-            "if (action == GroupChatManager.Action.RELAY_REQUEST) {",
-            "if (action == GroupChatManager.Action.INVITE) {",
-            "DeliveryPolicy.groupMessage(",
+            "groupSender = fields.group(GroupEntry.SENDER),",
+            "listed = if (isInvite) DeliveryPolicy.members(fields.group(GroupEntry.MEMBERS)) else emptyList(),",
+            "sourceAllowed = isInvite && allowlisted(srcHex),",
+            "is DistroGroupAdmission.Verdict.Drop -> {",
+            "if (verdict.filterId) UserPreferences.filterInvite(appContext, groupId)",
+            "return@withContext DistroGroupOutcome.DROPPED",
+            "DistroGroupAdmission.Verdict.Hold -> {",
+            "holdArrival(blob, groupId, srcHex, hash,",
             // §6.4: the sender's name row, as the direct path makes it, then the group handler.
             "ensureContact(srcHex)",
             "acceptMessageName(srcHex, nameField, unverifiedReason, timestamp)",
             "handleGroupMessage(hash, srcHex, content, timestamp, fields, here, signature, keys.senderKey, keys.packed, viaDistro = true)",
         )
-        // An invite to D must list D; the filter's drop enters the filtered-invite set.
-        assertTrue(gm.contains("if (here.chat == null && distro !in listed) {"))
-        inOrder(gm, "sourceAllowed = allowlisted(srcHex)", "if (!sourceAllowed) {", "UserPreferences.filterInvite(appContext, groupId)", "return@withContext DistroGroupOutcome.DROPPED")
         // The direct path runs the same three first rules before the group rule (§6.3).
         inOrder(body(repo, "onMessageReceived"), "DeliveryPolicy.firstRules(", "DeliveryPolicy.groupMessage(", "handleGroupMessage(")
     }
