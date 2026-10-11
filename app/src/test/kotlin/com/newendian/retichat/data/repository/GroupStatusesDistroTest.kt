@@ -78,6 +78,22 @@ class GroupStatusesDistroTest {
     }
 
     @Test
+    fun aCreatorThatIsSelfNeverAnswersAnotherSelfAddressesKeyedAcceptButStillAnswersAMembers() = runBlocking {
+        // Frank stands for D, the group's own address and its recorded creator; alice
+        // for a known sibling of D listed as its device entry. §9.2: a self address is
+        // never a send target, a status included; §12 answers members only.
+        val sibling = id("alice").hashHex
+        val r = GroupRig(v, "frank", device = deviceA, siblings = setOf(sibling)).also { it.hold(creator = "frank", accepted = true) }
+        assertEquals(true, r.receive(accept("alice", to = "frank")))
+        assertTrue("no status to the sibling ${sibling.take(8)}: ${r.answers.map { it.to }}", r.answers.none { it.to == sibling })
+        assertTrue(r.logs.any { it.contains("no status to the self address") })
+        // A member's keyed accept is still answered, and the sibling's copy is not in it.
+        assertEquals(true, r.receive(accept("bob", to = "frank")))
+        assertEquals(listOf(id("bob").hashHex), r.answers.map { it.to })
+        assertTrue(r.answers.single().statuses.isEmpty())
+    }
+
+    @Test
     fun aStatusElementAboutAnySelfAddressIsSkippedAsTheUsersOwn() = runBlocking {
         val sibling = id("alice").hashHex
         // The creator's key is held, as every member's is once the user accepted: its status is proven.

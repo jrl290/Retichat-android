@@ -451,10 +451,17 @@ class GroupStatusEngine(
      * creator test is "creator is self" (GROUPS-DISTRO-DESIGN.md §12.1): when the
      * creator is the user's distro, every device of it that holds the group
      * answers, each with the copies it kept, and no copy of a self address goes.
+     * An accept from another self address (a known sibling acting as its listed
+     * device entry, or the device entry in a list naming D) is answered by
+     * nobody: a self address is never a send target, a status included (§9.2).
      */
     private suspend fun answerAccept(chat: ChatEntity, memberHex: String) {
         val self = selves(chat)
         if (!self.isSelf(chat.creatorHex)) return
+        if (self.isSelf(memberHex)) {
+            log("Group ${chat.id}: no status to the self address ${memberHex.take(12)}: a self address is never a send target (GROUPS-DISTRO-DESIGN.md §9.2)")
+            return
+        }
         val listed = store.members(chat.id).map { it.destHashHex }.toSet()
         val statuses = store.copies(chat.id)
             .filter { !self.isSelf(it.memberHex) && it.memberHex != memberHex && it.memberHex in listed }
