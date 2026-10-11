@@ -77,10 +77,10 @@ class ConversationViewModel(
      * Who acts in this group from this device (GROUPS-DISTRO-DESIGN.md §8.7,
      * §13): whether it is a D-group, whether its own address can be signed for
      * now, and every self address ("You"). Null for a DM. Re-read when the
-     * group, its list or the distro held changes.
+     * group, its list, the distro held or whether the stack is up changes.
      */
     val groupActing: StateFlow<GroupActing?> =
-        combine(repository.chatById(chatId), repository.groupMembers(chatId), DistroManager.state) { chat, _, _ ->
+        combine(repository.chatById(chatId), repository.groupMembers(chatId), DistroManager.state, repository.groupActionsReady) { chat, _, _, _ ->
             chat?.takeIf { it.isGroup }?.let { repository.groupActing(it) }
         }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
@@ -88,8 +88,9 @@ class ConversationViewModel(
         viewModelScope.launch { repository.acceptGroupInvite(chatId) }
     }
 
-    fun declineInvite() {
-        viewModelScope.launch { repository.declineGroupInvite(chatId) }
+    /** Decline the invite; [onDeclined] only when it was done (it is refused while nothing can be sent). */
+    fun declineInvite(onDeclined: () -> Unit) {
+        viewModelScope.launch { if (repository.declineGroupInvite(chatId)) onDeclined() }
     }
 
     /** Set or clear (empty) the user's own name for a contact. */

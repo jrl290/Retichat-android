@@ -546,8 +546,8 @@ private fun DmConversationContent(
                 TextButton(
                     onClick = {
                         showDeclineConfirm = false
-                        viewModel?.declineInvite()
-                        onBack()
+                        // The screen closes only when the decline was done.
+                        viewModel?.declineInvite { onBack() }
                     },
                     colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
                 ) { Text("Decline") }
@@ -587,16 +587,16 @@ private fun DmConversationContent(
                     onBack()
                 }
             },
+            // The screen closes only when it was done: a group's leave is refused
+            // while it cannot be signed or sent (GROUPS-DISTRO-DESIGN.md §8.7).
             onDelete = {
                 scope.launch {
-                    app.repository.deleteChat(chatId)
-                    onBack()
+                    if (app.repository.deleteChat(chatId)) onBack()
                 }
             },
             onLeave = {
                 scope.launch {
-                    app.repository.leaveGroupChat(chatId)
-                    onBack()
+                    if (app.repository.leaveGroupChat(chatId)) onBack()
                 }
             },
             onDeleteFromThisDevice = {

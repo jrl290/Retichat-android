@@ -45,6 +45,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -79,6 +81,16 @@ class ChatRepository(
 
     /** Lazily initialised after configure(); non-null only when routerHandle != 0. */
     private var groupChatManager: GroupChatManager? = null
+
+    private val _groupActionsReady = MutableStateFlow(false)
+    /**
+     * The stack is up ([configure] gave a router, the device identity and its
+     * address): a group send can be signed and go. False while it starts,
+     * after it failed to start, and once it is stopped; no group action is
+     * offered then ([GroupSelves.Signer.NOT_READY], GROUPS-DISTRO-DESIGN.md
+     * §8.7), and the screens re-read what they offer when this changes.
+     */
+    val groupActionsReady: StateFlow<Boolean> = _groupActionsReady
 
     /**
      * Member statuses and keys (RFed-spec Group.md, 2026-10-06): what an accept
@@ -121,6 +133,7 @@ class ChatRepository(
         groupChatManager = if (router != 0L) {
             GroupChatManager(appContext, scope, router)
         } else null
+        _groupActionsReady.value = router != 0L && identity != 0L && selfHash.isNotEmpty()
 
         // Queued messages wait for onStackReady(), not for this: bootstrap
         // calls configure() before the message-state callback and
@@ -420,10 +433,12 @@ class ChatRepository(
      * was dropped here alone: its members went on counting the user, and a
      * later invite brought it back.
      */
-    suspend fun deleteChat(chatId: String) {
-        val chat = chatDao.findById(chatId) ?: return
+    /** Delete [chatId]: a group's is the user's leave ([quitGroup]). True when it is gone. */
+    suspend fun deleteChat(chatId: String): Boolean {
+        val chat = chatDao.findById(chatId) ?: return false
         if (chat.isGroup) return quitGroup(chatId, "deleted")
         deleteChatLocal(chat)
+        return true
     }
 
     /**
@@ -2170,9 +2185,12 @@ class ChatRepository(
         return hex == d || hex in siblingsOf(d)
     }
 
-    /** What [groupSigner] resolves to for [chat] now, for the UI and the log (§8.1, §8.7). */
+    /**
+     * What [groupSigner] resolves to for [chat] now, for the UI and the log
+     * (§8.1, §8.7): [GroupSelves.Signer.NOT_READY] while the stack is not up.
+     */
     fun signerKind(chat: ChatEntity): GroupSelves.Signer =
-        GroupSelves.signer(chat.ownMember, selfHex(), DistroManager.signing()?.first?.deliveryHashHex, DistroManager.isStored(appContext))
+        GroupSelves.signer(chat.ownMember, if (groupActionsReady.value) selfHex() else "", DistroManager.signing()?.first?.deliveryHashHex, DistroManager.isStored(appContext))
 
     /**
      * `groupSigner(ownMember)` (GROUPS-DISTRO-DESIGN.md §8.1): who every send
@@ -2192,7 +2210,7 @@ class ChatRepository(
                 GroupSigner(state.deliveryHashHex, hash, handle, DistroCodec.hexToBytes(state.publicKeyHex))
             }
         }
-        GroupSelves.Signer.NOT_LOADED, GroupSelves.Signer.FORMER -> null
+        GroupSelves.Signer.NOT_LOADED, GroupSelves.Signer.FORMER, GroupSelves.Signer.NOT_READY -> null
     }
 
     /**
@@ -2555,7 +2573,9 @@ class ChatRepository(
     suspend fun groupActing(chat: ChatEntity): GroupActing {
         val self = groupSelf(chat)
         return GroupActing(
-            distroGroup = GroupSelves.isDistroGroup(chat.ownMember, selfHex()),
+            // While the stack is not up the device's address is not known: only the distro loaded tells.
+            distroGroup = if (groupActionsReady.value) GroupSelves.isDistroGroup(chat.ownMember, selfHex())
+                          else chat.ownMember != null && chat.ownMember == DistroManager.deliveryHashHex,
             signer = signerKind(chat),
             own = self.own,
             selves = self.all,
@@ -2649,7 +2669,7 @@ class ChatRepository(
      * as a member who left, for good. Until 2026-10-05 a decline sent nothing
      * and only this device knew.
      */
-    suspend fun declineGroupInvite(chatId: String) = quitGroup(chatId, "declined")
+    suspend fun declineGroupInvite(chatId: String): Boolean = quitGroup(chatId, "declined")
 
     private suspend fun handleDirectMessage(
         msgId: String,
@@ -2714,7 +2734,7 @@ class ChatRepository(
     }
 
     /** Leave a group: the user's leave to its members, and for good ([quitGroup]). */
-    suspend fun leaveGroupChat(chatId: String) = quitGroup(chatId, "left")
+    suspend fun leaveGroupChat(chatId: String): Boolean = quitGroup(chatId, "left")
 
     /**
      * A decline or a leave ([how], for the log) of group [chatId], one path
@@ -2727,16 +2747,20 @@ class ChatRepository(
      * neither wait for nor undo the close. Until 2026-10-05 a leave was a
      * plain post "left the group" with no action (audit L5), sent to the
      * accepted members only, and nothing was recorded.
+     *
+     * Returns whether it was done; false when refused (nothing changed), and
+     * the screen stays.
      */
-    private suspend fun quitGroup(chatId: String, how: String) {
-        val chat = chatDao.findById(chatId) ?: return
-        if (!chat.isGroup) return
+    private suspend fun quitGroup(chatId: String, how: String): Boolean {
+        val chat = chatDao.findById(chatId) ?: return false
+        if (!chat.isGroup) return false
         // As the group's own address, resolved now (GROUPS-DISTRO-DESIGN.md
         // §8.1): refused when it cannot be signed for (§8.7: only "Delete from
-        // this device" is offered there, [deleteGroupFromThisDevice]).
+        // this device" is offered there, [deleteGroupFromThisDevice]) or the
+        // stack is not up (NOT_READY: nothing is offered until it is).
         val signer = groupSigner(chat) ?: run {
             Log.w(TAG, "quitGroup: ${chat.id} $how refused: its own address ${chat.ownMember?.take(8)} has no signer on this device (${signerKind(chat)}, §8.7)")
-            return
+            return false
         }
         val groupIdHex = chat.groupIdHex
         val members = messageDao.groupMembersList(chatId)
@@ -2762,6 +2786,7 @@ class ChatRepository(
         }
         deleteChatLocal(chat)
         Log.i(TAG, "Group ${chat.id} $how (leave to ${targets.size} member(s), as ${signer.hex.take(8)})")
+        return true
     }
 
     private fun selfHex(): String = selfDestHash.toHex()

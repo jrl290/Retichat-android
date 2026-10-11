@@ -179,7 +179,8 @@ class GroupsDistroWiringTest {
         val signer = body(repo, "groupSigner")
         assertTrue(signer.contains("DistroManager.signing()"))
         assertTrue(signer.contains("if (state.deliveryHashHex != chat.ownMember) null"))
-        assertTrue(signer.contains("GroupSelves.Signer.NOT_LOADED, GroupSelves.Signer.FORMER -> null"))
+        // NOT_READY: the stack is not up (review of 8d330c4; GroupActionsReadyTest).
+        assertTrue(signer.contains("GroupSelves.Signer.NOT_LOADED, GroupSelves.Signer.FORMER, GroupSelves.Signer.NOT_READY -> null"))
         assertFalse(signer.contains("sendingIdentity"))
         assertFalse(send.contains("sendingIdentity"))
         assertFalse(gcm.contains("DistroManager.sendingIdentity("))

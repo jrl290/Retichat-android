@@ -75,6 +75,13 @@ object GroupSelves {
         NOT_LOADED,
         /** The own address is a distro this device no longer holds (forgotten or replaced): nothing, ever, from here (§8.7). */
         FORMER,
+        /**
+         * The stack is not up (starting, failed to start, or stopped): no group
+         * send can be signed or go, so nothing is offered until it is up, as for
+         * [NOT_LOADED] (§8.7, DESIGN_PRINCIPLES §5); nothing is queued. Which
+         * group is the device's cannot be told then either.
+         */
+        NOT_READY,
     }
 
     /**
@@ -83,9 +90,11 @@ object GroupSelves {
      * helper, or null) and [distroStored] whether a distro key is stored though
      * not loaded. Never the device for a D-group: a group send never falls back
      * (members would drop it as unlisted, and the user would be shown an action
-     * that did not happen).
+     * that did not happen). [device] is empty while the stack is not up:
+     * [Signer.NOT_READY], whatever the group.
      */
     fun signer(persisted: String?, device: String, loadedD: String?, distroStored: Boolean): Signer = when {
+        device.isEmpty() -> Signer.NOT_READY
         !isDistroGroup(persisted, device) -> Signer.DEVICE
         loadedD == persisted -> Signer.DISTRO
         loadedD == null && distroStored -> Signer.NOT_LOADED
@@ -109,10 +118,12 @@ data class GroupActing(
     val selves: Set<String>,
 ) {
     /**
-     * The group's own address cannot be signed for here now: no post, accept,
-     * decline or leave is offered (§8.7). Nothing is queued for later.
+     * The group's own address cannot be signed for here now, or the stack is
+     * not up: no post, accept, decline or leave is offered (§8.7). Nothing is
+     * queued for later.
      */
-    val readOnly: Boolean get() = signer == GroupSelves.Signer.NOT_LOADED || signer == GroupSelves.Signer.FORMER
+    val readOnly: Boolean get() = signer == GroupSelves.Signer.NOT_LOADED || signer == GroupSelves.Signer.FORMER ||
+        signer == GroupSelves.Signer.NOT_READY
 
     /** Its own address is a distro this device no longer holds: only "Delete from this device" is offered (§8.7, §13). */
     val former: Boolean get() = signer == GroupSelves.Signer.FORMER
