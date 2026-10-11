@@ -72,7 +72,8 @@ class GroupStatusesMigrationTest {
         val impl = File("build/generated/ksp/debug/java/com/newendian/retichat/data/db/RetichatDatabase_Impl.java")
         Assume.assumeTrue(impl.exists())
         val text = impl.readText()
-        for ((table, sql) in version14) {
+        // Database 16 added `ownMember` to chats (GroupsDistroMigrationTest pins that table now).
+        for ((table, sql) in version14 - "chats") {
             val room = Regex("CREATE TABLE IF NOT EXISTS `$table` \\([^\"]*").find(text)?.value
             assertEquals(table, sql, room?.replace("IF NOT EXISTS ", ""))
         }

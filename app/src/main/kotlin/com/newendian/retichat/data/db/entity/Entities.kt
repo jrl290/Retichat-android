@@ -57,7 +57,13 @@ data class ChatEntity(
     @PrimaryKey val id: String,
     val isGroup: Boolean,
     val name: String,
-    /** Comma-separated hex dest hashes in canonical order. */
+    /**
+     * A direct chat's peer hash. A group's member list: the GROUP_MEMBERS csv
+     * exactly as its invite carried it (or as this device wrote it into its own
+     * invite chunks, or as a group sync carried it), for a group admitted since
+     * database 16, since an `accept` group sync must carry it verbatim (RFed SPEC
+     * §17.14). A group held before then holds its members comma-separated.
+     */
     val memberHashes: String,
     /** The random group identifier (hex) shared by all participants. */
     val groupIdHex: String? = null,
@@ -74,6 +80,17 @@ data class ChatEntity(
      * neither answers an accept nor counts a status.
      */
     val creatorHex: String? = null,
+    /**
+     * A group's own address (database 16; RFed SPEC §17.14,
+     * GROUPS-DISTRO-DESIGN.md §8.1): the address the user acts as in it, and
+     * whose member row alone says whether the user is pending or joined. The
+     * distro D for a group created on a device that held D, admitted from an
+     * invite that lists the D held then, or built from a group sync; the device
+     * otherwise. Null for a direct chat and for a group held before database 16
+     * ("held at upgrade"): that reads as the device, whatever else its list
+     * names (ruling 1, no migration).
+     */
+    val ownMember: String? = null,
 )
 
 @Entity(tableName = "messages")
@@ -339,4 +356,46 @@ data class GroupHeldEntity(
     val action: String,
     val msgHash: String,
     val packed: ByteArray,
+)
+
+/**
+ * A held arrival (database 16; RFed SPEC §17.14, GROUPS-DISTRO-DESIGN.md §6.5):
+ * a group message, or a `post` group sync ([isPostSync]), that reached this
+ * device through the distro [distro] while its group [groupId] was not joined
+ * here, when that was the sole reason it would have been dropped. [blob] is the
+ * fan-out blob exactly as received; when the group becomes joined here it is fed
+ * to the distro path again, in arrival order ([rowId]), and judged as a new
+ * arrival. [msgHash] is its LXMF hash and [srcHex] its LXMF source; [blobDigest]
+ * is the SHA-256 of [blob], which stands for its signature (the unwrap does not
+ * report it; another signature is another blob), so a copy with another
+ * signature never shadows one held, and a live copy and a pull copy of one blob
+ * are held once. [validated] is the receipt's verdict: a validated copy replaces
+ * an unverified one with the same hash. Bounded by counts and bytes
+ * ([com.newendian.retichat.data.repository.HeldArrivals]); never recorded as
+ * seen; forgotten when the group is closed here or the device gives up [distro].
+ */
+@Entity(tableName = "group_arrivals")
+data class GroupArrivalEntity(
+    @PrimaryKey(autoGenerate = true) val rowId: Long = 0,
+    val groupId: String,
+    val srcHex: String,
+    val msgHash: String,
+    val blobDigest: String,
+    val validated: Boolean,
+    val distro: String,
+    val isPostSync: Boolean,
+    val blob: ByteArray,
+)
+
+/** A held arrival without its blob, for the bounds ([GroupArrivalEntity]); [size] is the blob's length. */
+data class GroupArrivalHead(
+    val rowId: Long,
+    val groupId: String,
+    val srcHex: String,
+    val msgHash: String,
+    val blobDigest: String,
+    val validated: Boolean,
+    val distro: String,
+    val isPostSync: Boolean,
+    val size: Int,
 )

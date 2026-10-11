@@ -4,6 +4,8 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.Query
 import androidx.room.Upsert
+import com.newendian.retichat.data.db.entity.GroupArrivalEntity
+import com.newendian.retichat.data.db.entity.GroupArrivalHead
 import com.newendian.retichat.data.db.entity.GroupHeldEntity
 import com.newendian.retichat.data.db.entity.GroupStatusEntity
 
@@ -57,4 +59,30 @@ interface GroupStatusDao {
 
     @Query("DELETE FROM group_held WHERE chatId = :chatId")
     suspend fun deleteHeld(chatId: String): Int
+
+    // ---- Held arrivals through the distro (database 16, RFed SPEC §17.14) ----
+
+    /** Every held arrival without its blob, oldest first: what the bounds decide on. */
+    @Query("SELECT rowId, groupId, srcHex, msgHash, blobDigest, validated, distro, isPostSync, LENGTH(blob) AS size FROM group_arrivals ORDER BY rowId ASC")
+    suspend fun arrivalHeads(): List<GroupArrivalHead>
+
+    @Insert
+    suspend fun holdArrival(arrival: GroupArrivalEntity): Long
+
+    @Query("DELETE FROM group_arrivals WHERE rowId IN (:rowIds)")
+    suspend fun dropArrivals(rowIds: List<Long>): Int
+
+    /** A group's held arrivals, in arrival order: what its replay feeds back. */
+    @Query("SELECT * FROM group_arrivals WHERE groupId = :groupId ORDER BY rowId ASC")
+    suspend fun arrivalsFor(groupId: String): List<GroupArrivalEntity>
+
+    @Query("DELETE FROM group_arrivals WHERE groupId = :groupId")
+    suspend fun dropArrivalsFor(groupId: String): Int
+
+    /** Forget what came through any distro other than [distro] (the device gave it up). */
+    @Query("DELETE FROM group_arrivals WHERE distro != :distro")
+    suspend fun dropArrivalsNotFor(distro: String): Int
+
+    @Query("DELETE FROM group_arrivals")
+    suspend fun dropAllArrivals(): Int
 }

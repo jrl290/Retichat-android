@@ -32,8 +32,9 @@ import com.newendian.retichat.data.db.entity.*
         DistroOutboxEntity::class,
         GroupStatusEntity::class,
         GroupHeldEntity::class,
+        GroupArrivalEntity::class,
     ],
-    version = DistroSyncMigration.TO,
+    version = GroupsDistroMigration.TO,
     exportSchema = false,
 )
 abstract class RetichatDatabase : RoomDatabase() {
@@ -92,6 +93,13 @@ abstract class RetichatDatabase : RoomDatabase() {
             }
         }
 
+        /** Migration 15 → 16: groups for distro holders, RFed SPEC §17.14 ([GroupsDistroMigration]). */
+        private val MIGRATION_15_16 = object : Migration(GroupsDistroMigration.FROM, GroupsDistroMigration.TO) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                GroupsDistroMigration.STATEMENTS.forEach(db::execSQL)
+            }
+        }
+
         fun getInstance(context: Context): RetichatDatabase =
             INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -99,7 +107,7 @@ abstract class RetichatDatabase : RoomDatabase() {
                     RetichatDatabase::class.java,
                     "retichat.db"
                 )
-                    .addMigrations(MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15)
+                    .addMigrations(MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16)
                     .fallbackToDestructiveMigration()
                     .build().also { INSTANCE = it }
             }
