@@ -7,6 +7,8 @@
 //!
 //! * [`set_channel_sync_fields`]: C's fields, the membership message of §17.12.
 //!   The generic field setters write str and bool only, and 0xFC is an array.
+//! * [`set_group_sync_json`]: G's fields, the group sync of §17.14, from the
+//!   bridge's JSON, by `lxmf_rust::distro` (the format is LXMF-rust's).
 //! * [`pack_message`]: pack and sign a message once. What Kotlin keeps is that
 //!   message, never packed again.
 //! * [`build_propagation_upload`]: the upload of a packed message, encrypted to
@@ -152,6 +154,17 @@ pub fn set_channel_sync_fields(
     );
     msg.set_field(FIELD_CUSTOM_META, Value::String(device_hex.to_ascii_lowercase().into()));
     Ok(())
+}
+
+/// Write the group sync G's fields on `msg` from the bridge's JSON (RFed SPEC §17.14,
+/// GROUPS-DISTRO-DESIGN.md §17.2): `lxmf_rust::distro::GroupSync::from_json`, then
+/// `lxmf_rust::distro::set_group_sync_fields`, which writes 0x0C an empty bin, 0xFB
+/// `"rfed.distro.group"`, 0xFC the op's native array and 0xFD `device_hex`, and refuses (the
+/// message unchanged) what a receiver's form check would drop. The format lives in LXMF-rust
+/// once, with its golden vectors; nothing of it is written here.
+pub fn set_group_sync_json(msg: &mut LXMessage, sync_json: &str, d_hex: &str, device_hex: &str) -> Result<(), String> {
+    let sync = lxmf_rust::distro::GroupSync::from_json(sync_json)?;
+    lxmf_rust::distro::set_group_sync_fields(msg, &sync, d_hex, device_hex)
 }
 
 /// Pack and sign the message behind `msg` once, and return its packed bytes:
@@ -869,5 +882,66 @@ mod tests {
         let (sig2, sealed2) = sealed_of(&distro, &field("packed_hex"));
         assert_eq!(&sealed2[..16], &sealed[..16]);
         assert_eq!(decode(&sealed_upload_with(&key, &sealed2, &sig2, true, &stamp, timebase).unwrap().upload).len(), 3);
+    }
+
+    /// LXMF-rust's group sync vectors (RFed SPEC §17.14), the copy `group_status.rs` checks
+    /// against LXMF-rust's own.
+    fn group_vectors() -> serde_json::Value {
+        serde_json::from_str(include_str!("../tests/data/distro_group_sync_vectors.json")).unwrap()
+    }
+
+    /// The vectors' D, its `lxmf.delivery` hash in hex, and a message from D to D at `timestamp`.
+    fn vector_message(v: &serde_json::Value, timestamp: f64) -> (String, LXMessage) {
+        let d = Identity::from_bytes(&unhex(v["distro"]["private_key_hex"].as_str().unwrap())).unwrap();
+        let source = Destination::new_inbound(Some(d), DestinationType::Single, "lxmf".to_string(), vec!["delivery".to_string()]).unwrap();
+        let hash = source.hash.clone();
+        assert_eq!(hex(&hash), v["distro"]["lxmf_delivery_hash_hex"].as_str().unwrap());
+        let mut msg = LXMessage::new(
+            None, Some(source), Some(Vec::new()), Some(Vec::new()), None, Some(LXMessage::DIRECT),
+            Some(hash.clone()), Some(hash.clone()), None, false,
+        )
+        .unwrap();
+        msg.timestamp = Some(timestamp);
+        (hex(&hash), msg)
+    }
+
+    /// RFed SPEC §17.14: each op of the vectors, written from its JSON on a message from D to D
+    /// with the vector's timestamp, packs to the bytes Python packed and hashed.
+    #[test]
+    fn g_is_written_from_its_json_to_the_python_bytes() {
+        let v = group_vectors();
+        let device = v["device_hex"].as_str().unwrap();
+        for op in v["ops"].as_array().unwrap() {
+            let name = op["name"].as_str().unwrap();
+            let (d_hex, mut msg) = vector_message(&v, op["timestamp"].as_f64().unwrap());
+            set_group_sync_json(&mut msg, &op["sync"].to_string(), &d_hex, device).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let msg = Arc::new(Mutex::new(msg));
+            let packed = pack_message(&msg).unwrap();
+            assert_eq!(hex(&packed), op["packed_hex"].as_str().unwrap(), "{name}");
+            assert_eq!(hex(&fields_of(&packed)), op["fields_hex"].as_str().unwrap(), "{name}");
+            assert_eq!(hex(msg.lock().unwrap().hash.as_ref().unwrap()), op["hash_hex"].as_str().unwrap(), "{name}");
+        }
+    }
+
+    #[test]
+    fn g_is_refused_when_a_receiver_would_drop_it_and_the_message_is_unchanged() {
+        let v = group_vectors();
+        let (d_hex, mut msg) = vector_message(&v, 1.0);
+        let leave = r#"{"op":"leave","group_id":"9f8e7d6c5b4a39281706f5e4d3c2b1a0","at_ms":5,"left":[]}"#;
+        let stranger = r#"{"op":"create","group_id":"9f8e7d6c5b4a39281706f5e4d3c2b1a0","at_ms":5,"name":"n","members":"abababababababababababababababab","keys":[],"left":[]}"#;
+        for (json, d, device, why) in [
+            ("{", d_hex.as_str(), DEVICE, "not JSON"),
+            (r#"{"op":"leave","group_id":"9f8e7d6c5b4a39281706f5e4d3c2b1a0","at_ms":5}"#, d_hex.as_str(), DEVICE, "left is missing"),
+            (r#"{"op":"leave","group_id":"9f8e7d6c5b4a39281706f5e4d3c2b1a0","at_ms":9007199254740992,"left":[]}"#, d_hex.as_str(), DEVICE, "2^53"),
+            (stranger, d_hex.as_str(), DEVICE, "does not name D"),
+            (leave, "xyz", DEVICE, "d_hex"),
+            (leave, d_hex.as_str(), "xyz", "0xFD"),
+        ] {
+            let err = set_group_sync_json(&mut msg, json, d, device).expect_err(why);
+            assert!(err.contains(why), "{why}: {err}");
+        }
+        assert_eq!(msg.fields, Value::Map(Vec::new()), "a refused call wrote nothing");
+        let (_other, _hash, mut not_d) = distro_message("");
+        assert!(set_group_sync_json(&mut not_d, leave, &d_hex, DEVICE).unwrap_err().contains("from D to D"));
     }
 }

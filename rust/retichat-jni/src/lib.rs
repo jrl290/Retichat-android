@@ -2540,6 +2540,15 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeD
 /// `fields` is the message's LXMF fields map (attachments included) as the
 /// sender packed it, in standard padded base64, or null when it had none;
 /// RfedDistroClient decodes it with DistroCodec.fieldsBytes.
+///
+/// RFed SPEC §17.14 (GROUPS-DISTRO-DESIGN.md §7): also `hash` (64 hex),
+/// `has_group_id`, `group_id`, `group_action`, `group_name`, `group_sync` (null or
+/// an object), `sender_key` (128 hex or null) and `packed` (base64 or null). This
+/// crate's group receipt (`group_status::receipt_parts`) runs on the rebuilt
+/// message, so `signature_validated` / `unverified_reason` are its verdict: an
+/// accept or leave from a source whose key is not held is decided under the key
+/// it carries. The JSON is `DistroMessage::to_json_with_receipt`, the one
+/// definition both bridges use.
 #[no_mangle]
 pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeDistroUnwrap(
     mut env: JNIEnv,
@@ -2549,9 +2558,9 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeD
 ) -> jstring {
     let Some(mut distro) = distro_identity(distro_handle, "distro") else { return std::ptr::null_mut() };
     let data = jbytes_to_vec(&env, &blob);
-    let json = match lxmf_rust::distro::unwrap_blob(&mut distro, &data) {
+    let json = match group_status::distro_unwrap_json(&mut distro, &data) {
         Ok(None) => String::new(),
-        Ok(Some(msg)) => msg.to_json(),
+        Ok(Some(json)) => json,
         Err(e) => {
             rns::set_error(e);
             return std::ptr::null_mut();
@@ -2625,6 +2634,39 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeM
     };
     let result = match msg.lock() {
         Ok(mut m) => distro_outbox::set_channel_sync_fields(&mut m, &op, &name, at_ms as u64, &device),
+        Err(e) => Err(e.to_string()),
+    };
+    ok_or_neg(result)
+}
+
+/// `RetichatBridge.nativeMessageSetDistroGroupSync(handle: Long, syncJson: String,
+/// dHex: String, deviceHex: String): Int`
+///
+/// RFed SPEC §17.14: write the group sync G's fields on the outbound message
+/// `handle`, from D to D (0x0C an empty bin, 0xFB `"rfed.distro.group"`, 0xFC
+/// the op's native array, 0xFD the sending device's own address). `syncJson`
+/// is the unwrap's `group_sync` object without `by` and `problem`
+/// (`lxmf_rust::distro::GroupSync::from_json`); `dHex` is D's `lxmf.delivery`
+/// address. 0 on success, -1 with `nativeLastError` and the message unchanged
+/// (`distro_outbox::set_group_sync_json`).
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeMessageSetDistroGroupSync(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    sync_json: JString,
+    d_hex: JString,
+    device_hex: JString,
+) -> jint {
+    let sync_json = jstring_to_string(&mut env, &sync_json);
+    let d_hex = jstring_to_string(&mut env, &d_hex);
+    let device = jstring_to_string(&mut env, &device_hex);
+    let Some(msg) = rns::get_handle::<Arc<Mutex<lxmf_rust::lx_message::LXMessage>>>(handle as u64) else {
+        rns::set_error("invalid message handle".to_string());
+        return -1;
+    };
+    let result = match msg.lock() {
+        Ok(mut m) => distro_outbox::set_group_sync_json(&mut m, &sync_json, &d_hex, &device),
         Err(e) => Err(e.to_string()),
     };
     ok_or_neg(result)

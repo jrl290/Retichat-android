@@ -30,6 +30,8 @@ class PropagationJniContractTest {
             "nativeInterfaceOnlineRegister", "nativeInterfaceOnlineUnregister",
             // The distro sync proof (RFed SPEC §17.13) and app-links' UpEdgeMark.
             "nativeDistroSeal", "nativePropagationBuildSealedUpload", "nativeInterfaceUpEdges",
+            // The group sync G (RFed SPEC §17.14).
+            "nativeMessageSetDistroGroupSync",
         )) assertTrue(name, name in externals)
         // Kotlin declares each with the parameter types the Rust symbol takes.
         assertTrue(bridge.contains("private external fun nativeDistroSeal(distroHandle: Long, packed: ByteArray): ByteArray?"))
@@ -38,6 +40,11 @@ class PropagationJniContractTest {
         val sealedBuild = rust.substring(rust.indexOf("fn Java_com_newendian_retichat_bridge_RetichatBridge_nativePropagationBuildSealedUpload("))
         assertTrue(sealedBuild.substring(0, sealedBuild.indexOf(") -> jbyteArray")).contains("with_claim: jboolean,"))
         assertTrue(rust.contains("fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeInterfaceUpEdges(\n    _env: JNIEnv,\n    _class: JClass,\n) -> jlong"))
+        assertTrue(bridge.contains(
+            "private external fun nativeMessageSetDistroGroupSync(handle: Long, syncJson: String, dHex: String, deviceHex: String): Int"))
+        assertTrue(rust.contains(
+            "fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeMessageSetDistroGroupSync(\n    mut env: JNIEnv,\n    _class: JClass,\n" +
+                "    handle: jlong,\n    sync_json: JString,\n    d_hex: JString,\n    device_hex: JString,\n) -> jint"))
     }
 
     @Test

@@ -680,6 +680,15 @@ object RetichatBridge {
      * Whether to accept the name depends on the signature fields
      * (DISPLAY_NAMES.md §5.2); `fields` goes through DistroCodec.fieldsBytes
      * to LxmfFields.decode, as a direct message's fields do.
+     *
+     * RFed SPEC §17.14 (GROUPS-DISTRO-DESIGN.md §7): also `hash` (64 hex),
+     * `has_group_id`, `group_id` / `group_action` / `group_name` (string or
+     * null), `group_sync` (null, or the group sync G read by rule 4: `by`,
+     * `problem`, `op`, `group_id`, `at_ms`, `name`, `members`, `keys`,
+     * `creator`, `text`, `left`), `sender_key` (128 hex or null) and `packed`
+     * (base64 or null). The group receipt runs natively on the rebuilt
+     * message, so the signature fields are its verdict and `sender_key` /
+     * `packed` are what the direct path's receipt gives.
      */
     fun distroUnwrap(distroHandle: Long, blob: ByteArray): String? = nativeDistroUnwrap(distroHandle, blob)
 
@@ -697,6 +706,21 @@ object RetichatBridge {
      */
     fun messageSetDistroChannelSync(handle: Long, op: String, name: String, atMs: Long, deviceHex: String): Boolean =
         nativeMessageSetDistroChannelSync(handle, op, name, atMs, deviceHex) == 0
+
+    /**
+     * Write the group sync G's fields on an outbound message from D to D
+     * ([messageCreate] with the distro as source and destination; empty title
+     * and content), RFed SPEC §17.14: 0x0C an empty bin, 0xFB
+     * `rfed.distro.group`, 0xFC the op's native array, 0xFD [deviceHex].
+     * [syncJson] is a `group_sync` object as [distroUnwrap] reports it, without
+     * `by` and `problem`: `op` (create, accept, leave, post), `group_id`,
+     * `at_ms`, `left` (at most 32 ids), and `name`, `members`, `keys` for a
+     * create or accept, `creator` for an accept, `text` for a post. [dHex] is
+     * D's lxmf.delivery address. False with [lastError], the message unchanged,
+     * when a receiver's form check would drop what it would write.
+     */
+    fun messageSetDistroGroupSync(handle: Long, syncJson: String, dHex: String, deviceHex: String): Boolean =
+        nativeMessageSetDistroGroupSync(handle, syncJson, dHex, deviceHex) == 0
 
     /**
      * Pack and sign an outbound message once and return its LXMF bytes
@@ -817,6 +841,7 @@ object RetichatBridge {
     private external fun nativeMessageSetDistroChannelSync(
         handle: Long, op: String, name: String, atMs: Long, deviceHex: String,
     ): Int
+    private external fun nativeMessageSetDistroGroupSync(handle: Long, syncJson: String, dHex: String, deviceHex: String): Int
     private external fun nativeMessagePack(handle: Long): ByteArray?
     private external fun nativePropagationBuildUpload(distroPublicKey: ByteArray, packed: ByteArray, node: ByteArray): ByteArray?
     private external fun nativeDistroSeal(distroHandle: Long, packed: ByteArray): ByteArray?
