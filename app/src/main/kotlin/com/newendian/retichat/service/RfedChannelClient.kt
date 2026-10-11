@@ -20,6 +20,7 @@ import com.newendian.retichat.names.NameUpdate
 import com.newendian.retichat.ui.channels.ChannelNameForm
 import com.newendian.retichat.data.db.entity.ChannelEntity
 import com.newendian.retichat.data.db.entity.ChannelMessageEntity
+import com.newendian.retichat.data.repository.SerialFlush
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -57,12 +58,16 @@ class RfedChannelClient(
     private val scope: CoroutineScope,
 ) {
 
-    init {
-        scope.launch {
-            val recovered = channelDao.failStaleOutboundSendingMessages()
-            if (recovered > 0) {
-                Log.w(TAG, "Recovered $recovered stale outbound channel message(s) stuck in SENDING")
-            }
+    /**
+     * What was sending when the process died is failed, once, at start; a post
+     * queued at start-up ([queuePost]) is not: it waits for the start. Joined
+     * before a queued post is taken ([releaseQueuedPosts]), so this never fails
+     * one being sent.
+     */
+    private val staleRecovery: Job = scope.launch {
+        val recovered = channelDao.failStaleOutboundSendingMessages()
+        if (recovered > 0) {
+            Log.w(TAG, "Recovered $recovered stale outbound channel message(s) stuck in SENDING")
         }
     }
 
@@ -238,6 +243,17 @@ class RfedChannelClient(
     private var rfedLinkMonitorRetainCount = 0
     private var rfedLinkStatusMonitorJob: Job? = null
     private var lastRfedNodeLinkStatus = RetichatBridge.AppLinkStatus.NONE
+    /** Releases of the posts queued at start-up, one at a time ([releaseQueuedPosts]). */
+    private val queuedRelease = SerialFlush()
+    /** The network came back: posts queued at start-up go, as queued DMs do. */
+    private val networkListener: () -> Unit = {
+        scope.launch(Dispatchers.IO) { releaseQueuedPosts() }
+    }
+
+    init {
+        // After every field above: NetworkMonitor's callback thread may run a release at once.
+        NetworkMonitor.addOnAvailableListener(networkListener)
+    }
 
     private fun legacyChannelDest(identityHashHex: String): ByteArray? =
         rfedDestHash(identityHashHex, "rfed", listOf("channel"))
@@ -788,25 +804,115 @@ class RfedChannelClient(
      * `ChannelMessageEntity` is upserted IMMEDIATELY (optimistic) and its
      * id is upgraded to `senderHex|tsMs` once the FFI returns the LXMF
      * timestamp it baked into the signed body.
+     *
+     * A post typed while the app is starting waits as a DM does (James's UI
+     * rulings, 2026-10-11): stored now, queued, with the DM's pending clock
+     * ([queuePost]), and sent when the start finishes, through the DM queue's
+     * wait for it ([StackRuntime.waitForStart], [releaseQueuedPosts]). Until
+     * 2026-10-11 it returned false with nothing stored or said: the composer had
+     * already cleared the draft, so the post was lost.
      */
     suspend fun sendMessage(channel: ChannelEntity, content: String): Boolean =
         sendMutex.withLock {
-            val identityHandle = StackRuntime.identityHandle
-            if (identityHandle == 0L) return@withLock false
+            if (started()) post(channel, content, queuedId = null) else {
+                queuePost(channel, content)
+                scope.launch(Dispatchers.IO) {
+                    StackRuntime.waitForStart(appContext, "SEND") { releaseQueuedPosts() }
+                }
+                true
+            }
+        }
 
-            // RFed-spec/Channel.md "Distro holders" (James, 2026-10-03): a post
-            // is signed by the posting identity, the distro when this device
-            // holds one (as a DM is, DistroManager.sendingIdentity), otherwise
-            // the device: its source, the key in its prelude and its signature
-            // are that identity's, so readers see one sender for all of the
-            // user's devices. Decided once, here: the record, the echo id, the
-            // packing and the name state all take this one. Subscribing, the
-            // stream, pulls and push registrations stay the device's
-            // (`identityHandle`): RFed keys all of them by subscriber hash.
-            val (postingHash, postingHandle) =
-                DistroManager.sendingIdentity(StackRuntime.selfDestHash, identityHandle)
-            val postingHex = postingHash.toHex()
-            val optimisticId = "pending|${System.nanoTime()}"
+    /** The start has finished and a post can be signed: the DM queue's test (ChatRepository.stackReady). */
+    private fun started(): Boolean = StackRuntime.isReady && StackRuntime.identityHandle != 0L
+
+    /**
+     * Store a post typed while the app is starting, queued (sendState QUEUED:
+     * the DM's pending clock in the conversation). Who it is filed under is
+     * decided when it is sent ([post]): the posting identity is not known before.
+     */
+    private suspend fun queuePost(channel: ChannelEntity, content: String) {
+        val row = ChannelMessageEntity(
+            id = "pending|${System.nanoTime()}",
+            channelId = channel.id,
+            sourceHashHex = "",
+            title = "",
+            content = content,
+            timestamp = System.currentTimeMillis(),
+            isOutbound = true,
+            signatureValidated = true,
+            sendState = ChannelMessageEntity.SEND_STATE_QUEUED,
+        )
+        channelDao.upsertMessage(row)
+        channelDao.bumpLastMessageTime(channel.id, row.timestamp)
+        _activity.value = System.currentTimeMillis()
+        Log.i(TAG, "SEND: the start has not finished — ${row.id} queued until it has, as a DM is")
+    }
+
+    /**
+     * The start has finished (StackRuntime, right after the DM queue's ready
+     * signal): the posts queued while it ran go now.
+     */
+    fun onStackReady() {
+        scope.launch(Dispatchers.IO) { releaseQueuedPosts() }
+    }
+
+    /**
+     * Send the posts [queuePost] queued, oldest first, now the start has
+     * finished: at the ready signal ([onStackReady]), at the network's return,
+     * and from the wait a queued post started. One release at a time, each
+     * reading the queue afresh ([SerialFlush], as the DM queue), and each post
+     * taken from the queue once ([post]). Ordering (DESIGN_PRINCIPLES §5), not
+     * a retry.
+     */
+    private suspend fun releaseQueuedPosts() {
+        staleRecovery.join()
+        queuedRelease.run(
+            pending = { if (!started() || !NetworkMonitor.isOnline.value) emptyList() else channelDao.queuedOutboundMessages() },
+        ) { rows ->
+            Log.i(TAG, "SEND: ${rows.size} post(s) queued at start-up released")
+            for (row in rows) {
+                val channel = channelDao.findById(row.channelId)
+                if (channel == null) {
+                    Log.w(TAG, "SEND: queued ${row.id} has no channel ${row.channelId} — failed")
+                    channelDao.updateMessageSendState(row.id, ChannelMessageEntity.SEND_STATE_FAILED)
+                    continue
+                }
+                sendMutex.withLock { post(channel, row.content, queuedId = row.id) }
+            }
+        }
+    }
+
+    /**
+     * Pack, sign and send one post to [channel], under [sendMutex]: a post typed
+     * now ([queuedId] null), stored here, or one [queuePost] stored at start-up,
+     * taken from the queue here, once, and sent in its place.
+     */
+    private suspend fun post(channel: ChannelEntity, content: String, queuedId: String?): Boolean {
+        val identityHandle = StackRuntime.identityHandle
+        // Asked by [started] under the same lock; a queued post stays queued if the stack stopped since.
+        if (identityHandle == 0L) return false
+
+        // RFed-spec/Channel.md "Distro holders" (James, 2026-10-03): a post
+        // is signed by the posting identity, the distro when this device
+        // holds one (as a DM is, DistroManager.sendingIdentity), otherwise
+        // the device: its source, the key in its prelude and its signature
+        // are that identity's, so readers see one sender for all of the
+        // user's devices. Decided once, here: the record, the echo id, the
+        // packing and the name state all take this one. Subscribing, the
+        // stream, pulls and push registrations stay the device's
+        // (`identityHandle`): RFed keys all of them by subscriber hash.
+        val (postingHash, postingHandle) =
+            DistroManager.sendingIdentity(StackRuntime.selfDestHash, identityHandle)
+        val postingHex = postingHash.toHex()
+        val optimisticId: String
+        if (queuedId != null) {
+            // Taken from the queue once (a second release finds it gone), and
+            // filed under the posting identity held now.
+            if (channelDao.claimQueuedMessage(queuedId, postingHex) == 0) return false
+            optimisticId = queuedId
+        } else {
+            optimisticId = "pending|${System.nanoTime()}"
             val optimistic = ChannelMessageEntity(
                 id = optimisticId,
                 channelId = channel.id,
@@ -820,67 +926,68 @@ class RfedChannelClient(
             )
             channelDao.upsertMessage(optimistic)
             channelDao.bumpLastMessageTime(channel.id, optimistic.timestamp)
-            _activity.value = System.currentTimeMillis()
-
-            try {
-                // Step 1: refresh stampCost once per session.
-                var liveChannel = channel
-                if (channel.id !in stampCostRefreshedThisSession) {
-                    runCatching { refreshStampCost(channel) }
-                        .onSuccess {
-                            stampCostRefreshedThisSession.add(channel.id)
-                            liveChannel = channelDao.findById(channel.id) ?: liveChannel
-                        }
-                }
-
-                // DISPLAY_NAMES.md §4.2: whether this post carries the
-                // Channel Display Name, decided once for the post (the retry
-                // below sends the same decision).
-                val postName = withContext(Dispatchers.IO) { channelPostName(channel.id, postingHex) }
-
-                if (trySend(liveChannel, content, optimisticId, postingHex, postingHandle, postName)) {
-                    return@withLock true
-                }
-
-                // Step 2: refresh + single retry.
-                Log.w(TAG, "SEND failed once — refreshing stampCost and retrying")
-                runCatching { refreshStampCost(liveChannel) }
-                    .onSuccess {
-                        stampCostRefreshedThisSession.add(liveChannel.id)
-                        liveChannel = channelDao.findById(liveChannel.id) ?: liveChannel
-                    }
-                    .onFailure {
-                        Log.w(TAG, "stampCost refresh on retry failed: ${it.message}")
-                    }
-                if (!trySend(liveChannel, content, optimisticId, postingHex, postingHandle, postName)) {
-                    Log.w(TAG, "SEND failed twice — marking optimistic row FAILED for user retry")
-                    channelDao.updateMessageSendState(
-                        optimisticId,
-                        ChannelMessageEntity.SEND_STATE_FAILED,
-                    )
-                    return@withLock false
-                }
-                true
-            } catch (cancelled: CancellationException) {
-                Log.w(TAG, "SEND cancelled — marking optimistic row FAILED", cancelled)
-                withContext(NonCancellable) {
-                    channelDao.updateMessageSendState(
-                        optimisticId,
-                        ChannelMessageEntity.SEND_STATE_FAILED,
-                    )
-                }
-                throw cancelled
-            } catch (t: Throwable) {
-                Log.e(TAG, "SEND aborted unexpectedly — marking optimistic row FAILED", t)
-                withContext(NonCancellable) {
-                    channelDao.updateMessageSendState(
-                        optimisticId,
-                        ChannelMessageEntity.SEND_STATE_FAILED,
-                    )
-                }
-                false
-            }
         }
+        _activity.value = System.currentTimeMillis()
+
+        return try {
+            // Step 1: refresh stampCost once per session.
+            var liveChannel = channel
+            if (channel.id !in stampCostRefreshedThisSession) {
+                runCatching { refreshStampCost(channel) }
+                    .onSuccess {
+                        stampCostRefreshedThisSession.add(channel.id)
+                        liveChannel = channelDao.findById(channel.id) ?: liveChannel
+                    }
+            }
+
+            // DISPLAY_NAMES.md §4.2: whether this post carries the
+            // Channel Display Name, decided once for the post (the retry
+            // below sends the same decision).
+            val postName = withContext(Dispatchers.IO) { channelPostName(channel.id, postingHex) }
+
+            if (trySend(liveChannel, content, optimisticId, postingHex, postingHandle, postName)) {
+                return true
+            }
+
+            // Step 2: refresh + single retry.
+            Log.w(TAG, "SEND failed once — refreshing stampCost and retrying")
+            runCatching { refreshStampCost(liveChannel) }
+                .onSuccess {
+                    stampCostRefreshedThisSession.add(liveChannel.id)
+                    liveChannel = channelDao.findById(liveChannel.id) ?: liveChannel
+                }
+                .onFailure {
+                    Log.w(TAG, "stampCost refresh on retry failed: ${it.message}")
+                }
+            if (!trySend(liveChannel, content, optimisticId, postingHex, postingHandle, postName)) {
+                Log.w(TAG, "SEND failed twice — marking optimistic row FAILED for user retry")
+                channelDao.updateMessageSendState(
+                    optimisticId,
+                    ChannelMessageEntity.SEND_STATE_FAILED,
+                )
+                return false
+            }
+            true
+        } catch (cancelled: CancellationException) {
+            Log.w(TAG, "SEND cancelled — marking optimistic row FAILED", cancelled)
+            withContext(NonCancellable) {
+                channelDao.updateMessageSendState(
+                    optimisticId,
+                    ChannelMessageEntity.SEND_STATE_FAILED,
+                )
+            }
+            throw cancelled
+        } catch (t: Throwable) {
+            Log.e(TAG, "SEND aborted unexpectedly — marking optimistic row FAILED", t)
+            withContext(NonCancellable) {
+                channelDao.updateMessageSendState(
+                    optimisticId,
+                    ChannelMessageEntity.SEND_STATE_FAILED,
+                )
+            }
+            false
+        }
+    }
 
     /**
      * DISPLAY_NAMES.md §4.2 for a post to [channelId] now: the Channel Display

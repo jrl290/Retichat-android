@@ -196,8 +196,12 @@ object StackRuntime {
             deferred.complete(ok)
             // Initialization has finished: messages queued while it ran go
             // out now, after the message-state callback and
-            // ConnectionStateManager are registered (§5).
-            if (ok) app.repository.onStackReady()
+            // ConnectionStateManager are registered (§5): DMs and group posts,
+            // then channel posts (James, 2026-10-11).
+            if (ok) {
+                app.repository.onStackReady()
+                app.rfedChannelClient.onStackReady()
+            }
             return ok
         }
     }

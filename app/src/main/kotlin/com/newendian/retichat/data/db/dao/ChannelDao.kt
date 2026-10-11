@@ -65,6 +65,24 @@ interface ChannelDao {
     @Query("UPDATE channel_messages SET sendState = 2 WHERE isOutbound = 1 AND sendState = 0")
     suspend fun failStaleOutboundSendingMessages(): Int
 
+    /**
+     * Posts typed while the app was starting (sendState QUEUED, James's UI
+     * rulings 2026-10-11), oldest first: sent when the start finishes. Never
+     * failed by [failStaleOutboundSendingMessages]: they wait for the start as
+     * a queued DM does.
+     */
+    @Query("SELECT * FROM channel_messages WHERE isOutbound = 1 AND sendState = 3 ORDER BY timestamp ASC")
+    suspend fun queuedOutboundMessages(): List<ChannelMessageEntity>
+
+    /**
+     * Take the queued post [id] for sending: SENDING, filed under [postingHex],
+     * the posting identity held now, only while it is still queued. Returns 1
+     * when this caller took it and 0 when it had already left the queue, so it
+     * is sent once.
+     */
+    @Query("UPDATE channel_messages SET sendState = 0, sourceHashHex = :postingHex WHERE id = :id AND isOutbound = 1 AND sendState = 3")
+    suspend fun claimQueuedMessage(id: String, postingHex: String): Int
+
     /** Drop a single channel message row by id (used to clean up the optimistic
      *  placeholder row once the canonical id is known). */
     @Query("DELETE FROM channel_messages WHERE id = :id")

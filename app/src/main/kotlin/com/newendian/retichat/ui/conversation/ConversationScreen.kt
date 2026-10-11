@@ -751,6 +751,8 @@ private fun ChannelConversationContent(
             val mappedState = if (ch.isOutbound) when (ch.sendState) {
                 ChannelMessageEntity.SEND_STATE_SENT -> RetichatBridge.MessageState.SENT
                 ChannelMessageEntity.SEND_STATE_FAILED -> RetichatBridge.MessageState.FAILED
+                // Queued while the app was starting: the DM's pending clock (⏳) until it goes.
+                ChannelMessageEntity.SEND_STATE_QUEUED -> RetichatBridge.MessageState.OUTBOUND
                 // SEND_STATE_SENDING (or any unknown) → use CANCELLED so the
                 // glyph helper returns "" and no indicator is drawn.
                 else -> RetichatBridge.MessageState.CANCELLED

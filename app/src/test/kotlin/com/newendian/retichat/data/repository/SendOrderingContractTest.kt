@@ -50,7 +50,7 @@ class SendOrderingContractTest {
             body(repo, "configure").contains("flushPendingMessages"),
         )
         val ready = stackRuntime.indexOf("isReady = ok")
-        val flush = stackRuntime.indexOf("if (ok) app.repository.onStackReady()")
+        val flush = stackRuntime.indexOf("if (ok) {\n                app.repository.onStackReady()")
         assertTrue(ready >= 0 && flush > ready)
         assertTrue(body(repo, "onStackReady").contains("flushPendingMessages()"))
     }
