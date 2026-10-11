@@ -207,6 +207,7 @@ object StackRuntime {
     }
 
     private suspend fun bootstrap(app: RetichatApp): Boolean {
+        DebugStartDelay.hold(app)
         if (!RetichatBridge.isLoaded) {
             app.updateServiceState(error = "Native library not loaded")
             Log.w(TAG, "Native library not loaded")
@@ -550,5 +551,34 @@ object StackRuntime {
                 }
             }
         }
+    }
+}
+
+/**
+ * Debug builds only: the staging probe's way to act while the start has not
+ * finished (test-harnesses probe_phone_group_distro, section 12: James's
+ * start-up rulings of 2026-10-11). When files/debug_start_delay_ms holds a
+ * number of milliseconds (1 to 30000), [StackRuntime]'s bootstrap waits that
+ * long before it does anything, so for that time the start is unfinished: a
+ * group or channel post waits as a DM does, and the group acts are greyed. A
+ * build that is not debuggable never reads the file, and nothing in the app
+ * writes it: the probe writes it with run-as, and removes it.
+ */
+internal object DebugStartDelay {
+    const val FILE = "debug_start_delay_ms"
+
+    /** The delay [text] asks for, in a debuggable build only; null for none. */
+    fun millis(debuggable: Boolean, text: String?): Long? {
+        if (!debuggable) return null
+        return text?.trim()?.toLongOrNull()?.takeIf { it in 1..30_000 }
+    }
+
+    suspend fun hold(context: Context) {
+        val debuggable = (context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+        if (!debuggable) return
+        val file = File(context.filesDir, FILE)
+        val ms = millis(true, runCatching { if (file.exists()) file.readText() else null }.getOrNull()) ?: return
+        Log.i("StackRuntime", "debug start delay: the start waits $ms ms (files/$FILE, a debuggable build only)")
+        delay(ms)
     }
 }
