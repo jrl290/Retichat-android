@@ -42,6 +42,23 @@ class DistroGroupUiTest {
     }
 
     @Test
+    fun theGroupViewSaysWhyNothingIsOfferedInTheAlignedWordsForEachSignerThatCannotAct() {
+        // Alignment decision 3 (2026-10-11): the same words on iOS, Android and the web.
+        assertEquals("Retichat isn't running on this device right now. You can post and change your membership once it is.",
+            DistroGroupTexts.unavailable(GroupSelves.Signer.NOT_READY, d))
+        assertEquals("Your distro address hasn't loaded on this device yet. You can post and change your membership once it has.",
+            DistroGroupTexts.unavailable(GroupSelves.Signer.NOT_LOADED, d))
+        assertEquals(DistroGroupTexts.formerDistro(d), DistroGroupTexts.unavailable(GroupSelves.Signer.FORMER, d))
+        assertEquals(null, DistroGroupTexts.unavailable(GroupSelves.Signer.DEVICE, device))
+        assertEquals(null, DistroGroupTexts.unavailable(GroupSelves.Signer.DISTRO, d))
+        // Each signer that cannot act is read only, and only those.
+        for (signer in GroupSelves.Signer.values()) {
+            val acting = GroupActing(distroGroup = true, signer = signer, own = d, selves = setOf(d, device))
+            assertEquals(signer.toString(), acting.readOnly, DistroGroupTexts.unavailable(signer, d) != null)
+        }
+    }
+
+    @Test
     fun everySelfAddressOfTheGroupReadsYou() {
         val names = NameBook(emptyMap(), device)
         val selves = setOf(device, d, sibling)
@@ -75,8 +92,10 @@ class DistroGroupUiTest {
         // Accept and decline.
         assertTrue(screen.contains("onClick = { showDeclineConfirm = true },\n                                enabled = !readOnly,"))
         assertTrue(screen.contains("onClick = { viewModel?.acceptInvite() },\n                                enabled = !readOnly,"))
-        // The text, in the invite bar and above the composer.
-        assertEquals(2, Regex(Regex.escape("DistroGroupTexts.formerDistro(acting.own)")).findAll(screen).count())
+        // The text, in the invite bar and above the composer: why, for a former D, D not loaded yet, or the stack not running.
+        assertTrue(screen.contains("val unavailable = acting?.let { DistroGroupTexts.unavailable(it.signer, it.own) }"))
+        assertEquals(2, Regex(Regex.escape("text = unavailable,")).findAll(screen).count())
+        assertFalse(screen.contains("if (acting?.former == true)"))
         // §13: the decline text of a D-group.
         assertTrue(screen.contains("Text(if (distroGroup) DistroGroupTexts.DECLINE_TITLE else \"Decline this group invite?\")"))
         assertTrue(screen.contains("Text(if (distroGroup) DistroGroupTexts.DECLINE_TEXT else \"You won't be able to join this group later.\")"))

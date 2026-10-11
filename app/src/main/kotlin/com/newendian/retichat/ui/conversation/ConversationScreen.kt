@@ -160,6 +160,8 @@ private fun DmConversationContent(
     val distroGroup = acting?.distroGroup == true
     // Its own address cannot be signed for here now: nothing is offered that would send.
     val readOnly = acting?.readOnly == true
+    // Why, for a former D, D not loaded yet, or the stack not running (§8.7).
+    val unavailable = acting?.let { DistroGroupTexts.unavailable(it.signer, it.own) }
 
     // Pending attachment state
     var pendingAttachmentName by remember { mutableStateOf<String?>(null) }
@@ -366,9 +368,9 @@ private fun DmConversationContent(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(top = 8.dp),
                         )
-                        if (acting?.former == true) {
+                        if (unavailable != null) {
                             Text(
-                                text = DistroGroupTexts.formerDistro(acting.own),
+                                text = unavailable,
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
@@ -404,11 +406,11 @@ private fun DmConversationContent(
                 Column(
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    // §8.7: read only here; the composer is disabled.
-                    if (acting?.former == true) {
+                    // §8.7: read only here; the composer is disabled, and this says why.
+                    if (unavailable != null) {
                         HorizontalDivider()
                         Text(
-                            text = DistroGroupTexts.formerDistro(acting.own),
+                            text = unavailable,
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),

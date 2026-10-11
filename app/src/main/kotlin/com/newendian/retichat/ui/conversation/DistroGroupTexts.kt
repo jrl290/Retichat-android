@@ -1,5 +1,6 @@
 package com.newendian.retichat.ui.conversation
 
+import com.newendian.retichat.data.repository.GroupSelves
 import com.newendian.retichat.names.DisplayNames
 
 /**
@@ -26,4 +27,23 @@ object DistroGroupTexts {
     fun formerDistro(distroHex: String): String =
         "This group uses your distro address ${DisplayNames.shortHash(distroHex)}, which this device no longer holds. " +
             "You can read it here, but cannot post or change your membership from this device."
+
+    /** §8.7: the group view while the stack is not running ([GroupSelves.Signer.NOT_READY]). */
+    const val NOT_RUNNING = "Retichat isn't running on this device right now. You can post and change your membership once it is."
+
+    /** §8.7: the group view of a D-group while D is stored but not loaded yet ([GroupSelves.Signer.NOT_LOADED]). */
+    const val NOT_LOADED = "Your distro address hasn't loaded on this device yet. You can post and change your membership once it has."
+
+    /**
+     * Why nothing that would send (post, accept, decline, leave) is offered in
+     * a group whose own address is [own], acting as [signer] (§8.7), or null
+     * when it can act. The words are the same on iOS, Android and the web
+     * (alignment decision 3, 2026-10-11).
+     */
+    fun unavailable(signer: GroupSelves.Signer, own: String): String? = when (signer) {
+        GroupSelves.Signer.NOT_READY -> NOT_RUNNING
+        GroupSelves.Signer.NOT_LOADED -> NOT_LOADED
+        GroupSelves.Signer.FORMER -> formerDistro(own)
+        GroupSelves.Signer.DEVICE, GroupSelves.Signer.DISTRO -> null
+    }
 }
