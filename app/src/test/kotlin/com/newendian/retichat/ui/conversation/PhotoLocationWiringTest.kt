@@ -82,10 +82,11 @@ class PhotoLocationWiringTest {
         // Only the view model sends what the user composes.
         assertEquals(setOf("ConversationViewModel.kt"), filesWith("repository.sendMessage("))
         // A message gets an attachment in these places, and in no other: a new one must clean first.
-        assertEquals(setOf("ChatRepository.kt", "GroupChatManager.kt", "RetichatBridge.kt"), filesWith("messageAddAttachment("))
-        // GroupChatManager.fanoutMessage takes attachments and nothing calls it: it would send them as given.
-        assertEquals("fanoutMessage has a caller: clean its attachments first", 1, Regex("fanoutMessage\\(").findAll(groups).count())
-        assertEquals(setOf("GroupChatManager.kt"), filesWith("fanoutMessage("))
+        assertEquals(setOf("ChatRepository.kt", "RetichatBridge.kt"), filesWith("messageAddAttachment("))
+        // GroupChatManager.fanoutMessage, which took attachments and had no caller, is gone
+        // (GROUPS-DISTRO-DESIGN.md §8.1: it sent as the device whatever the group's own address).
+        assertEquals(0, Regex("fanoutMessage\\(").findAll(groups).count())
+        assertEquals(emptySet<String>(), filesWith("fanoutMessage("))
     }
 
     @Test

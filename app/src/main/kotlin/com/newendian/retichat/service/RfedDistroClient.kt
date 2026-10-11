@@ -18,6 +18,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import com.newendian.retichat.names.NameField
 import com.newendian.retichat.names.Signature
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
@@ -59,6 +60,13 @@ object RfedDistroClient {
     private val _pendingTransfer = MutableStateFlow<TransferOffer?>(null)
     /** Shown by the UI as an "import this distro identity?" prompt. */
     val pendingTransfer: StateFlow<TransferOffer?> = _pendingTransfer
+
+    /**
+     * One group arrival at a time (GROUPS-DISTRO-DESIGN.md §6.1, §6.5): a
+     * group sync, a group message and the replay of what was held for a group
+     * are judged in turn, so a replay never interleaves with a live copy.
+     */
+    private val groupLock = Mutex()
 
     @Volatile private var registerInFlight = false
     @Volatile private var registeredForHandle: Long = 0L
@@ -306,6 +314,29 @@ object RfedDistroClient {
             return
         }
 
+        // GROUPS-DISTRO-DESIGN.md §6.1: a group sync (0xFB rfed.distro.group,
+        // §17.14), then a group message (a GROUP_ID entry, of any form), each on
+        // its own repeat key, the LXMF hash (§6.2), before the source-and-
+        // timestamp key below: two messages of one source in one second would
+        // otherwise drop the second, and a held message's replay would be taken
+        // for its own repeat. The key is recorded only for what is kept.
+        val groupKeys = DistroGroupKeys.read { k -> if (o.has(k)) jsonValue(o.opt(k)) else null }
+        when (val route = DistroGroupSync.route(groupKeys.groupSync, groupKeys.hasGroupId, groupKeys.groupId)) {
+            is DistroGroupSync.Route.Sync -> {
+                handleGroupSync(context, blob, groupKeys, route.read, srcHex, o.optBoolean("signature_validated", false))
+                return
+            }
+            is DistroGroupSync.Route.Message -> {
+                handleGroupMessage(context, blob, groupKeys, route.groupId, srcHex, content, timestamp, fieldsRaw, nameField, unverifiedReason)
+                return
+            }
+            DistroGroupSync.Route.BadGroupId -> {
+                Log.w(TAG, "group message from ${srcHex.take(8)} with an unusable group id DROPPED (§6.1)")
+                return
+            }
+            DistroGroupSync.Route.Other -> Unit
+        }
+
         val key = DistroCodec.seenKey(srcHex, timestamp)
         if (!UserPreferences.markDistroSeen(context, key)) {
             Log.i(TAG, "duplicate fan-out copy from ${srcHex.take(8)} — skipped")
@@ -338,6 +369,12 @@ object RfedDistroClient {
                 return
             }
             is DistroCodec.SentCopy.Store -> {
+                // A known sibling is learned from a copy D signed (§9.1).
+                if (o.optBoolean("signature_validated", false)) {
+                    DistroManager.deliveryHashHex?.let { d ->
+                        app.repository.learnSibling(d, DistroGroupSync.siblingOf(sentBy, StackRuntime.selfDestHash.toHex()), "a sent copy (§17.11)")
+                    }
+                }
                 app.repository.onDistroSentCopy(copy.recipientHex, title, content, timestamp)
                 return
             }
@@ -371,6 +408,104 @@ object RfedDistroClient {
         val fromDistro = ownDistro != null && srcHex == ownDistro
         val held = app.rfedChannelClient.handleDistroChannelSync(marker, fromDistro, fromDistro && signatureValidated)
         if (!held) UserPreferences.forgetDistroSeen(context, key)
+        // A known sibling is learned from a membership message D signed and this device kept (§9.1).
+        if (held && signatureValidated && ownDistro != null && srcHex == ownDistro) {
+            app.repository.learnSibling(ownDistro, DistroGroupSync.siblingOf(marker.byHex, StackRuntime.selfDestHash.toHex()), "a membership message (§17.12)")
+        }
+    }
+
+    /**
+     * §17.14 "Receiving", rule 0 here (a G whose `gsync:` key is recorded is
+     * skipped), rules 1-5 and the apply table in the repository. Its key is
+     * recorded only when G is applied, an own echo, or nothing to do; a G held
+     * (a `post` for a group not joined here) or dropped is not, so a later copy,
+     * or its replay, is judged again.
+     */
+    private suspend fun handleGroupSync(
+        context: Context,
+        blob: ByteArray,
+        groupKeys: DistroGroupKeys,
+        read: GroupSyncRead,
+        srcHex: String,
+        signatureValidated: Boolean,
+    ) {
+        val app = context.applicationContext as? RetichatApp ?: return
+        val hash = groupKeys.hash ?: run {
+            Log.w(TAG, "group sync from ${srcHex.take(8)} DROPPED: the unwrap gave no message hash (§17.14)")
+            return
+        }
+        val key = DistroGroupSync.seenKey(hash)
+        groupLock.withLock {
+            if (UserPreferences.hasDistroSeen(context, key)) {
+                Log.i(TAG, "group sync ${hash.take(12)} seen already — skipped (§17.14 rule 0)")
+                return
+            }
+            val outcome = app.repository.onDistroGroupSync(blob, hash, srcHex, signatureValidated, read) { groupId ->
+                replayHeldArrivals(context, groupId)
+            }
+            if (outcome == com.newendian.retichat.data.repository.ChatRepository.DistroGroupOutcome.KEPT) {
+                UserPreferences.markDistroSeen(context, key)
+            }
+        }
+    }
+
+    /**
+     * A group message through the distro (§6.1 step 2): skipped when its `grp:`
+     * key is recorded; otherwise judged as on the direct path, and its key
+     * recorded only when it is kept (never held or dropped, §6.2).
+     */
+    private suspend fun handleGroupMessage(
+        context: Context,
+        blob: ByteArray,
+        groupKeys: DistroGroupKeys,
+        groupId: String,
+        srcHex: String,
+        content: String,
+        timestamp: Double,
+        fieldsRaw: ByteArray?,
+        nameField: NameField,
+        unverifiedReason: Int,
+    ) {
+        val app = context.applicationContext as? RetichatApp ?: return
+        val hash = groupKeys.hash ?: run {
+            Log.w(TAG, "group message for ${groupId.take(8)} from ${srcHex.take(8)} DROPPED: the unwrap gave no message hash (§6.2)")
+            return
+        }
+        val key = DistroGroupSync.messageSeenKey(hash)
+        groupLock.withLock {
+            if (UserPreferences.hasDistroSeen(context, key)) {
+                Log.i(TAG, "group message ${hash.take(12)} seen already — skipped (§6.2)")
+                return
+            }
+            val outcome = app.repository.onDistroGroupMessage(
+                blob, groupKeys, groupId, srcHex, content, timestamp, fieldsRaw, nameField, unverifiedReason,
+            )
+            if (outcome == com.newendian.retichat.data.repository.ChatRepository.DistroGroupOutcome.KEPT) {
+                UserPreferences.markDistroSeen(context, key)
+            }
+        }
+    }
+
+    /**
+     * Group [groupId] is joined here now: what was held for it (§6.5) is fed to
+     * the distro path again, in arrival order, each judged as a new arrival.
+     * Launched, never awaited: the caller may hold [groupLock]. Ordering, not a
+     * retry: each blob is fed once, and held again only by the same rules.
+     */
+    fun replayHeldArrivals(context: Context, groupId: String) {
+        val app = context.applicationContext as? RetichatApp ?: return
+        scope.launch {
+            val blobs = app.repository.takeHeldArrivals(groupId)
+            for (blob in blobs) handleBlob(context, blob)
+        }
+    }
+
+    /** An unwrap JSON value as plain Kotlin: null, String, Boolean, Number, List, Map (for [DistroGroupKeys.read]). */
+    private fun jsonValue(v: Any?): Any? = when (v) {
+        null, JSONObject.NULL -> null
+        is JSONObject -> v.keys().asSequence().associateWith { jsonValue(v.opt(it)) }
+        is JSONArray -> (0 until v.length()).map { jsonValue(v.opt(it)) }
+        else -> v
     }
 
     /** Another device offered us a distro key (field 0x0D or a distro blob). */

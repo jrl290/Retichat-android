@@ -3,6 +3,7 @@ package com.newendian.retichat.service
 import android.content.Context
 import android.content.SharedPreferences
 import com.newendian.retichat.ClosedGroups
+import com.newendian.retichat.FilteredInvites
 import com.newendian.retichat.names.DisplayNames
 
 /**
@@ -247,6 +248,16 @@ object UserPreferences {
     }
 
     /**
+     * Whether [key] is recorded, without recording it: the group branches
+     * check first and record only once the message is kept, never when it is
+     * held (GROUPS-DISTRO-DESIGN.md §6.2).
+     */
+    fun hasDistroSeen(context: Context, key: String): Boolean {
+        val raw = prefs(context).getString(PREF_KEY_DISTRO_SEEN, "") ?: ""
+        return raw.isNotEmpty() && raw.split('\n').contains(key)
+    }
+
+    /**
      * Un-record a fan-out copy that was dropped: nothing of it is kept, so a
      * later copy is judged again (RFed SPEC §17.12 "Receiving": only a message
      * held, applied, an own echo or stale, is recorded as seen).
@@ -286,6 +297,81 @@ object UserPreferences {
 
     fun isGroupClosed(context: Context, groupId: String): Boolean =
         groupId.lowercase() in closedGroups(context)
+
+    // ── Groups for distro holders (GROUPS-DISTRO-DESIGN.md §6.5, §9.1, §10.2) ──
+
+    /** Oldest-first ids of invites to the distro the privacy filter dropped ([FilteredInvites]), one per line. */
+    const val PREF_KEY_FILTERED_INVITES = "filtered_group_invites"
+
+    private fun lines(context: Context, key: String): List<String> =
+        prefs(context).getString(key, "").orEmpty().split('\n').filter { it.isNotEmpty() }
+
+    private fun putLines(context: Context, key: String, values: List<String>) {
+        prefs(context).edit().putString(key, values.joinToString("\n")).apply()
+    }
+
+    /**
+     * The privacy filter dropped an invite to the distro for [groupId]: group
+     * traffic for it is never held from now on (the filter has decided, and
+     * spends nothing more on that group), until a group sync makes it held here.
+     */
+    @Synchronized
+    fun filterInvite(context: Context, groupId: String) {
+        putLines(context, PREF_KEY_FILTERED_INVITES, FilteredInvites.record(lines(context, PREF_KEY_FILTERED_INVITES), groupId.lowercase()))
+    }
+
+    fun isInviteFiltered(context: Context, groupId: String): Boolean =
+        groupId.lowercase() in lines(context, PREF_KEY_FILTERED_INVITES)
+
+    /** The group became held here from a group sync: its id leaves the filtered-invite set (§11.2). */
+    @Synchronized
+    fun unfilterInvite(context: Context, groupId: String) {
+        val current = lines(context, PREF_KEY_FILTERED_INVITES)
+        val id = groupId.lowercase()
+        if (id in current) putLines(context, PREF_KEY_FILTERED_INVITES, current.filter { it != id })
+    }
+
+    private fun leftKey(distroHex: String) = "group_left_${distroHex.lowercase()}"
+
+    /** This device's `left` list for distro [distroHex]: the D-groups it holds as left by D, most recent first, at most 32 (§10.2). */
+    fun groupsLeftBy(context: Context, distroHex: String): List<String> = lines(context, leftKey(distroHex))
+
+    /** [ids] are held as left by [distroHex] from now on, as the most recent. */
+    @Synchronized
+    fun recordGroupsLeft(context: Context, distroHex: String, ids: List<String>) {
+        if (ids.isEmpty()) return
+        putLines(context, leftKey(distroHex), DistroGroupSync.recordLeft(groupsLeftBy(context, distroHex), ids))
+    }
+
+    private fun siblingsKey(distroHex: String) = "distro_siblings_${distroHex.lowercase()}"
+    /** The distros a set of known siblings is kept for, one per line. */
+    private const val PREF_KEY_SIBLING_SETS = "distro_sibling_sets"
+
+    /** The known siblings of [distroHex] (§9.1): learned from the `fields[0xFD]` of D-signed syncs, never queried. */
+    fun distroSiblings(context: Context, distroHex: String): Set<String> = lines(context, siblingsKey(distroHex)).toSet()
+
+    /** [sibling] sent a D-signed sync for [distroHex]; true when it was not known yet. */
+    @Synchronized
+    fun learnDistroSibling(context: Context, distroHex: String, sibling: String): Boolean {
+        val d = distroHex.lowercase()
+        val known = lines(context, siblingsKey(d))
+        if (sibling in known) return false
+        putLines(context, siblingsKey(d), known + sibling)
+        val sets = lines(context, PREF_KEY_SIBLING_SETS)
+        if (d !in sets) putLines(context, PREF_KEY_SIBLING_SETS, sets + d)
+        return true
+    }
+
+    /** The distros a set of known siblings is kept for. */
+    fun distrosWithSiblings(context: Context): List<String> = lines(context, PREF_KEY_SIBLING_SETS)
+
+    /** Drop the known siblings of [distroHex] (it was given up and no group here has it as its own address, §8.7). */
+    @Synchronized
+    fun forgetDistroSiblings(context: Context, distroHex: String) {
+        val d = distroHex.lowercase()
+        prefs(context).edit().remove(siblingsKey(d)).apply()
+        putLines(context, PREF_KEY_SIBLING_SETS, lines(context, PREF_KEY_SIBLING_SETS).filter { it != d })
+    }
 
     fun getMutedChatIds(context: Context): Set<String> =
         getCsvSet(context, PREF_KEY_MUTED_CHAT_IDS)

@@ -96,3 +96,18 @@ object GroupSelves {
     fun targets(members: Collection<String>, self: GroupSelf): List<String> =
         members.filter { !self.isSelf(it) }.distinct()
 }
+
+/**
+ * What the UI shows of a group's acting address (GROUPS-DISTRO-DESIGN.md §8.7,
+ * §13): whether its own address is a distro, whether a send as it can be signed
+ * from this device now, its own address, and every self address ("You").
+ */
+data class GroupActing(
+    val distroGroup: Boolean,
+    val signer: GroupSelves.Signer,
+    val own: String,
+    val selves: Set<String>,
+) {
+    /** The group's own address cannot be signed for here: read only (§8.7). */
+    val readOnly: Boolean get() = signer == GroupSelves.Signer.NOT_LOADED || signer == GroupSelves.Signer.FORMER
+}

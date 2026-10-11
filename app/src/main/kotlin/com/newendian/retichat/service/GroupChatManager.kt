@@ -22,14 +22,17 @@ import java.util.concurrent.ConcurrentHashMap
  * Group entries are written only through [GroupFields] (DISPLAY_NAMES.md §10:
  * the old fields 0xA0-0xA8 until the switch, then the Retichat field 0xD1).
  *
+ * Every message goes as the [GroupSigner] the caller resolved for its group
+ * at send time (GROUPS-DISTRO-DESIGN.md §8.1 `groupSigner`): the device, or the
+ * distro D for a group whose own address is D, never captured at configure.
+ * The targets are the caller's, without any self address (§8.2, §9.2).
+ *
  * See RFed-spec/Group.md for the full protocol specification.
  */
 class GroupChatManager(
     private val appContext: Context,
     private val scope: CoroutineScope,
-    private val selfDestHash: ByteArray,
     private val routerHandle: Long,
-    private val identityHandle: Long,
 ) {
     companion object {
         private const val TAG = "GroupChatManager"
@@ -46,7 +49,6 @@ class GroupChatManager(
         const val STATUS        = "status"
     }
 
-    private val selfHex: String get() = selfDestHash.toHex()
     private val trackedHandles = ConcurrentHashMap<String, Long>()
     private val fallbackStarted = ConcurrentHashMap.newKeySet<Long>()
 
@@ -65,81 +67,90 @@ class GroupChatManager(
     // ---- Invite ---------------------------------------------------------
 
     /**
-     * Send group invites to all members except the creator (self).
-     *
-     * Each invite carries the full member list so recipients know who is in
-     * the group without a separate directory lookup.
+     * Send the invite chunks of a new group to [targets] (every listed member
+     * but the user's own addresses), as [signer], one chunk per member key:
+     * each carries the full member list [allMembers] and one key. Returns
+     * whether the chunks were built: false, with nothing sent, when a listed
+     * member's key is missing (the creator's own included: for a group created
+     * as D it is D's key, from the distro, not the contacts).
      */
     fun sendInvites(
+        signer: GroupSigner,
         groupId: String,
         groupName: String,
         allMembers: List<String>,
         memberPublicKeys: Map<String, String>,
-    ) {
+        targets: List<String>,
+    ): Boolean {
         val membersCSV = allMembers.joinToString(",")
         if (allMembers.any { memberPublicKeys[it]?.length != 128 }) {
             Log.w(TAG, "invite aborted: missing member public key")
-            return
+            return false
         }
         val memberKeyEntries = allMembers.sorted().map { hash ->
-            val publicKey = memberPublicKeys.getValue(hash).hexToBytes() ?: return
+            val publicKey = memberPublicKeys.getValue(hash).hexToBytes() ?: return false
             "$hash:${Base64.encodeToString(publicKey, Base64.NO_WRAP)}"
         }
         val content = ""
-        allMembers.filter { it != selfHex }.forEach { target ->
+        targets.filter { it != signer.hex }.forEach { target ->
             memberKeyEntries.forEach { memberKeyEntry ->
-                send(target, content) { handle ->
+                send(signer, target, content) { handle ->
                     GroupFields.set(handle, GroupEntry.ID, groupId)
                     GroupFields.set(handle, GroupEntry.NAME, groupName)
                     GroupFields.set(handle, GroupEntry.MEMBERS, membersCSV)
                     GroupFields.set(handle, GroupEntry.MEMBER_KEYS, memberKeyEntry)
                     GroupFields.set(handle, GroupEntry.ACTION, Action.INVITE)
-                    GroupFields.set(handle, GroupEntry.SENDER, selfHex)
+                    GroupFields.set(handle, GroupEntry.SENDER, signer.hex)
                 }
             }
         }
+        return true
     }
 
     // ---- Accept ---------------------------------------------------------
 
     /**
-     * Broadcast acceptance to every member (excluding self).
+     * Send the user's accept to [targets] (every listed member but the user's
+     * own addresses), as [signer].
      *
      * Called by the recipient after accepting an invite. Every listed member
      * will add the acceptor to their "accepted" set and start including them
-     * in future fanouts. Every accept carries the user's own key
+     * in future fanouts. Every accept carries the signer's own key
      * ([GroupEnvelopes], RFed-spec Group.md "The sender's key", James
-     * 2026-10-06), so a member that never heard of this device can verify it,
+     * 2026-10-06; as D, `D:<D's key>`, which binds on every receiver whichever
+     * device of D sent it), so a member that never heard of it can verify it,
      * and the creator answers it with a `status`.
      */
     fun sendAccept(
+        signer: GroupSigner,
         groupId: String,
-        members: List<String>,
+        targets: List<String>,
     ) {
-        val ownKey = ownKeyEntry()
-        Log.i(TAG, "Accept for group ${groupId.take(8)} to ${members.count { it != selfHex }} member(s), own key ${if (ownKey != null) "carried" else "NOT carried"}")
-        members.filter { it != selfHex }.forEach { target ->
-            send(target) { handle ->
-                GroupEnvelopes.write(handle, GroupEnvelopes.accept(groupId, selfHex, ownKey))
+        val ownKey = ownKeyEntry(signer)
+        val to = targets.filter { it != signer.hex }
+        Log.i(TAG, "Accept for group ${groupId.take(8)} as ${signer.hex.take(8)} to ${to.size} member(s), own key ${if (ownKey != null) "carried" else "NOT carried"}")
+        to.forEach { target ->
+            send(signer, target) { handle ->
+                GroupEnvelopes.write(handle, GroupEnvelopes.accept(groupId, signer.hex, ownKey))
             }
         }
     }
 
     /**
-     * The user's own GROUP_MEMBER_KEYS entry, `hash:base64-public-key`: the
+     * The signer's own GROUP_MEMBER_KEYS entry, `hash:base64-public-key`: the
      * form an invite chunk uses. Read from the identity, not the router, so a
      * leave sent with no connection carries it too. Null, and logged, when the
-     * identity's key cannot be read (it is always held): the accept or leave
-     * then goes without it, as a build from before this change sent it, rather
-     * than not at all.
+     * key cannot be read (it is always held): the accept or leave then goes
+     * without it, as a build from before this change sent it, rather than not
+     * at all.
      */
-    private fun ownKeyEntry(): String? {
-        val publicKey = RetichatBridge.identityPublicKey(identityHandle)
+    private fun ownKeyEntry(signer: GroupSigner): String? {
+        val publicKey = signer.publicKey
         if (publicKey == null || publicKey.size != 64) {
-            Log.w(TAG, "own key not readable, the accept/leave carries none: ${RetichatBridge.lastError()}")
+            Log.w(TAG, "own key of ${signer.hex.take(8)} not readable, the accept/leave carries none: ${RetichatBridge.lastError()}")
             return null
         }
-        return GroupEnvelopes.ownKeyEntry(selfHex, publicKey)
+        return GroupEnvelopes.ownKeyEntry(signer.hex, publicKey)
     }
 
     // ---- Status (the creator's answer to an accept) ---------------------
@@ -155,9 +166,9 @@ class GroupChatManager(
      * per accept received: nothing here sends it again (DESIGN_PRINCIPLES §3).
      * A status that cannot be built is not sent.
      */
-    fun sendStatus(groupId: String, memberHex: String, statuses: List<ByteArray>) {
-        sendChecked(memberHex, "") { handle ->
-            GroupEnvelopes.write(handle, GroupEnvelopes.status(groupId, selfHex))
+    fun sendStatus(signer: GroupSigner, groupId: String, memberHex: String, statuses: List<ByteArray>) {
+        sendChecked(signer, memberHex, "") { handle ->
+            GroupEnvelopes.write(handle, GroupEnvelopes.status(groupId, signer.hex))
             GroupFields.setStatuses(handle, statuses)
         }
     }
@@ -165,11 +176,11 @@ class GroupChatManager(
     // ---- Relay done (outbound confirmation) ----------------------------
 
     /** Confirm to [requesterHex] that the relay was completed. */
-    private fun sendRelayDone(groupId: String, requesterHex: String) {
-        send(requesterHex) { handle ->
+    private fun sendRelayDone(signer: GroupSigner, groupId: String, requesterHex: String) {
+        send(signer, requesterHex) { handle ->
             GroupFields.set(handle, GroupEntry.ID,       groupId)
             GroupFields.set(handle, GroupEntry.ACTION,   Action.RELAY_DONE)
-            GroupFields.set(handle, GroupEntry.SENDER,   selfHex)
+            GroupFields.set(handle, GroupEntry.SENDER,   signer.hex)
             GroupFields.set(handle, GroupEntry.RELAY_DONE, true)
         }
     }
@@ -183,74 +194,30 @@ class GroupChatManager(
      * `leave` and GROUP_SENDER this user, no content, as the web and iOS send
      * it (DISPLAY_NAMES.md §7). [members] are the targets the caller chose
      * (GroupMemberStatuses.leaveTargets: every listed member that has not
-     * left). Each copy goes like any group control message: DIRECT, with the
+     * left, and no self address). Each copy goes like any group control message: DIRECT, with the
      * propagated fallback. Until 2026-10-05 nothing called this: a leave was
      * a plain post "left the group" with no action (audit L5), and a decline
-     * sent nothing. Like an accept it carries the user's own key
-     * ([GroupEnvelopes]), so a member that never heard of this device can
-     * verify it before it makes the leave final.
+     * sent nothing. Like an accept it carries the signer's own key
+     * ([GroupEnvelopes]), so a member that never heard of it can verify it
+     * before it makes the leave final.
      */
     fun sendLeave(
+        signer: GroupSigner,
         groupId: String,
         members: List<String>,
     ) {
-        val ownKey = ownKeyEntry()
-        Log.i(TAG, "Leave for group ${groupId.take(8)} to ${members.count { it != selfHex }} member(s), own key ${if (ownKey != null) "carried" else "NOT carried"}")
-        members.filter { it != selfHex }.forEach { target ->
-            send(target, "") { handle ->
-                GroupEnvelopes.write(handle, GroupEnvelopes.leave(groupId, selfHex, ownKey))
+        val ownKey = ownKeyEntry(signer)
+        val to = members.filter { it != signer.hex }
+        Log.i(TAG, "Leave for group ${groupId.take(8)} as ${signer.hex.take(8)} to ${to.size} member(s), own key ${if (ownKey != null) "carried" else "NOT carried"}")
+        to.forEach { target ->
+            send(signer, target, "") { handle ->
+                GroupEnvelopes.write(handle, GroupEnvelopes.leave(groupId, signer.hex, ownKey))
             }
         }
     }
 
-    // ---- Message fanout -------------------------------------------------
-
-    /**
-     * Send a group message to every accepted member.
-     *
-     * [onHandle] is called once per successful send with the native message
-     * handle and the target hash, so the caller can set up delivery-state
-     * polling.
-     */
-    fun fanoutMessage(
-        groupId: String,
-        groupName: String,
-        content: String,
-        attachments: List<Pair<String, ByteArray>> = emptyList(),
-        acceptedMembers: List<String>,
-        onHandle: ((Long, String) -> Unit)? = null,
-    ) {
-        acceptedMembers.filter { it != selfHex }.forEach { target ->
-            scope.launch(Dispatchers.IO) {
-                val destBytes = target.hexToBytes() ?: return@launch
-                val handle = RetichatBridge.messageCreate(
-                    destHash = destBytes,
-                    srcHash = selfDestHash,
-                    content = content,
-                    method = RetichatBridge.DeliveryMethod.DIRECT,
-                    identityHandle = identityHandle,
-                )
-                if (handle == 0L) {
-                    Log.w(TAG, "fanout: messageCreate failed for $target")
-                    return@launch
-                }
-                attachments.forEach { (name, data) ->
-                    RetichatBridge.messageAddAttachment(handle, name, data)
-                }
-                GroupFields.set(handle, GroupEntry.ID,     groupId)
-                GroupFields.set(handle, GroupEntry.NAME,   groupName)
-                GroupFields.set(handle, GroupEntry.SENDER, selfHex)
-                val ok = RetichatBridge.messageSendViaAppLinks(handle)
-                if (ok) {
-                    track(handle)
-                    onHandle?.invoke(handle, target)
-                } else {
-                    Log.w(TAG, "fanout: messageSend failed for $target")
-                    destroyAfterDelay(handle)
-                }
-            }
-        }
-    }
+    // Posts go through ChatRepository.sendGroupMessage (one row and its
+    // delivery tracking per post); this class sends the control messages.
 
     // ---- Relay request --------------------------------------------------
 
@@ -261,13 +228,14 @@ class GroupChatManager(
      * this message; the relayer will skip them to avoid duplicates.
      */
     fun sendRelayRequest(
+        signer: GroupSigner,
         groupId: String,
         content: String,
         originalSender: String,
         alreadySeen: List<String>,
         relayerHex: String,
     ) {
-        send(relayerHex, content) { handle ->
+        send(signer, relayerHex, content) { handle ->
             GroupFields.set(handle, GroupEntry.ID,       groupId)
             GroupFields.set(handle, GroupEntry.ACTION,   Action.RELAY_REQUEST)
             GroupFields.set(handle, GroupEntry.SENDER,   originalSender)
@@ -286,6 +254,7 @@ class GroupChatManager(
      * Sends a relay-done confirmation back to [requesterHex].
      */
     fun performRelay(
+        signer: GroupSigner,
         groupId: String,
         groupName: String,
         content: String,
@@ -294,7 +263,7 @@ class GroupChatManager(
         requesterHex: String,
         allAcceptedMembers: List<String>,
     ) {
-        val seenSet = (alreadySeen + listOf(requesterHex, selfHex, originalSender)).toHashSet()
+        val seenSet = (alreadySeen + listOf(requesterHex, signer.hex, originalSender)).toHashSet()
         val targets = allAcceptedMembers.filter { it !in seenSet }
         val newSeen = (seenSet + targets).toList()
 
@@ -302,7 +271,7 @@ class GroupChatManager(
 
         // Forward to uncovered members
         targets.forEach { target ->
-            send(target, content) { handle ->
+            send(signer, target, content) { handle ->
                 GroupFields.set(handle, GroupEntry.ID,         groupId)
                 GroupFields.set(handle, GroupEntry.NAME,       groupName)
                 GroupFields.set(handle, GroupEntry.SENDER,     originalSender)
@@ -312,20 +281,20 @@ class GroupChatManager(
         }
 
         // Confirm completion to the requester
-        sendRelayDone(groupId, requesterHex)
+        sendRelayDone(signer, groupId, requesterHex)
     }
 
     // ---- Private helpers ------------------------------------------------
 
-    /** Create, configure, and send a single LXMF message to [targetHex]. */
-    private fun send(targetHex: String, content: String = "", configure: (Long) -> Unit) =
-        sendChecked(targetHex, content) { handle -> configure(handle); true }
+    /** Create, configure, and send a single LXMF message to [targetHex], as [signer]. */
+    private fun send(signer: GroupSigner, targetHex: String, content: String = "", configure: (Long) -> Unit) =
+        sendChecked(signer, targetHex, content) { handle -> configure(handle); true }
 
     /**
      * [send], for a message that must not leave unless [configure] built it:
      * a false from it releases the message, and nothing is sent.
      */
-    private fun sendChecked(targetHex: String, content: String = "", configure: (Long) -> Boolean) {
+    private fun sendChecked(signer: GroupSigner, targetHex: String, content: String = "", configure: (Long) -> Boolean) {
         scope.launch(Dispatchers.IO) {
             val destBytes = targetHex.hexToBytes() ?: run {
                 Log.w(TAG, "send: bad hex $targetHex")
@@ -335,14 +304,19 @@ class GroupChatManager(
             // the POB loop takes the AppLinks-owned DIRECT path (which
             // sends LINKREQUEST in tier-3) instead of the legacy path
             // (which may never create a link when no path is cached).
-            RetichatBridge.appLinkOpen(routerHandle, destBytes, "lxmf", "delivery")
+            // Never to a member that is a distro (GROUPS-DISTRO-DESIGN.md
+            // §8.4): no device is behind it to prove a link, and the router
+            // propagates every message to it at once.
+            if (!DistroAddresses.isDistro(appContext, destBytes)) {
+                RetichatBridge.appLinkOpen(routerHandle, destBytes, "lxmf", "delivery")
+            }
 
             val handle = RetichatBridge.messageCreate(
                 destHash = destBytes,
-                srcHash = selfDestHash,
+                srcHash = signer.hash,
                 content = content,
                 method = RetichatBridge.DeliveryMethod.DIRECT,
-                identityHandle = identityHandle,
+                identityHandle = signer.identity,
             )
             if (handle == 0L) {
                 Log.w(TAG, "send: messageCreate failed for $targetHex: ${RetichatBridge.lastError()}")
@@ -441,4 +415,25 @@ class GroupChatManager(
             RetichatBridge.messageDestroy(handle)
         }
     }
+}
+
+/**
+ * Who a group message goes as (GROUPS-DISTRO-DESIGN.md §8.1, §8.2): its LXMF
+ * source [hash] ([hex]), the identity that signs it, and that identity's public
+ * key for the accept's and leave's carried key. Resolved per send from the
+ * group's own address (`ChatRepository.groupSigner`): the device, or the
+ * distro D loaded now when the group's own address is D. Never the fallback
+ * helpers (`DistroManager.sendingIdentity`), which ignore the group.
+ */
+class GroupSigner(val hex: String, val hash: ByteArray, val identity: Long, val publicKey: ByteArray?)
+
+/**
+ * A distro address has no device behind it to prove a direct link; RFed fans
+ * the message out from the propagation node. Its announce says so (RFed SPEC
+ * §17.10), and the preference keeps what past announces and `lxma://` links
+ * taught. The one test for a DM's dispatch and a group envelope's (§8.4).
+ */
+object DistroAddresses {
+    fun isDistro(context: Context, destHash: ByteArray): Boolean =
+        RetichatBridge.peerIsDistro(destHash) || UserPreferences.isDistroContact(context, destHash.toHex())
 }

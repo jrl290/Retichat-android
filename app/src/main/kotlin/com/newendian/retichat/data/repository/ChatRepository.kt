@@ -11,12 +11,17 @@ import com.newendian.retichat.RetichatApp
 import com.newendian.retichat.bridge.GroupEntry
 import com.newendian.retichat.bridge.JniGroupNative
 import com.newendian.retichat.bridge.LxmfFields
+import com.newendian.retichat.service.DistroAddresses
 import com.newendian.retichat.service.DistroCodec
+import com.newendian.retichat.service.DistroGroupKeys
+import com.newendian.retichat.service.DistroGroupSync
 import com.newendian.retichat.service.DistroManager
 import com.newendian.retichat.service.DistroOutboxRuntime
+import com.newendian.retichat.service.GroupSync
 import com.newendian.retichat.service.RfedDistroClient
 import com.newendian.retichat.bridge.RetichatBridge
 import com.newendian.retichat.service.GroupChatManager
+import com.newendian.retichat.service.GroupSigner
 import com.newendian.retichat.service.GroupFields
 import com.newendian.retichat.service.MessageNotificationHelper
 import com.newendian.retichat.service.NetworkMonitor
@@ -40,6 +45,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -94,13 +101,17 @@ class ChatRepository(
         answer = { chat, member, statuses ->
             val groupId = chat.groupIdHex
             val manager = groupChatManager
-            if (groupId == null || manager == null) {
-                Log.w(TAG, "status for ${chat.id} to ${member.take(8)} not sent: ${if (groupId == null) "no group id" else "stack offline"}")
+            // As the group's own address, resolved now (GROUPS-DISTRO-DESIGN.md §8.1, §12.1).
+            val signer = groupSigner(chat)
+            if (groupId == null || manager == null || signer == null) {
+                Log.w(TAG, "status for ${chat.id} to ${member.take(8)} not sent: ${if (groupId == null) "no group id" else if (manager == null) "stack offline" else "no signer for its own address (${signerKind(chat)}, §8.7)"}")
             } else {
-                manager.sendStatus(groupId, member, statuses)
+                manager.sendStatus(signer, groupId, member, statuses)
             }
         },
         log = { Log.i(TAG, it) },
+        selves = { chat -> groupSelf(chat) },
+        isSelfAnywhere = { isSelfAnywhere(it) },
     )
 
     fun configure(selfHash: ByteArray, router: Long, identity: Long) {
@@ -109,7 +120,7 @@ class ChatRepository(
         identityHandle = identity
 
         groupChatManager = if (router != 0L) {
-            GroupChatManager(appContext, scope, selfHash, router, identity)
+            GroupChatManager(appContext, scope, router)
         } else null
 
         // Queued messages wait for onStackReady(), not for this: bootstrap
@@ -222,6 +233,12 @@ class ChatRepository(
 
     init {
         NetworkMonitor.addOnAvailableListener(networkListener)
+        // Every change of the distro held (generated, imported, forgotten), and
+        // once at start: held arrivals of another distro and the siblings of a
+        // distro given up are forgotten (GROUPS-DISTRO-DESIGN.md §6.5, §9.1).
+        scope.launch(Dispatchers.IO) {
+            DistroManager.state.map { it?.deliveryHashHex }.distinctUntilChanged().collect { onDistroChanged(it) }
+        }
     }
 
     // ---- Contacts ----
@@ -407,6 +424,21 @@ class ChatRepository(
         deleteChatLocal(chat)
     }
 
+    /**
+     * "Delete from this device" for a group whose own address is a distro this
+     * device no longer holds (GROUPS-DISTRO-DESIGN.md §8.7): the group and its
+     * messages go from this device only. No leave is sent and no group sync is
+     * owed: the user stays in the group on the other devices and for the other
+     * members. The one path that removes a group without the user's leave.
+     */
+    suspend fun deleteGroupFromThisDevice(chatId: String) {
+        val chat = chatDao.findById(chatId) ?: return
+        if (!chat.isGroup) return
+        chat.groupIdHex?.let { forgetHeldArrivals(it, "the group was deleted from this device") }
+        deleteChatLocal(chat)
+        Log.i(TAG, "Group ${chat.id} deleted from this device only (own address ${chat.ownMember?.take(8)}, ${signerKind(chat)}): no leave sent, no group sync owed (§8.7)")
+    }
+
     fun messagesForChatPaged(chatId: String) = messageDao.messagesForChatPaged(chatId)
 
     /**
@@ -434,6 +466,16 @@ class ChatRepository(
         return chatId
     }
 
+    /**
+     * Create a group of [members] and the user. On a device that holds a
+     * distro D, loaded, the group is created as D (GROUPS-DISTRO-DESIGN.md
+     * §8.5): the user's own entry is D, never the device; the recorded creator
+     * and the group's own address are D; the invite chunks are signed by D with
+     * GROUP_SENDER D, D's chunk carrying D's key (from the distro, not the
+     * contacts); and one `create` group sync is owed once the chunks are built
+     * (§10.6), so every other device of D holds the group too. Otherwise as the
+     * device, as before.
+     */
     suspend fun createGroupChat(
         name: String,
         members: List<ByteArray>,
@@ -442,56 +484,77 @@ class ChatRepository(
         val groupIdBytes = ByteArray(16).also { java.security.SecureRandom().nextBytes(it) }
         val groupIdHex = groupIdBytes.toHex()
 
-        // Include self in canonical member list
-        val allMembers = (members + selfDestHash).distinctBy { it.toHex() }
+        // The user's own entry: the distro held now, else the device (§8.1).
+        val distro = DistroManager.signing()?.first
+        val own = distro?.deliveryHashHex ?: selfHex()
+        val ownHash = DistroCodec.hexToBytes(own) ?: selfDestHash
+        // The user's own entry in the canonical member list
+        val allMembers = (members + ownHash).distinctBy { it.toHex() }
         val sorted = allMembers.sortedBy { it.toHex() }
         val hashes = sorted.joinToString(",") { it.toHex() }
         val chatId = "group_${groupIdHex.take(16)}"
 
-        chatDao.upsert(
-            ChatEntity(
-                id = chatId,
-                isGroup = true,
-                name = name,
-                memberHashes = hashes,
-                groupIdHex = groupIdHex,
-                creatorHex = selfHex(),
-            )
+        val chat = ChatEntity(
+            id = chatId,
+            isGroup = true,
+            name = name,
+            memberHashes = hashes,
+            groupIdHex = groupIdHex,
+            creatorHex = own,
+            ownMember = own,
         )
+        chatDao.upsert(chat)
 
+        val allMemberHexes = sorted.map { it.toHex() }
+        val self = GroupSelves.of(own, allMemberHexes, selfHex(), DistroManager.deliveryHashHex, ::siblingsOf)
         sorted.forEach { hash ->
             val hexHash = hash.toHex()
-            val isSelf = hexHash == selfDestHash.toHex()
-            // Co-members pass the privacy filter (iOS createGroupChat).
+            val isSelf = self.isSelf(hexHash)
+            // Co-members pass the privacy filter (iOS createGroupChat); no self address does.
             if (!isSelf) ensureAllowlistedContact(hexHash)
             messageDao.upsertGroupMember(
                 GroupMemberEntity(
                     chatId = chatId,
                     destHashHex = hexHash,
-                    inviteStatus = if (isSelf) MemberStatus.ACCEPTED else MemberStatus.INVITED,
+                    inviteStatus = if (hexHash == own) MemberStatus.ACCEPTED else MemberStatus.INVITED,
                 )
             )
         }
 
-        // Broadcast invites to all members (except self) via GroupChatManager
-        val allMemberHexes = sorted.map { it.toHex() }
+        // Invites to every member that is not a self address, as the group's own address.
         val memberPublicKeys = buildMap {
             sorted.forEach { hash ->
                 val hashHex = hash.toHex()
-                val publicKey = if (hashHex == selfDestHash.toHex()) {
-                    RetichatBridge.identityPublicKey(identityHandle)?.toHex()
-                } else {
-                    contactDao.findByHash(hashHex)?.publicKeyHex
+                val publicKey = when {
+                    hashHex == own && distro != null -> distro.publicKeyHex
+                    hashHex == selfHex() -> RetichatBridge.identityPublicKey(identityHandle)?.toHex()
+                    else -> contactDao.findByHash(hashHex)?.publicKeyHex
                 }
                 if (publicKey?.length == 128) put(hashHex, publicKey.lowercase())
             }
         }
-        groupChatManager?.sendInvites(groupIdHex, name, allMemberHexes, memberPublicKeys) ?: run {
-            // Fallback: offline — invites will be sent when stack comes back up
-            Log.w(TAG, "createGroupChat: stack offline, invites deferred")
+        val signer = groupSigner(chat)
+        val manager = groupChatManager
+        val built = when {
+            manager == null -> { Log.w(TAG, "createGroupChat: stack offline, invites not sent"); false }
+            signer == null -> { Log.w(TAG, "createGroupChat: no signer for ${own.take(8)} (${signerKind(chat)}), invites not sent"); false }
+            else -> manager.sendInvites(signer, groupIdHex, name, allMemberHexes, memberPublicKeys, GroupSelves.targets(allMemberHexes, self))
+        }
+        // §10.6: one `create` group sync, after the invite chunks are built, for a group created as D.
+        if (built && distro != null) {
+            val keys = allMemberHexes.mapNotNull { hex ->
+                memberPublicKeys[hex]?.let { DistroCodec.hexToBytes(it) }?.let { GroupStatuses.keyEntry(hex, it) }
+            }
+            DistroOutboxRuntime.oweGroupSync(
+                appContext, own,
+                GroupSync(
+                    op = DistroGroupSync.CREATE, groupId = groupIdHex, atMs = System.currentTimeMillis(),
+                    name = name, members = hashes, keys = keys, left = UserPreferences.groupsLeftBy(appContext, own),
+                ),
+            )
         }
 
-        Log.i(TAG, "createGroupChat: id=$chatId, groupId=$groupIdHex, ${sorted.size} members")
+        Log.i(TAG, "createGroupChat: id=$chatId, groupId=$groupIdHex, ${sorted.size} members, as ${if (distro != null) "the distro ${own.take(8)}" else "the device"}")
         return chatId
     }
 
@@ -1215,18 +1278,38 @@ class ChatRepository(
         DistroOutboxRuntime.oweSentCopy(appContext, recipient, title, content)
     }
 
+    /**
+     * A post in group [chat], as the group's own address resolved now
+     * ([groupSigner], GROUPS-DISTRO-DESIGN.md §8.1): refused, with nothing
+     * stored, sent or queued, when it resolves to nothing (a D-group whose D
+     * this device no longer holds, or has not loaded yet: §8.7, the composer is
+     * disabled there). The targets are the accepted members without any self
+     * address (§9.2); a member that is a distro gets no app link (§8.4). In a
+     * D-group one `post` group sync is owed per post (§10.6), once the router
+     * has accepted the first member envelope, or when the post is stored if no
+     * member besides the user has accepted; never for a send that throws.
+     */
     private suspend fun sendGroupMessage(
         chat: ChatEntity,
         content: String,
         attachments: List<Pair<String, ByteArray>>,
     ) {
-        val selfHex = selfDestHash.toHex()
         val groupIdHex = chat.groupIdHex ?: return
-
-        val memberHexes = GroupMemberStatuses.acceptedMemberHexes(
-            members = messageDao.groupMembersList(chat.id),
-            selfHex = selfHex,
-        )
+        val signer = groupSigner(chat) ?: run {
+            Log.w(TAG, "sendGroupMessage: ${chat.id} refused: its own address ${chat.ownMember?.take(8)} has no signer on this device (${signerKind(chat)}, §8.7) — nothing stored or sent")
+            return
+        }
+        val selfHex = signer.hex
+        val members = messageDao.groupMembersList(chat.id)
+        val self = groupSelf(chat, members)
+        val memberHexes = GroupMemberStatuses.acceptedMemberHexes(members = members, selfHex = selfHex)
+            .filter { !self.isSelf(it) }
+        val postedAt = System.currentTimeMillis()
+        // §10.6: the post's group sync, in a D-group only, owed once.
+        val postSync: GroupSync? = if (GroupSelves.isDistroGroup(chat.ownMember, selfHex())) {
+            GroupSync(DistroGroupSync.POST, groupIdHex, postedAt, text = content, left = UserPreferences.groupsLeftBy(appContext, signer.hex))
+        } else null
+        val postSyncOwed = java.util.concurrent.atomic.AtomicBoolean(postSync == null)
 
         // Create the outbound message record once (shared ID for the group msg)
         val groupMsgId = "grp_${System.currentTimeMillis()}_${(0..999).random()}"
@@ -1237,11 +1320,15 @@ class ChatRepository(
                 chatId = chat.id,
                 senderHashHex = selfHex,
                 content = content,
-                timestamp = System.currentTimeMillis(),
+                timestamp = postedAt,
                 isOutbound = true,
                 state = RetichatBridge.MessageState.SENDING,
             )
         )
+        // Nothing to submit: no member besides the user has accepted. The post's sync is owed now.
+        if (memberHexes.isEmpty() && postSync != null && postSyncOwed.compareAndSet(false, true)) {
+            DistroOutboxRuntime.oweGroupSync(appContext, signer.hex, postSync)
+        }
 
         // Save outbound attachments to disk + DB so they display in the bubble
         if (attachments.isNotEmpty()) {
@@ -1265,15 +1352,19 @@ class ChatRepository(
             scope.launch(Dispatchers.IO) {
                 val destHash = memberHex.hexToBytes()
                 // Register the AppLinks spec synchronously before send so
-                // the POB loop takes the AppLinks-owned DIRECT path.
-                RetichatBridge.appLinkOpen(routerHandle, destHash, "lxmf", "delivery")
+                // the POB loop takes the AppLinks-owned DIRECT path; never for
+                // a member that is a distro, which the router propagates to at
+                // once (GROUPS-DISTRO-DESIGN.md §8.4).
+                if (!DistroAddresses.isDistro(appContext, destHash)) {
+                    RetichatBridge.appLinkOpen(routerHandle, destHash, "lxmf", "delivery")
+                }
 
                 val handle = RetichatBridge.messageCreate(
                     destHash = destHash,
-                    srcHash = selfDestHash,
+                    srcHash = signer.hash,
                     content = content,
                     method = RetichatBridge.DeliveryMethod.DIRECT,
-                    identityHandle = identityHandle,
+                    identityHandle = signer.identity,
                 )
                 if (handle != 0L) {
                     // Attach group metadata
@@ -1286,6 +1377,10 @@ class ChatRepository(
 
                     val sent = RetichatBridge.messageSendViaAppLinks(handle)
                     if (sent) {
+                        // The router accepted the first member envelope: the post left, so its sync is owed, once.
+                        if (postSync != null && postSyncOwed.compareAndSet(false, true)) {
+                            DistroOutboxRuntime.oweGroupSync(appContext, signer.hex, postSync)
+                        }
                         rememberDeliveryTarget(handle, DeliveryTargets.Target.GroupMember(groupMsgId, chat.id, memberHex))
                         // Poll for delivery proof per-member
                         pollGroupMemberDelivery(groupMsgId, chat.id, memberHex, handle)
@@ -1411,6 +1506,11 @@ class ChatRepository(
             if (groupId != null) {
                 val action = fields.group(GroupEntry.ACTION)
                 val here = groupStanding(groupId, srcHex).also { standing = it }
+                // GROUPS-DISTRO-DESIGN.md §6.3: the three first rules, on this path too.
+                DeliveryPolicy.firstRules(signature, srcHex, fields.group(GroupEntry.SENDER), here.selves, here.echoes)?.let { why ->
+                    Log.i(TAG, "onMessageReceived: DROPPED group ${action ?: "message"} for ${groupId.take(8)} from ${srcHex.take(8)}: $why")
+                    return@launch
+                }
                 val allowed = DeliveryPolicy.groupMessage(
                     action = action,
                     sourceAllowed = action == GroupChatManager.Action.INVITE && allowlisted(srcHex),
@@ -1432,13 +1532,16 @@ class ChatRepository(
 
             // 0xD1 always names the LXMF source, group messages and relayed
             // copies included (there it names the relayer). A hidden row:
-            // nobody becomes a contact by sending (ContactSql).
-            ensureContact(srcHex)
-            acceptMessageName(srcHex, nameField, unverifiedReason, timestamp)
-
+            // nobody becomes a contact by sending (ContactSql). Never for a
+            // self address (GROUPS-DISTRO-DESIGN.md §9.2).
             val group = standing
+            if (group == null || !group.isSelf(srcHex)) {
+                ensureContact(srcHex)
+                acceptMessageName(srcHex, nameField, unverifiedReason, timestamp)
+            }
+
             if (groupId != null && group != null) {
-                handleGroupMessage(msgId, srcHex, content, timestamp, fields, group, signature, senderKey, packed)
+                handleGroupMessage(msgId, srcHex, content, timestamp, fields, group, signature, senderKey, packed, viaDistro = false)
             } else {
                 handleDirectMessage(msgId, srcHash, srcHex, content, timestamp, fields)
             }
@@ -1530,12 +1633,471 @@ class ChatRepository(
                     id = msgId,
                     chatId = chatId,
                     senderHashHex = distroHex,
-                    content = content,
+                    // An attachment-only message copies an empty text: shown with the placeholder (§18.2 item 10).
+                    content = DistroCodec.copiedText(content),
                     timestamp = (timestamp * 1000).toLong(),
                     isOutbound = true,
                     state = RetichatBridge.MessageState.SENT,
                 )
             )
+        }
+    }
+
+    // ---- Groups through the distro (GROUPS-DISTRO-DESIGN.md §6, §11) ----
+
+    /** What became of a group message or group sync that reached this device through the distro. */
+    enum class DistroGroupOutcome {
+        /** Applied or stored: its seen key is recorded. */
+        KEPT,
+        /** Held until its group is joined here (§6.5): not recorded, so its replay is judged as a new arrival. */
+        HELD,
+        /** Dropped, with a log line: not recorded, so a later copy is judged again. */
+        DROPPED,
+    }
+
+    /**
+     * A group message (§6.1 step 2) from [srcHex] that reached this device
+     * through the distro D: [blob] as the fan-out carried it (kept if the
+     * message is held), [keys] the unwrap's group keys, [groupId] its well-formed
+     * id. The same admission as the direct path, with the packet's own source and
+     * signature verdict ([unverifiedReason]): the three first rules (§6.3), a
+     * relay request never acted on (§12.3), an invite only past the privacy
+     * filter and only listing D (an invite to D the filter drops puts its id in
+     * the filtered-invite set), then the group rule. What the rule drops only
+     * because the group is not joined here is held (§6.5). An admitted message
+     * makes the sender's name row and nothing of a DM (§6.4), then goes to the
+     * group handler with the LXMF hash as its id. Runs inline: the caller
+     * records the seen key from the outcome.
+     */
+    suspend fun onDistroGroupMessage(
+        blob: ByteArray,
+        keys: DistroGroupKeys,
+        groupId: String,
+        srcHex: String,
+        content: String,
+        timestamp: Double,
+        fieldsRaw: ByteArray?,
+        nameField: NameField,
+        unverifiedReason: Int,
+    ): DistroGroupOutcome = withContext(Dispatchers.IO) {
+        val hash = keys.hash ?: run {
+            Log.w(TAG, "distro group message for ${groupId.take(8)} from ${srcHex.take(8)} DROPPED: the unwrap gave no hash")
+            return@withContext DistroGroupOutcome.DROPPED
+        }
+        val distro = DistroManager.deliveryHashHex ?: run {
+            Log.w(TAG, "distro group message ${hash.take(12)} DROPPED: no distro loaded")
+            return@withContext DistroGroupOutcome.DROPPED
+        }
+        val fields = LxmfFields.decodeOrEmpty(fieldsRaw, onFailure = {
+            Log.w(TAG, "onDistroGroupMessage: fields from ${srcHex.take(8)} unreadable (${it::class.java.simpleName})")
+        })
+        val signature = unverifiedReason
+        val action = fields.group(GroupEntry.ACTION)
+        val what = "group ${action ?: "message"} ${hash.take(12)} for ${groupId.take(8)} from ${srcHex.take(8)} via the distro"
+        val here = groupStanding(groupId, srcHex)
+        DeliveryPolicy.firstRules(signature, srcHex, fields.group(GroupEntry.SENDER), here.selves, here.echoes)?.let { why ->
+            Log.i(TAG, "$what DROPPED: $why")
+            return@withContext DistroGroupOutcome.DROPPED
+        }
+        if (action == GroupChatManager.Action.RELAY_REQUEST) {
+            Log.i(TAG, "$what DROPPED: a relay request through the distro is never acted on, by any device of it (§12.3)")
+            return@withContext DistroGroupOutcome.DROPPED
+        }
+        var sourceAllowed = false
+        if (action == GroupChatManager.Action.INVITE) {
+            val listed = DeliveryPolicy.members(fields.group(GroupEntry.MEMBERS))
+            if (here.chat == null && distro !in listed) {
+                Log.i(TAG, "$what DROPPED: the invite does not list the distro ${distro.take(8)} (§9.3)")
+                return@withContext DistroGroupOutcome.DROPPED
+            }
+            sourceAllowed = allowlisted(srcHex)
+            if (!sourceAllowed) {
+                UserPreferences.filterInvite(appContext, groupId)
+                Log.i(TAG, "$what DROPPED by the privacy filter: its id joins the filtered-invite set, and its group's traffic is not held (§6.5)")
+                return@withContext DistroGroupOutcome.DROPPED
+            }
+        }
+        val namesOther = DeliveryPolicy.namesOther(fields.group(GroupEntry.SENDER), srcHex)
+        val allowed = DeliveryPolicy.groupMessage(
+            action = action,
+            sourceAllowed = sourceAllowed,
+            held = here.held,
+            sourceStatus = here.sourceStatus,
+            namesOther = namesOther,
+            closed = here.closed,
+            signature = signature,
+            sourceIsCreator = here.sourceIsCreator,
+        )
+        if (!allowed) {
+            val keptIfJoined = DeliveryPolicy.groupMessage(
+                action, false, DeliveryPolicy.Held.JOINED, here.sourceStatus, namesOther, false, signature, here.sourceIsCreator,
+            )
+            val holdable = DeliveryPolicy.holdable(
+                action, here.held, here.closed, UserPreferences.isInviteFiltered(appContext, groupId),
+                signature, here.isSelf(srcHex), keptIfJoined,
+            )
+            if (holdable) {
+                val held = holdArrival(blob, groupId, srcHex, hash, signature == Signature.VALIDATED, isPostSync = false, distro)
+                return@withContext if (held) DistroGroupOutcome.HELD else DistroGroupOutcome.DROPPED
+            }
+            Log.i(TAG, "$what DROPPED (group ${here.held}, source ${here.sourceStatus ?: "not listed"}, closed=${here.closed}, signature=$signature)")
+            return@withContext DistroGroupOutcome.DROPPED
+        }
+        // §6.4: the sender's name row, as the direct path makes it; nothing of a DM.
+        if (!here.isSelf(srcHex)) {
+            ensureContact(srcHex)
+            acceptMessageName(srcHex, nameField, unverifiedReason, timestamp)
+        }
+        handleGroupMessage(hash, srcHex, content, timestamp, fields, here, signature, keys.senderKey, keys.packed, viaDistro = true)
+        DistroGroupOutcome.KEPT
+    }
+
+    /**
+     * Hold [blob] for group [groupId] (§6.5) when the bounds let it: a copy
+     * already held is held once, a validated copy replaces unverified ones, and
+     * every eviction and refusal is said with the group, the source and the
+     * bound. True when it is held (now or already).
+     */
+    private suspend fun holdArrival(
+        blob: ByteArray, groupId: String, srcHex: String, hash: String, validated: Boolean, isPostSync: Boolean, distro: String,
+    ): Boolean {
+        val heads = groupStatusDao.arrivalHeads()
+        val pending = HashMap<String, Boolean>()
+        suspend fun pendingHere(id: String): Boolean = pending.getOrPut(id) { chatDao.findByGroupId(id)?.isGroup == true }
+        (heads.map { it.groupId } + groupId).distinct().forEach { pendingHere(it) }
+        val digest = java.security.MessageDigest.getInstance("SHA-256").digest(blob).toHex()
+        val what = "${if (isPostSync) "post sync" else "group message"} ${hash.take(12)} for ${groupId.take(8)} from ${srcHex.take(8)}"
+        val candidate = HeldArrivals.Candidate(groupId, srcHex, hash, digest, validated, isPostSync, blob.size)
+        return when (val decision = HeldArrivals.decide(heads, candidate, { pending[it] == true }, distro)) {
+            is HeldArrivals.Decision.Refuse -> {
+                Log.w(TAG, "$what DROPPED: not held (${decision.reason}) (§6.5)")
+                false
+            }
+            is HeldArrivals.Decision.Duplicate -> {
+                Log.i(TAG, "$what held already: ${decision.reason}")
+                true
+            }
+            is HeldArrivals.Decision.Hold -> {
+                val gone = decision.replaced.map { it.rowId } + decision.evicted.map { it.first.rowId }
+                if (gone.isNotEmpty()) groupStatusDao.dropArrivals(gone)
+                decision.replaced.forEach { Log.i(TAG, "held ${it.msgHash.take(12)} for ${it.groupId.take(8)} from ${it.srcHex.take(8)} replaced by a copy whose signature validated") }
+                decision.evicted.forEach { (h, bound) -> Log.w(TAG, "held ${h.msgHash.take(12)} for ${h.groupId.take(8)} from ${h.srcHex.take(8)} EVICTED: $bound (§6.5)") }
+                groupStatusDao.holdArrival(
+                    GroupArrivalEntity(
+                        groupId = groupId, srcHex = srcHex, msgHash = hash, blobDigest = digest,
+                        validated = validated, distro = distro, isPostSync = isPostSync, blob = blob,
+                    )
+                )
+                Log.i(TAG, "$what HELD until the group is joined here (${if (pending[groupId] == true) "pending" else "not held"} here, §6.5)")
+                true
+            }
+        }
+    }
+
+    /**
+     * The held arrivals of [groupId], in arrival order, taken out of the store
+     * to be fed to the distro path again now that the group is joined here
+     * (§6.5): ordering, not a retry. Only those for the distro held now; any
+     * other is dropped, said.
+     */
+    suspend fun takeHeldArrivals(groupId: String): List<ByteArray> = withContext(Dispatchers.IO) {
+        val rows = groupStatusDao.arrivalsFor(groupId)
+        if (rows.isEmpty()) return@withContext emptyList()
+        groupStatusDao.dropArrivalsFor(groupId)
+        val distro = DistroManager.deliveryHashHex
+        val (mine, other) = rows.partition { it.distro == distro }
+        if (other.isNotEmpty()) Log.w(TAG, "${other.size} held arrival(s) for ${groupId.take(8)} came through another distro: dropped")
+        Log.i(TAG, "replaying ${mine.size} held arrival(s) for ${groupId.take(8)} in arrival order (§6.5)")
+        mine.map { it.blob }
+    }
+
+    /** Forget the held arrivals of [groupId] ([why]: it was closed or deleted here), with one line giving the count (§6.5). */
+    private suspend fun forgetHeldArrivals(groupId: String, why: String) {
+        val n = groupStatusDao.dropArrivalsFor(groupId)
+        if (n > 0) Log.i(TAG, "forgot $n held arrival(s) for ${groupId.take(8)}: $why")
+    }
+
+    /**
+     * The distro this device holds changed (generated, imported or forgotten):
+     * the held arrivals that came through another distro are forgotten, with one
+     * line giving the count (§6.5), and the known siblings of a distro given up
+     * are dropped unless a group here still has it as its own address (§8.7,
+     * §9.1). Group syncs already owed stay owed (§10.5).
+     */
+    suspend fun onDistroChanged(heldDistro: String?) = withContext(Dispatchers.IO) {
+        val dropped = if (heldDistro == null) groupStatusDao.dropAllArrivals() else groupStatusDao.dropArrivalsNotFor(heldDistro)
+        if (dropped > 0) Log.i(TAG, "forgot $dropped held arrival(s) that came through a distro this device no longer holds (§6.5)")
+        for (d in UserPreferences.distrosWithSiblings(appContext)) {
+            if (d == heldDistro) continue
+            if (chatDao.countWithOwnMember(d) > 0) continue
+            UserPreferences.forgetDistroSiblings(appContext, d)
+            Log.i(TAG, "forgot the known siblings of ${d.take(8)}: given up, and no group here has it as its own address (§9.1)")
+        }
+    }
+
+    /**
+     * A group sync G (§10, §11) from [srcHex] through the distro, already past
+     * rule 0 (its `gsync:` key not seen): rules 1-4 ([DistroGroupSync.disposition]),
+     * then rule 5 and the apply table of §11.2, then `left`. Applying sends
+     * nothing to the members and owes no G, so nothing loops; it asks nothing of
+     * the user. A `post` G for a group pending or not held here is held (§6.5).
+     * [blob] is kept for that; [replay] is called with a group id whose held
+     * arrivals must be fed again (the group is joined here now).
+     */
+    suspend fun onDistroGroupSync(
+        blob: ByteArray,
+        hash: String,
+        srcHex: String,
+        signatureValidated: Boolean,
+        read: com.newendian.retichat.service.GroupSyncRead,
+        replay: (String) -> Unit,
+    ): DistroGroupOutcome = withContext(Dispatchers.IO) {
+        val distro = DistroManager.deliveryHashHex
+        val device = selfHex()
+        val label = "group sync ${hash.take(12)}"
+        when (val disposition = DistroGroupSync.disposition(srcHex, distro, signatureValidated, read, device)) {
+            is DistroGroupSync.Disposition.NotFromDistro -> {
+                Log.w(TAG, "$label IGNORED: its source ${srcHex.take(8)} is not the distro ${distro?.take(8)} (§11.1 rule 1)")
+                DistroGroupOutcome.DROPPED
+            }
+            DistroGroupSync.Disposition.Forged -> {
+                Log.w(TAG, "$label DROPPED: its signature is not the distro's (§11.1 rule 2)")
+                DistroGroupOutcome.DROPPED
+            }
+            DistroGroupSync.Disposition.OwnEcho -> DistroGroupOutcome.KEPT
+            is DistroGroupSync.Disposition.BadForm -> {
+                learnSibling(distro!!, disposition.sibling, "a group sync")
+                Log.w(TAG, "$label DROPPED: ${disposition.problem} (§11.1 rule 4)")
+                DistroGroupOutcome.DROPPED
+            }
+            is DistroGroupSync.Disposition.Apply -> {
+                learnSibling(distro!!, disposition.sibling, "a group sync")
+                applyGroupSync(blob, hash, disposition.sync, distro, replay)
+            }
+        }
+    }
+
+    /** [sibling] sent a D-signed sync for [distro] ([what]): it is a known sibling from now on (§9.1). */
+    fun learnSibling(distro: String, sibling: String?, what: String) {
+        if (sibling == null) return
+        if (UserPreferences.learnDistroSibling(appContext, distro, sibling)) {
+            Log.i(TAG, "learned sibling ${sibling.take(8)} of the distro ${distro.take(8)} from $what (§9.1)")
+        }
+    }
+
+    /** The group [groupId] as this device holds it, for the apply table (§11.2). */
+    private suspend fun syncLocal(groupId: String, distro: String): Pair<DistroGroupSync.Local, ChatEntity?> {
+        if (UserPreferences.isGroupClosed(appContext, groupId)) return DistroGroupSync.Local.Closed to null
+        val chat = chatDao.findByGroupId(groupId)?.takeIf { it.isGroup } ?: return DistroGroupSync.Local.NotHeld to null
+        val members = messageDao.groupMembersList(chat.id)
+        val own = GroupSelves.ownMember(chat.ownMember, selfHex())
+        return DistroGroupSync.Local.Held(
+            ownIsD = own == distro,
+            joined = GroupMemberStatuses.held(true, members, own) == DeliveryPolicy.Held.JOINED,
+            creator = chat.creatorHex,
+            members = members.map { it.destHashHex }.toSet(),
+            inviter = chat.creatorHex,
+        ) to chat
+    }
+
+    /** §11.1 rules 5-6 and §11.2 for [sync], which passed rules 0-4. */
+    private suspend fun applyGroupSync(
+        blob: ByteArray, hash: String, sync: GroupSync, distro: String, replay: (String) -> Unit,
+    ): DistroGroupOutcome {
+        val label = "${sync.label} ${hash.take(12)}"
+        val (local, chat) = syncLocal(sync.groupId, distro)
+        val leftNow = mutableListOf<String>()
+        val outcome = when (val effect = DistroGroupSync.effect(sync, local, distro)) {
+            is DistroGroupSync.Effect.HoldFromG -> {
+                if (effect.discarded && chat != null) {
+                    Log.w(TAG, "$label: the pending invite for ${sync.groupId.take(8)} from ${chat.creatorHex?.take(8)} is discarded, nothing sent: the user's own sync outranks it (§11.2)")
+                    deleteChatLocal(chat)
+                }
+                holdGroupFromSync(sync, effect.creator, distro)
+                replay(sync.groupId)
+                Log.i(TAG, "$label APPLIED: the group is held from it, joined, as ${distro.take(8)}, creator ${effect.creator.take(8)}")
+                DistroGroupOutcome.KEPT
+            }
+            DistroGroupSync.Effect.JoinPending -> {
+                joinFromSync(chat!!, distro)
+                replay(sync.groupId)
+                Log.i(TAG, "$label APPLIED: the pending invite it describes is joined, nothing sent")
+                DistroGroupOutcome.KEPT
+            }
+            DistroGroupSync.Effect.RecordClosed -> {
+                UserPreferences.closeGroup(appContext, sync.groupId)
+                forgetHeldArrivals(sync.groupId, "a leave sync recorded it closed")
+                leftNow += sync.groupId
+                Log.i(TAG, "$label APPLIED: ${sync.groupId.take(8)} is not held here and is recorded closed")
+                DistroGroupOutcome.KEPT
+            }
+            DistroGroupSync.Effect.Close -> {
+                closeFromSync(chat!!, "a leave sync")
+                leftNow += sync.groupId
+                Log.i(TAG, "$label APPLIED: the group is closed and removed here, nothing sent")
+                DistroGroupOutcome.KEPT
+            }
+            DistroGroupSync.Effect.StorePost -> {
+                storePostFromSync(chat!!, sync, hash, distro)
+                Log.i(TAG, "$label APPLIED: stored as the user's own post, SENT")
+                DistroGroupOutcome.KEPT
+            }
+            DistroGroupSync.Effect.HoldPost -> {
+                if (UserPreferences.isInviteFiltered(appContext, sync.groupId)) {
+                    Log.i(TAG, "$label DROPPED: its group is in the filtered-invite set, whose traffic is never held (§6.5)")
+                    DistroGroupOutcome.DROPPED
+                } else if (holdArrival(blob, sync.groupId, distro, hash, validated = true, isPostSync = true, distro)) {
+                    DistroGroupOutcome.HELD
+                } else DistroGroupOutcome.DROPPED
+            }
+            DistroGroupSync.Effect.DropPost -> {
+                Log.i(TAG, "$label DROPPED: the group is closed here")
+                DistroGroupOutcome.DROPPED
+            }
+            DistroGroupSync.Effect.Nothing -> {
+                if (local == DistroGroupSync.Local.Closed && sync.op == DistroGroupSync.LEAVE) leftNow += sync.groupId
+                Log.i(TAG, "$label: nothing to change (${if (local == DistroGroupSync.Local.Closed) "closed here, final" else "already held"})")
+                DistroGroupOutcome.KEPT
+            }
+            DistroGroupSync.Effect.IgnoreOwnAddress -> {
+                Log.i(TAG, "$label IGNORED: the group is held here as the device (held at upgrade), not as the distro (§11.1 rule 5)")
+                DistroGroupOutcome.KEPT
+            }
+        }
+        // §11.2: `left` after the op, on every G that passed rules 0-4 (rule 5's included).
+        val changed = mutableListOf<String>()
+        for (id in sync.left) {
+            if (id == sync.groupId) continue
+            val (l, c) = syncLocal(id, distro)
+            when (DistroGroupSync.leftEffect(l)) {
+                DistroGroupSync.LeftEffect.CLOSE -> { closeFromSync(c!!, "the left list of ${sync.label}"); changed += id; leftNow += id }
+                DistroGroupSync.LeftEffect.RECORD_CLOSED -> {
+                    UserPreferences.closeGroup(appContext, id)
+                    forgetHeldArrivals(id, "the left list of a group sync recorded it closed")
+                    changed += id; leftNow += id
+                }
+                DistroGroupSync.LeftEffect.ALREADY_CLOSED -> leftNow += id
+                DistroGroupSync.LeftEffect.IGNORE -> Unit
+            }
+        }
+        if (changed.isNotEmpty()) Log.i(TAG, "$label: its left list closed ${changed.joinToString { it.take(8) }} here")
+        UserPreferences.recordGroupsLeft(appContext, distro, leftNow)
+        return outcome
+    }
+
+    /**
+     * "Hold the group from G" (§11.2): list = `members` (verbatim), the creator,
+     * own address D, joined. The creator and D are accepted, every other member
+     * invited; the keys are bound and remembered as an invite chunk's; every
+     * member but a self address passes the privacy filter by association; the
+     * id leaves the filtered-invite set.
+     */
+    private suspend fun holdGroupFromSync(sync: GroupSync, creator: String, distro: String) {
+        val groupId = sync.groupId
+        val listed = DeliveryPolicy.members(sync.members)
+        val chatId = "group_${groupId.take(16)}"
+        val chat = ChatEntity(
+            id = chatId,
+            isGroup = true,
+            name = sync.name ?: "Group",
+            memberHashes = sync.members.orEmpty(),
+            groupIdHex = groupId,
+            creatorHex = creator,
+            ownMember = distro,
+        )
+        chatDao.upsert(chat)
+        val self = GroupSelves.of(distro, listed, selfHex(), distro, ::siblingsOf)
+        listed.forEach { hex ->
+            messageDao.upsertGroupMember(
+                GroupMemberEntity(
+                    chatId = chatId,
+                    destHashHex = hex,
+                    inviteStatus = if (hex == creator || hex == distro) MemberStatus.ACCEPTED else MemberStatus.INVITED,
+                )
+            )
+        }
+        rememberKeyEntries(sync.keys.orEmpty(), listed, self)
+        listed.filter { !self.isSelf(it) }.forEach { ensureAllowlistedContact(it) }
+        UserPreferences.unfilterInvite(appContext, groupId)
+        groupStatuses.decideHeld()
+        messageDao.upsert(
+            MessageEntity(
+                id = "joined_${groupId.take(16)}",
+                chatId = chatId,
+                senderHashHex = distro,
+                content = if (sync.op == DistroGroupSync.CREATE) "You created \"${chat.name}\"" else "You joined \"${chat.name}\"",
+                timestamp = sync.atMs,
+                isOutbound = true,
+                state = RetichatBridge.MessageState.DELIVERED,
+            )
+        )
+    }
+
+    /** An accept G that describes the pending invite held here: joined as the user's own accept would make it, without sending (§11.2). */
+    private suspend fun joinFromSync(chat: ChatEntity, distro: String) {
+        val members = messageDao.groupMembersList(chat.id)
+        val self = groupSelf(chat, members)
+        groupStatuses.decideHeld()
+        messageDao.setGroupMemberStatus(chat.id, distro, MemberStatus.ACCEPTED)
+        members.map { it.destHashHex }.distinct().filter { !self.isSelf(it) }.forEach { ensureAllowlistedContact(it) }
+        chat.groupIdHex?.let { UserPreferences.unfilterInvite(appContext, it) }
+        messageDao.upsert(
+            MessageEntity(
+                id = "joined_${chat.groupIdHex.orEmpty().take(16)}",
+                chatId = chat.id,
+                senderHashHex = distro,
+                content = "You joined \"${chat.name}\"",
+                timestamp = System.currentTimeMillis(),
+                isOutbound = true,
+                state = RetichatBridge.MessageState.DELIVERED,
+            )
+        )
+    }
+
+    /** Closed as the local decline or leave closes it, without sending and without owing a G (§11.2): recorded closed, the conversation removed. */
+    private suspend fun closeFromSync(chat: ChatEntity, why: String) {
+        val groupId = chat.groupIdHex ?: return deleteChatLocal(chat)
+        UserPreferences.closeGroup(appContext, groupId)
+        forgetHeldArrivals(groupId, "$why closed it")
+        deleteChatLocal(chat)
+    }
+
+    /** A post G in a joined group: the user's own outgoing post, sender D, SENT, at `at_ms`, id the G's hash, no notification (§11.2). */
+    private suspend fun storePostFromSync(chat: ChatEntity, sync: GroupSync, hash: String, distro: String) {
+        if (messageDao.findById(hash) != null) return
+        messageDao.upsert(
+            MessageEntity(
+                id = hash,
+                chatId = chat.id,
+                senderHashHex = distro,
+                content = DistroCodec.copiedText(sync.text.orEmpty()),
+                timestamp = sync.atMs,
+                isOutbound = true,
+                state = RetichatBridge.MessageState.SENT,
+            )
+        )
+    }
+
+    /**
+     * Keep each GROUP_MEMBER_KEYS entry of [entries] that binds as an invite
+     * chunk's does (the derived `lxmf.delivery` hash is the claimed one, the
+     * claimed hash listed in [listed]), never a self address's (§9.2).
+     */
+    private suspend fun rememberKeyEntries(entries: List<String>, listed: List<String>, self: GroupSelf) {
+        entries.forEach { entry ->
+            val parts = entry.split(":", limit = 2)
+            if (parts.size != 2) return@forEach
+            val memberHash = DeliveryPolicy.hash(parts[0]) ?: return@forEach
+            if (memberHash !in listed || self.isSelf(memberHash)) return@forEach
+            val hashBytes = memberHash.hexToBytes() ?: return@forEach
+            val publicKey = runCatching { java.util.Base64.getDecoder().decode(parts[1]) }.getOrNull()
+                ?.takeIf { it.size == 64 } ?: return@forEach
+            if (!RetichatBridge.identityRememberLxmfDelivery(hashBytes, publicKey)) {
+                Log.w(TAG, "Ignored mismatched group member key for ${memberHash.take(8)}")
+                return@forEach
+            }
+            ensureContact(memberHash)
+            contactDao.setPublicKey(memberHash, publicKey.toHex())
         }
     }
 
@@ -1556,19 +2118,80 @@ class ChatRepository(
         val sourceStatus: String?,
         val closed: Boolean,
         val sourceIsCreator: Boolean,
-    )
+        /** Who the user is in the group held here (§9.1); null for a group not held here. */
+        val self: GroupSelf?,
+        /** The self addresses the first rules ask about: the group's, or for a group not held here the device's and its distro's (§6.3). */
+        val selves: Set<String>,
+        /** A group message from one of these is the user's own echo: the distro held now and the group's own distro (§6.3). */
+        val echoes: Set<String>,
+    ) {
+        fun isSelf(hex: String): Boolean = hex in selves
+    }
 
+    /**
+     * [GroupStanding] of group [groupId] for a message from [srcHex]. Pending or
+     * joined is read from the group's own address's row alone
+     * (GROUPS-DISTRO-DESIGN.md §9.2): in a list naming both the device and D,
+     * the device row stays invited and the group is joined once D's is.
+     */
     private suspend fun groupStanding(groupId: String, srcHex: String): GroupStanding {
         val chat = chatDao.findByGroupId(groupId)?.takeIf { it.isGroup }
         val members = chat?.let { messageDao.groupMembersList(it.id) } ?: emptyList()
+        val self = chat?.let { groupSelf(it, members) }
+        val heldD = DistroManager.deliveryHashHex
         return GroupStanding(
             chat = chat,
             members = members,
-            held = GroupMemberStatuses.held(chat != null, members, selfHex()),
+            held = GroupMemberStatuses.held(chat != null, members, self?.own ?: selfHex()),
             sourceStatus = GroupMemberStatuses.statusOf(members, srcHex),
             closed = UserPreferences.isGroupClosed(appContext, groupId),
             sourceIsCreator = chat?.creatorHex != null && chat.creatorHex == srcHex,
+            self = self,
+            selves = self?.all ?: GroupSelves.unheld(selfHex(), heldD, ::siblingsOf),
+            echoes = setOfNotNull(heldD, self?.distro),
         )
+    }
+
+    // ---- Who the user is, and who signs (GROUPS-DISTRO-DESIGN.md §8.1, §9.1) ----
+
+    private fun siblingsOf(distroHex: String): Set<String> = UserPreferences.distroSiblings(appContext, distroHex)
+
+    /** Who the user is in [chat]'s group: its own address and every self address (§9.1). */
+    private suspend fun groupSelf(chat: ChatEntity, members: List<GroupMemberEntity>? = null): GroupSelf {
+        val listed = (members ?: messageDao.groupMembersList(chat.id)).map { it.destHashHex }
+        return GroupSelves.of(chat.ownMember, listed, selfHex(), DistroManager.deliveryHashHex, ::siblingsOf)
+    }
+
+    /** A self address of this device in any group: the device, the distro held now, or a known sibling of it. */
+    private fun isSelfAnywhere(hex: String): Boolean {
+        if (hex == selfHex()) return true
+        val d = DistroManager.deliveryHashHex ?: return false
+        return hex == d || hex in siblingsOf(d)
+    }
+
+    /** What [groupSigner] resolves to for [chat] now, for the UI and the log (§8.1, §8.7). */
+    fun signerKind(chat: ChatEntity): GroupSelves.Signer =
+        GroupSelves.signer(chat.ownMember, selfHex(), DistroManager.signing()?.first?.deliveryHashHex, DistroManager.isStored(appContext))
+
+    /**
+     * `groupSigner(ownMember)` (GROUPS-DISTRO-DESIGN.md §8.1): who every send
+     * in [chat]'s group goes as, resolved now, never captured at configure. The
+     * device for a group whose own address is the device; D, from the strict
+     * helper and only when its `lxmf.delivery` hash is the group's own address,
+     * for a D-group; otherwise null, and the action is refused (§8.7). Never the
+     * fallback `DistroManager.sendingIdentity`, which ignores the group.
+     */
+    private fun groupSigner(chat: ChatEntity): GroupSigner? = when (signerKind(chat)) {
+        GroupSelves.Signer.DEVICE ->
+            if (identityHandle == 0L || selfDestHash.isEmpty()) null
+            else GroupSigner(selfHex(), selfDestHash, identityHandle, RetichatBridge.identityPublicKey(identityHandle))
+        GroupSelves.Signer.DISTRO -> DistroManager.signing()?.let { (state, handle) ->
+            if (state.deliveryHashHex != chat.ownMember) null
+            else DistroCodec.hexToBytes(state.deliveryHashHex)?.let { hash ->
+                GroupSigner(state.deliveryHashHex, hash, handle, DistroCodec.hexToBytes(state.publicKeyHex))
+            }
+        }
+        GroupSelves.Signer.NOT_LOADED, GroupSelves.Signer.FORMER -> null
     }
 
     /**
@@ -1588,6 +2211,7 @@ class ChatRepository(
         signature: Int,
         senderKey: ByteArray?,
         packed: ByteArray?,
+        viaDistro: Boolean,
     ) {
         val groupId = fields.group(GroupEntry.ID) ?: return
         val groupAction = fields.group(GroupEntry.ACTION)
@@ -1599,7 +2223,7 @@ class ChatRepository(
         groupStatuses.onKept(srcHex, groupAction, signature, senderKey)
 
         if (groupAction == GroupChatManager.Action.INVITE) {
-            handleGroupInvite(srcHex, groupId, timestamp, fields, standing)
+            handleGroupInvite(srcHex, groupId, timestamp, fields, standing, viaDistro)
             return
         }
         val chat = standing.chat ?: return
@@ -1642,9 +2266,14 @@ class ChatRepository(
                     ?.split(",")?.mapNotNull { DeliveryPolicy.hash(it) } ?: emptyList()
                 val acceptedMembers = GroupMemberStatuses.acceptedMemberHexes(
                     members = standing.members,
-                    selfHex = selfHex(),
-                )
+                    selfHex = standing.self?.own ?: selfHex(),
+                ).filter { !standing.isSelf(it) }
+                val signer = groupSigner(chat) ?: run {
+                    Log.w(TAG, "relay_req for ${chat.id}: no signer for its own address (${signerKind(chat)}, §8.7) — not relayed")
+                    return
+                }
                 groupChatManager?.performRelay(
+                    signer    = signer,
                     groupId   = groupId,
                     groupName = chat.name,
                     content   = content,
@@ -1660,6 +2289,32 @@ class ChatRepository(
             }
 
             null -> {
+                // GROUPS-DISTRO-DESIGN.md §9.2: a post whose packet source is a
+                // known sibling (an older device of the user acting as its listed
+                // device entry) is the user's own: stored as an outgoing post,
+                // SENT, no notification, when its signature validated; otherwise
+                // it is not the user's to show, and is dropped.
+                if (standing.isSelf(srcHex)) {
+                    if (signature != Signature.VALIDATED) {
+                        Log.i(TAG, "group post ${msgId.take(12)} for ${chat.id} from the self address ${srcHex.take(8)} DROPPED: its signature did not validate")
+                        return
+                    }
+                    if (messageDao.findById(msgId) != null) return
+                    messageDao.upsert(
+                        MessageEntity(
+                            id = msgId,
+                            chatId = chat.id,
+                            senderHashHex = srcHex,
+                            content = content,
+                            timestamp = (timestamp * 1000).toLong(),
+                            isOutbound = true,
+                            state = RetichatBridge.MessageState.SENT,
+                        )
+                    )
+                    saveInboundAttachments(msgId, fields)
+                    Log.i(TAG, "group post ${msgId.take(12)} for ${chat.id} from the user's own device ${srcHex.take(8)}: stored as the user's own, SENT")
+                    return
+                }
                 // A plain post, kept for a group held here whoever sent it. It
                 // is shown as its GROUP_SENDER's only when a current member of
                 // a joined group relays a listed member's post; anyone else's
@@ -1723,6 +2378,14 @@ class ChatRepository(
      * membership changes for a group"): another invite brings keys only. The
      * invite's source is recorded as the group's creator, once, with the
      * group: a `status` counts only from it.
+     *
+     * GROUPS-DISTRO-DESIGN.md §8.1, §9.3: the user's own entry is the group's
+     * own address, which the list must name: the distro held now when it is
+     * listed (a list naming both the device and D gives D), else the device; an
+     * invite naming neither is not for this user and is dropped. The user is
+     * never added to a list that does not name them. Through the distro
+     * ([viaDistro]) the invite must list D. The list is kept verbatim (a group
+     * sync carries it as the invite did), and no key of a self address is kept.
      */
     private suspend fun handleGroupInvite(
         srcHex: String,
@@ -1730,22 +2393,37 @@ class ChatRepository(
         timestamp: Double,
         fields: LxmfFields,
         standing: GroupStanding,
+        viaDistro: Boolean,
     ) {
-        val self = selfHex()
         if (standing.chat == null && fields.group(GroupEntry.MEMBERS) == null) {
             Log.w(TAG, "invite for ${groupId.take(8)} from ${srcHex.take(8)} lists no members: ignored")
             return
         }
-        val listed = DeliveryPolicy.members(fields.group(GroupEntry.MEMBERS))
+        val membersCsv = fields.group(GroupEntry.MEMBERS).orEmpty()
+        val listed = DeliveryPolicy.members(membersCsv)
+        val heldD = DistroManager.deliveryHashHex
+        // The own address of a new group (§8.1); null: the invite is not for this user (§9.3).
+        val own = if (standing.chat != null) null else GroupSelves.ownForInvite(listed, selfHex(), heldD)
+        if (standing.chat == null) {
+            if (own == null) {
+                Log.i(TAG, "invite for ${groupId.take(8)} from ${srcHex.take(8)} DROPPED: its list names neither this device nor the distro held here (§9.3)")
+                return
+            }
+            if (viaDistro && own != heldD) {
+                Log.i(TAG, "invite for ${groupId.take(8)} from ${srcHex.take(8)} through the distro DROPPED: its list does not name the distro (§6.3)")
+                return
+            }
+        }
         // Whose keys this invite may bring: the held list, or for a new group
         // the list it gives (with its inviter).
         val members = if (standing.chat != null) standing.members.map { it.destHashHex }.distinct()
                       else (listed + srcHex).distinct()
+        val self = standing.self ?: GroupSelves.of(own, members, selfHex(), heldD, ::siblingsOf)
         fields.group(GroupEntry.MEMBER_KEYS)?.split(",")?.forEach { entry ->
             val parts = entry.split(":", limit = 2)
             if (parts.size != 2) return@forEach
             val memberHash = DeliveryPolicy.hash(parts[0]) ?: return@forEach
-            if (memberHash !in members || memberHash == self) return@forEach
+            if (memberHash !in members || self.isSelf(memberHash)) return@forEach
             val hashBytes = memberHash.hexToBytes() ?: return@forEach
             val publicKey = runCatching { Base64.decode(parts[1], Base64.DEFAULT) }.getOrNull()
                 ?.takeIf { it.size == 64 } ?: return@forEach
@@ -1772,17 +2450,20 @@ class ChatRepository(
 
         // A new group, PENDING (the user's own row invited) until the user
         // accepts or declines it. The inviter started it, so it is accepted.
+        // The user's own row is the list's: never added (§9.3).
         val name = fields.group(GroupEntry.NAME) ?: "Group"
         val chatId = "group_${groupId.take(16)}"
-        val all = (listed + srcHex + self).distinct()
+        val all = (listed + srcHex).distinct()
         chatDao.upsert(
             ChatEntity(
                 id = chatId,
                 isGroup = true,
                 name = name,
-                memberHashes = all.joinToString(","),
+                // The GROUP_MEMBERS csv verbatim: an accept sync carries it as the invite did (§10.2).
+                memberHashes = membersCsv,
                 groupIdHex = groupId,
                 creatorHex = srcHex,
+                ownMember = own,
             )
         )
         all.forEach { memberHex ->
@@ -1794,7 +2475,7 @@ class ChatRepository(
                 )
             )
         }
-        Log.i(TAG, "Created PENDING group from invite: chatId=$chatId, groupId=$groupId")
+        Log.i(TAG, "Created PENDING group from invite: chatId=$chatId, groupId=$groupId, own address ${own?.take(8)}${if (viaDistro) " (through the distro)" else ""}")
 
         // A system invite line (the inviter's hash; the name resolved when shown).
         messageDao.upsert(
@@ -1826,10 +2507,26 @@ class ChatRepository(
      * unaccepted invite (self member's inviteStatus is invited).
      */
     fun isPendingGroupInvite(chatId: String): Flow<Boolean> {
-        val selfHex = selfDestHash.toHex()
-        return messageDao.groupMembers(chatId).map { members ->
-            GroupMemberStatuses.isPendingInvite(members, selfHex)
+        // The own address's row alone (GROUPS-DISTRO-DESIGN.md §9.2): in a list
+        // naming both the device and D, the device row stays invited for ever.
+        return chatDao.chatByIdFlow(chatId).combine(messageDao.groupMembers(chatId)) { chat, members ->
+            GroupMemberStatuses.isPendingInvite(members, GroupSelves.ownMember(chat?.ownMember, selfHex()))
         }
+    }
+
+    /**
+     * Who acts in [chat]'s group from this device, for the UI (§8.7, §13):
+     * whether it is a D-group, whether its own address can be signed for now,
+     * its own address, and every self address (shown as "You").
+     */
+    suspend fun groupActing(chat: ChatEntity): GroupActing {
+        val self = groupSelf(chat)
+        return GroupActing(
+            distroGroup = GroupSelves.isDistroGroup(chat.ownMember, selfHex()),
+            signer = signerKind(chat),
+            own = self.own,
+            selves = self.all,
+        )
     }
 
     /**
@@ -1840,13 +2537,22 @@ class ChatRepository(
         val chat = chatDao.findById(chatId) ?: return
         if (!chat.isGroup) return
         val groupId = chat.groupIdHex ?: return
-        val selfHex = selfDestHash.toHex()
+        // As the group's own address, resolved now; nothing when it cannot be signed for (§8.1, §8.7).
+        val signer = groupSigner(chat) ?: run {
+            Log.w(TAG, "acceptGroupInvite: ${chat.id} refused: its own address ${chat.ownMember?.take(8)} has no signer on this device (${signerKind(chat)}, §8.7)")
+            return
+        }
+        val selfHex = signer.hex
+        val memberRows = messageDao.groupMembersList(chatId)
+        val self = groupSelf(chat, memberRows)
 
-        val allMembers = messageDao.groupMembersList(chatId)
+        val allMembers = memberRows
             .map { it.destHashHex }
             .filter { it.isNotEmpty() }
             .distinct()
-        val missingKeys = allMembers.filter { it != selfHex }
+        // Every self address is skipped (§9.4): D is never a contact, so a
+        // D-group would otherwise defer for ever.
+        val missingKeys = allMembers.filter { !self.isSelf(it) }
             .filter { contactDao.findByHash(it)?.publicKeyHex?.length != 128 }
         if (missingKeys.isNotEmpty()) {
             Log.i(TAG, "acceptGroupInvite deferred: still receiving ${missingKeys.size} member key(s)")
@@ -1858,10 +2564,36 @@ class ChatRepository(
         groupStatuses.decideHeld()
         messageDao.setGroupMemberStatus(chatId, selfHex, MemberStatus.ACCEPTED)
         // Every member passes the privacy filter (iOS acceptGroupInvite): from
-        // the user's accept, not from the invite's arrival.
-        allMembers.filter { it != selfHex }.forEach { ensureAllowlistedContact(it) }
-        groupChatManager?.sendAccept(groupId, allMembers)
+        // the user's accept, not from the invite's arrival. No self address does.
+        val others = allMembers.filter { !self.isSelf(it) }
+        others.forEach { ensureAllowlistedContact(it) }
+        groupChatManager?.sendAccept(signer, groupId, others)
             ?: Log.w(TAG, "acceptGroupInvite: stack offline, accept will not be broadcast")
+        // §10.6: in a D-group, one `accept` group sync, in the same step.
+        if (GroupSelves.isDistroGroup(chat.ownMember, selfHex())) {
+            // One entry per listed member whose key this device holds (§17.14 `keys`), D's own included.
+            val keys = DeliveryPolicy.members(chat.memberHashes).mapNotNull { hex ->
+                val key = if (hex == signer.hex) signer.publicKey
+                          else if (self.isSelf(hex)) null
+                          else contactDao.findByHash(hex)?.publicKeyHex?.let { DistroCodec.hexToBytes(it) }
+                key?.takeIf { it.size == 64 }?.let { GroupStatuses.keyEntry(hex, it) }
+            }
+            val creator = chat.creatorHex
+            if (creator == null) {
+                Log.w(TAG, "acceptGroupInvite: ${chat.id} has no recorded creator: no accept sync owed")
+            } else {
+                DistroOutboxRuntime.oweGroupSync(
+                    appContext, signer.hex,
+                    GroupSync(
+                        op = DistroGroupSync.ACCEPT, groupId = groupId, atMs = System.currentTimeMillis(),
+                        name = chat.name, members = chat.memberHashes, keys = keys, creator = creator,
+                        left = UserPreferences.groupsLeftBy(appContext, signer.hex),
+                    ),
+                )
+            }
+        }
+        // The group is joined here now: what was held for it is fed again, in arrival order (§6.5).
+        RfedDistroClient.replayHeldArrivals(appContext, groupId)
 
         messageDao.upsert(
             MessageEntity(
@@ -1905,36 +2637,9 @@ class ChatRepository(
             return
         }
 
-        // Handle "STOP: <groupId>" — remove sender from that group
-        // Lenient: case-insensitive, optional colon/dash, flexible whitespace
-        val stopMatch = Regex("^\\s*stop[:\\-\\s]+([0-9a-f]{4,})\\s*$", RegexOption.IGNORE_CASE)
-            .find(content.trim())
-        if (stopMatch != null) {
-            val prefix = stopMatch.groupValues[1].lowercase()
-            val chat = chatDao.findByGroupIdPrefix(prefix + "%")
-            if (chat != null) {
-                Log.i(TAG, "STOP received from $srcHex for group ${chat.id}")
-                // The source's own leave, under the group model: only a
-                // current member of the list, and for good.
-                val current = GroupMemberStatuses.statusOf(messageDao.groupMembersList(chat.id), srcHex)
-                if (GroupMemberStatuses.statusChange(current, GroupChatManager.Action.LEAVE) == null) return
-                messageDao.setGroupMemberStatus(chat.id, srcHex, MemberStatus.LEFT)
-                // Insert a system message in the group chat (name resolved when shown)
-                messageDao.upsert(
-                    MessageEntity(
-                        id = msgId,
-                        chatId = chat.id,
-                        senderHashHex = srcHex,
-                        content = "left the group",
-                        timestamp = (timestamp * 1000).toLong(),
-                        isOutbound = false,
-                        state = RetichatBridge.MessageState.DELIVERED,
-                        systemKind = SystemText.MEMBER,
-                    )
-                )
-                return
-            }
-        }
+        // No "stop <group>" text marks anyone left any more (GROUPS-DISTRO-DESIGN.md
+        // §6.9): it had no signature or group-action check, so anyone could mark a
+        // member left for good. A leave is the `leave` action, verified.
 
         val chatId = directChatId(srcHash)
         val existingChat = chatDao.findById(chatId)
@@ -1993,15 +2698,37 @@ class ChatRepository(
     private suspend fun quitGroup(chatId: String, how: String) {
         val chat = chatDao.findById(chatId) ?: return
         if (!chat.isGroup) return
+        // As the group's own address, resolved now (GROUPS-DISTRO-DESIGN.md
+        // §8.1): refused when it cannot be signed for (§8.7: only "Delete from
+        // this device" is offered there, [deleteGroupFromThisDevice]).
+        val signer = groupSigner(chat) ?: run {
+            Log.w(TAG, "quitGroup: ${chat.id} $how refused: its own address ${chat.ownMember?.take(8)} has no signer on this device (${signerKind(chat)}, §8.7)")
+            return
+        }
         val groupIdHex = chat.groupIdHex
-        val targets = GroupMemberStatuses.leaveTargets(messageDao.groupMembersList(chatId), selfHex())
+        val members = messageDao.groupMembersList(chatId)
+        val self = groupSelf(chat, members)
+        val targets = GroupMemberStatuses.leaveTargets(members, self.own).filter { !self.isSelf(it) }
         if (groupIdHex != null) {
             UserPreferences.closeGroup(appContext, groupIdHex)
-            groupChatManager?.sendLeave(groupIdHex, targets)
+            groupChatManager?.sendLeave(signer, groupIdHex, targets)
                 ?: Log.w(TAG, "quitGroup: stack offline, the leave of ${chat.id} is not sent")
+            // §10.6: in a D-group, one `leave` group sync in the same step, so every
+            // other device of D closes it too (§13); the id goes in D's left list.
+            if (GroupSelves.isDistroGroup(chat.ownMember, selfHex())) {
+                UserPreferences.recordGroupsLeft(appContext, signer.hex, listOf(groupIdHex))
+                DistroOutboxRuntime.oweGroupSync(
+                    appContext, signer.hex,
+                    GroupSync(
+                        op = DistroGroupSync.LEAVE, groupId = groupIdHex, atMs = System.currentTimeMillis(),
+                        left = UserPreferences.groupsLeftBy(appContext, signer.hex),
+                    ),
+                )
+            }
+            forgetHeldArrivals(groupIdHex, "the user $how it")
         }
         deleteChatLocal(chat)
-        Log.i(TAG, "Group ${chat.id} $how (leave to ${targets.size} member(s))")
+        Log.i(TAG, "Group ${chat.id} $how (leave to ${targets.size} member(s), as ${signer.hex.take(8)})")
     }
 
     private fun selfHex(): String = selfDestHash.toHex()

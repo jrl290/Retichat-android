@@ -99,3 +99,15 @@ object ClosedGroups {
     fun record(entries: List<String>, groupId: String): List<String> =
         (entries.filter { it != groupId } + groupId).takeLast(LIMIT)
 }
+
+/**
+ * The invites to the distro the privacy filter dropped (GROUPS-DISTRO-DESIGN.md
+ * §6.5): group traffic for one of them is never held. At most [LIMIT] ids,
+ * oldest forgotten first, like [ClosedGroups].
+ */
+object FilteredInvites {
+    const val LIMIT = 64
+
+    fun record(entries: List<String>, groupId: String): List<String> =
+        (entries.filter { it != groupId } + groupId).takeLast(LIMIT)
+}

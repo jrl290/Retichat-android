@@ -54,14 +54,16 @@ class DeclineIsLeaveTest {
         val quit = body(repo, "quitGroup")
         assertTrue(quit.contains("GroupMemberStatuses.leaveTargets("))
         assertTrue(quit.contains("UserPreferences.closeGroup(appContext, groupIdHex)"))
-        assertTrue(quit.contains("groupChatManager?.sendLeave(groupIdHex, targets)"))
+        // As the group's own address (GROUPS-DISTRO-DESIGN.md §8.1), never to a self address (§9.2).
+        assertTrue(quit.contains("groupChatManager?.sendLeave(signer, groupIdHex, targets)"))
+        assertTrue(quit.contains(".filter { !self.isSelf(it) }"))
         assertTrue(quit.indexOf("sendLeave(") < quit.indexOf("deleteChatLocal(chat)"))
         // The leave is the web's and iOS's: GROUP_ACTION leave, no content (audit L5).
         // and carries the user's own key, as an accept does (GroupEnvelopes: GROUP_ID, the
         // action, GROUP_SENDER the user, GROUP_MEMBER_KEYS the user's own key).
         val leave = body(gcm, "sendLeave")
-        assertTrue(leave.contains("send(target, \"\")"))
-        assertTrue(leave.contains("GroupEnvelopes.write(handle, GroupEnvelopes.leave(groupId, selfHex, ownKey))"))
+        assertTrue(leave.contains("send(signer, target, \"\")"))
+        assertTrue(leave.contains("GroupEnvelopes.write(handle, GroupEnvelopes.leave(groupId, signer.hex, ownKey))"))
         val envelope = File("src/main/kotlin/com/newendian/retichat/service/GroupEnvelopes.kt").readText()
         assertTrue(envelope.contains("control(groupId, GroupChatManager.Action.LEAVE, selfHex, ownKey)"))
         // Nothing sends the old plain "left the group" post.

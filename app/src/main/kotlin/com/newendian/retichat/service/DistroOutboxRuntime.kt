@@ -258,6 +258,54 @@ object DistroOutboxRuntime {
         }
     }
 
+    /**
+     * The group sync G of a user action in a D-group (RFed SPEC §17.14;
+     * GROUPS-DISTRO-DESIGN.md §10.5-§10.6): from D to D, empty title and
+     * content, its fields written by the shared layer from [sync]'s JSON,
+     * packed and signed by D once, sealed, and owed until the node proves it.
+     * Owed only as the distro [distroHex] the group's own address names, and
+     * only while this device holds it loaded: a group whose D this device no
+     * longer holds owes nothing (§8.7). Each G is its own entry, kept when the
+     * device gives D up. Never throws; returns whether it was owed.
+     */
+    suspend fun oweGroupSync(context: Context, distroHex: String, sync: GroupSync): Boolean {
+        val label = sync.label
+        try {
+            val (distro, signer) = DistroManager.signing() ?: run {
+                Log.w(TAG, "$label not owed: no distro is loaded (§8.7)")
+                return false
+            }
+            if (distro.deliveryHashHex != distroHex) {
+                Log.w(TAG, "$label not owed: the group's own address ${distroHex.take(8)} is not the distro held now (${distro.deliveryHashHex.take(8)}, §8.7)")
+                return false
+            }
+            val deviceHex = StackRuntime.selfDestHash.toHex()
+            if (!DistroCodec.isHex32(deviceHex)) {
+                Log.w(TAG, "$label not owed: this device's address is not known")
+                return false
+            }
+            val packed = pack(distro, signer, label) { handle ->
+                RetichatBridge.messageSetDistroGroupSync(handle, sync.toJson(), distroHex, deviceHex)
+            } ?: return false
+            val entry = OwedEntry(
+                id = DistroGroupSync.entryId(packed.hash), kind = OwedKind.GROUP,
+                distro = distro.deliveryHashHex, distroKey = distro.publicKeyHex,
+                msgHash = packed.hash, packed = packed.bytes, label = label,
+                op = sync.op, name = sync.groupId, atMs = sync.atMs,
+                sealed = packed.sealed?.sealed, syncSig = packed.sealed?.syncSig,
+            )
+            val outbox = outbox(context)
+            withContext(serial) { outbox.owe(entry) }
+            return true
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "$label was not owed to the distro: ${e.message}")
+            _lastError.value = "A group action was not copied to your other devices: ${e.message}"
+            return false
+        }
+    }
+
     /** A message packed once ([bytes], its hash [hash] in hex) and, unless that failed, sealed for the sync proof. */
     private class Packed(val bytes: ByteArray, val hash: String, val sealed: RetichatBridge.DistroSealed?)
 

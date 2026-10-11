@@ -76,6 +76,10 @@ interface ChatDao {
     @Query("SELECT * FROM chats WHERE id = :id")
     fun chatByIdFlow(id: String): Flow<ChatEntity?>
 
+    /** How many groups here have [hex] as their own address (GROUPS-DISTRO-DESIGN.md §9.1). */
+    @Query("SELECT COUNT(*) FROM chats WHERE ownMember = :hex")
+    suspend fun countWithOwnMember(hex: String): Int
+
     @Upsert
     suspend fun upsert(chat: ChatEntity)
 

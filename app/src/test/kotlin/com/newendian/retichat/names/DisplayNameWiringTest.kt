@@ -91,7 +91,8 @@ class DisplayNameWiringTest {
         assertTrue(repo.contains("NameField.fromTrailer(RetichatBridge.displayNameDecode(fieldsRaw))"))
         // §5.2 order on both accept paths (router: DMs, groups, relayed
         // copies; distro unwrap): the message's LXMF timestamp goes in.
-        assertEquals(2, Regex("acceptMessageName\\(srcHex, nameField, unverifiedReason, timestamp\\)").findAll(repo).count())
+        // And a group message through the distro (GROUPS-DISTRO-DESIGN.md §6.4): the sender's name row as the direct path makes it.
+        assertEquals(3, Regex("acceptMessageName\\(srcHex, nameField, unverifiedReason, timestamp\\)").findAll(repo).count())
         val accept = repo.substring(repo.indexOf("private suspend fun acceptMessageName("), repo.indexOf("/** The privacy filter's answer"))
         assertTrue(accept.contains("contact?.messageNameAt"))
         assertTrue(accept.contains("contactDao.acceptMessageName("))

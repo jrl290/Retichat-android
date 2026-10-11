@@ -47,7 +47,7 @@ class GroupStatusesWiringTest {
         assertTrue(onKept.indexOf("remember(src, senderKey)") in 0 until onKept.indexOf("decideHeldLocked(src)"))
         assertTrue(onKept.contains("if (signature == Signature.VALIDATED && store.heldFrom(src) > 0)"))
         // The router's callback hands over both: the key a message carries and the message as received.
-        assertTrue(received.contains("handleGroupMessage(msgId, srcHex, content, timestamp, fields, group, signature, senderKey, packed)"))
+        assertTrue(received.contains("handleGroupMessage(msgId, srcHex, content, timestamp, fields, group, signature, senderKey, packed, viaDistro = false)"))
     }
 
     @Test
@@ -83,7 +83,8 @@ class GroupStatusesWiringTest {
         assertTrue("never its own copy nor the recipient's", answer.contains("!self.isSelf(it.memberHex) && it.memberHex != memberHex"))
         assertTrue(answer.contains(".sortedBy { it.memberHex }"))
         // The repository sends it through the one group send path, once: nothing sends a status twice.
-        assertTrue(repo.contains("manager.sendStatus(groupId, member, statuses)"))
+        // As the group's own address, resolved when it is sent (GROUPS-DISTRO-DESIGN.md §8.1).
+        assertTrue(repo.contains("manager.sendStatus(signer, groupId, member, statuses)"))
         assertEquals(1, count("sendStatus\\(", repo))
     }
 
@@ -91,20 +92,24 @@ class GroupStatusesWiringTest {
     fun everyAcceptAndLeaveTheAppSendsIsBuiltInOneEnvelopeEachAndCarriesTheUsersOwnKeyReadFromTheIdentity() {
         assertEquals(1, count("GroupEnvelopes\\.accept\\(", gcm))
         assertEquals(1, count("GroupEnvelopes\\.leave\\(", gcm))
-        assertTrue(body(gcm, "sendAccept").contains("GroupEnvelopes.accept(groupId, selfHex, ownKey)"))
-        assertTrue(body(gcm, "sendAccept").contains("val ownKey = ownKeyEntry()"))
-        assertTrue(body(gcm, "sendLeave").contains("val ownKey = ownKeyEntry()"))
+        // As the group's own address (GROUPS-DISTRO-DESIGN.md §8.1): its hash, and its key (§8.3: D's for D).
+        assertTrue(body(gcm, "sendAccept").contains("GroupEnvelopes.accept(groupId, signer.hex, ownKey)"))
+        assertTrue(body(gcm, "sendAccept").contains("val ownKey = ownKeyEntry(signer)"))
+        assertTrue(body(gcm, "sendLeave").contains("val ownKey = ownKeyEntry(signer)"))
         // From the identity, not the router: a leave sent with no connection carries it too.
         val own = body(gcm, "ownKeyEntry")
-        assertTrue(own.contains("RetichatBridge.identityPublicKey(identityHandle)"))
+        assertTrue(own.contains("val publicKey = signer.publicKey"))
         assertFalse(own.contains("routerHandle"))
+        val signer = body(repo, "groupSigner")
+        assertTrue(signer.contains("GroupSigner(selfHex(), selfDestHash, identityHandle, RetichatBridge.identityPublicKey(identityHandle))"))
+        assertTrue(signer.contains("GroupSigner(state.deliveryHashHex, hash, handle, DistroCodec.hexToBytes(state.publicKeyHex))"))
         // No other path writes an accept or a leave.
         assertFalse(gcm.contains("GroupEntry.ACTION, Action.ACCEPT"))
         assertFalse(gcm.contains("GroupEntry.ACTION, Action.LEAVE"))
         // The status goes the way every group envelope goes (DIRECT first, one propagated copy as the fallback), and is not sent when it cannot be built.
         val status = body(gcm, "sendStatus")
-        assertTrue(status.contains("sendChecked(memberHex, \"\")"))
-        assertTrue(status.contains("GroupEnvelopes.write(handle, GroupEnvelopes.status(groupId, selfHex))"))
+        assertTrue(status.contains("sendChecked(signer, memberHex, \"\")"))
+        assertTrue(status.contains("GroupEnvelopes.write(handle, GroupEnvelopes.status(groupId, signer.hex))"))
         assertTrue(status.contains("GroupFields.setStatuses(handle, statuses)"))
         assertTrue(body(gcm, "send").contains("sendChecked("))
         assertTrue(body(gcm, "sendChecked").contains("RetichatBridge.messageSendViaAppLinks(handle)"))
@@ -115,7 +120,8 @@ class GroupStatusesWiringTest {
 
     @Test
     fun aCreatorIsRecordedWhenAGroupIsMadeOrInvitedIntoAndNeverChangedByALaterInvite() {
-        assertTrue(body(repo, "createGroupChat").contains("creatorHex = selfHex(),"))
+        // The group's own address: the distro when one is held to sign for, else the device (GROUPS-DISTRO-DESIGN.md §8.1).
+        assertTrue(body(repo, "createGroupChat").contains("creatorHex = own,"))
         val invite = body(repo, "handleGroupInvite")
         assertTrue(invite.contains("creatorHex = srcHex,"))
         // A held group returns before any row is written: its first invite's source stays its creator.

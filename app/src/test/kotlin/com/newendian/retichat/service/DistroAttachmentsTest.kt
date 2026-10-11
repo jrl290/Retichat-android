@@ -203,6 +203,15 @@ class DistroAttachmentsTest {
         // Unreadable fields cost the attachments, not the message: no early return on them.
         assertFalse(Regex("fieldsRaw\\s*(\\?:|!!)").containsMatchIn(handle))
         assertTrue(handle.contains("onDistroMessageReceived(srcHash, title, content, timestamp, fieldsRaw, nameField, unverifiedReason)"))
+        // GROUPS-DISTRO-DESIGN.md §6.1, §18.2 item 5: a group message (and a group sync) is routed
+        // to the group branch first, with its fields (a post's attachments), and never reaches the
+        // direct-message path below.
+        val route = handle.indexOf("DistroGroupSync.route(groupKeys.groupSync, groupKeys.hasGroupId, groupKeys.groupId)")
+        assertTrue(route >= 0)
+        assertTrue(route < handle.indexOf("onDistroMessageReceived("))
+        assertTrue(handle.contains("handleGroupMessage(context, blob, groupKeys, route.groupId, srcHex, content, timestamp, fieldsRaw, nameField, unverifiedReason)"))
+        val group = body(client, "private suspend fun handleGroupMessage(")
+        assertTrue(group.contains("blob, groupKeys, groupId, srcHex, content, timestamp, fieldsRaw, nameField, unverifiedReason,"))
         // The sent-copy path keeps its rule: text only.
         assertTrue(handle.contains("app.repository.onDistroSentCopy(copy.recipientHex, title, content, timestamp)"))
     }

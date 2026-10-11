@@ -152,6 +152,13 @@ object DistroManager {
     }
 
     /**
+     * A distro key is stored on this device, loaded or not: with none loaded
+     * yet (start-up), a group's actions as its distro are not offered until it
+     * is (GROUPS-DISTRO-DESIGN.md §8.7, DESIGN_PRINCIPLES §5).
+     */
+    fun isStored(context: Context): Boolean = file(context).isFile
+
+    /**
      * `(sourceHash, signingIdentityHandle)` for an outgoing message: the
      * distro when one is loaded, otherwise the device.
      */

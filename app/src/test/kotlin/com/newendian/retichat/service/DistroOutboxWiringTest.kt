@@ -123,8 +123,11 @@ class DistroOutboxWiringTest {
         // The distro and the handle that signs as it are read together (DistroManager.signing), so a
         // generate, import or forget between two reads cannot give a source that the key does not match.
         val channel = body(runtime, "suspend fun oweChannelSync(", "suspend fun oweSentCopy(")
-        val sent = body(runtime, "suspend fun oweSentCopy(", "private suspend fun pack(")
-        for ((name, text) in listOf("C" to channel, "sent-copy" to sent)) {
+        val sent = body(runtime, "suspend fun oweSentCopy(", "suspend fun oweGroupSync(")
+        // GROUPS-DISTRO-DESIGN.md §10.5: a group sync G the same way, and only as the D it names.
+        val group = body(runtime, "suspend fun oweGroupSync(", "private suspend fun pack(")
+        assertTrue(group.contains("if (distro.deliveryHashHex != distroHex)"))
+        for ((name, text) in listOf("C" to channel, "sent-copy" to sent, "G" to group)) {
             assertEquals(name, 1, Regex("DistroManager\\.signing\\(\\)").findAll(text).count())
             assertFalse(name, text.contains("DistroManager.identityHandle"))
             assertFalse(name, text.contains("DistroManager.state.value"))

@@ -214,13 +214,16 @@ class GroupModelTest {
         assertFalse(invite.contains("ensureAllowlistedContact("))
         assertTrue(invite.contains("ensureContact(memberHash)"))
         // The keys loop runs only over the held list, or the new group's own.
-        assertTrue(invite.contains("if (memberHash !in members || memberHash == self) return@forEach"))
+        // GROUPS-DISTRO-DESIGN.md §9.2: no key of any self address (the device, D, a known sibling) is kept.
+        assertTrue(invite.contains("if (memberHash !in members || self.isSelf(memberHash)) return@forEach"))
         val held = invite.indexOf("if (standing.chat != null) {\n")
         val create = invite.indexOf("chatDao.upsert(")
         assertTrue("a held group returns before anything is created", held in 0 until create)
         // The user's accept and the user's creation let every member through.
-        assertTrue(body(repo, "acceptGroupInvite").contains("allMembers.filter { it != selfHex }.forEach { ensureAllowlistedContact(it) }"))
-        assertTrue(body(repo, "createGroupChat").contains("ensureAllowlistedContact(hexHash)"))
+        val accept = body(repo, "acceptGroupInvite")
+        assertTrue(accept.contains("val others = allMembers.filter { !self.isSelf(it) }"))
+        assertTrue(accept.contains("others.forEach { ensureAllowlistedContact(it) }"))
+        assertTrue(body(repo, "createGroupChat").contains("if (!isSelf) ensureAllowlistedContact(hexHash)"))
         // A member's own accept lets it through only in a group the user joined: the engine's, not the pending group's.
         assertFalse(body(repo, "handleGroupMessage").contains("ensureAllowlistedContact("))
         val apply = body(File("src/main/kotlin/com/newendian/retichat/data/repository/GroupStatuses.kt").readText(), "applyChange")

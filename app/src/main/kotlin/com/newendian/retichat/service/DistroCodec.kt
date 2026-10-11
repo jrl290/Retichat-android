@@ -15,6 +15,17 @@ object DistroCodec {
     /** X25519(32) || Ed25519(32) private key, as the web client and iOS export it. */
     const val PRIVATE_KEY_BYTES = 64
 
+    /**
+     * What a sibling shows for a message the user sent as the distro whose copy
+     * carries no text (RFed SPEC §17.11: attachments are not copied): an empty
+     * §17.11 sent-copy or an empty `post` group sync (GROUPS-DISTRO-DESIGN.md
+     * §10.2, §18.2 item 10). The iOS and web string.
+     */
+    const val ATTACHMENT_PLACEHOLDER = "[Attachment not available via the distro address]"
+
+    /** The text a sibling stores for a copied message's [content]: the placeholder when it is empty. */
+    fun copiedText(content: String): String = content.ifEmpty { ATTACHMENT_PLACEHOLDER }
+
     private val HEX = Regex("^[0-9a-f]{128}$")
 
     /**
