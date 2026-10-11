@@ -447,13 +447,21 @@ class ChatRepository(
      * messages go from this device only. No leave is sent and no group sync is
      * owed: the user stays in the group on the other devices and for the other
      * members. The one path that removes a group without the user's leave.
+     *
+     * Its id is recorded closed on this device, as a leave records it
+     * (alignment decision 4, 2026-10-11): a later invite or group sync for it
+     * does not bring the group back here. It is not put in D's left list: the
+     * user did not leave, and the other devices keep it.
      */
     suspend fun deleteGroupFromThisDevice(chatId: String) {
         val chat = chatDao.findById(chatId) ?: return
         if (!chat.isGroup) return
-        chat.groupIdHex?.let { forgetHeldArrivals(it, "the group was deleted from this device") }
+        chat.groupIdHex?.let { groupId ->
+            UserPreferences.closeGroup(appContext, groupId)
+            forgetHeldArrivals(groupId, "the group was deleted from this device")
+        }
         deleteChatLocal(chat)
-        Log.i(TAG, "Group ${chat.id} deleted from this device only (own address ${chat.ownMember?.take(8)}, ${signerKind(chat)}): no leave sent, no group sync owed (§8.7)")
+        Log.i(TAG, "Group ${chat.id} deleted from this device only (own address ${chat.ownMember?.take(8)}, ${signerKind(chat)}): recorded closed here, no leave sent, no group sync owed (§8.7)")
     }
 
     fun messagesForChatPaged(chatId: String) = messageDao.messagesForChatPaged(chatId)

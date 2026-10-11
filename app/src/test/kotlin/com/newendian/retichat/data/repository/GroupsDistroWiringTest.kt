@@ -276,10 +276,12 @@ class GroupsDistroWiringTest {
         )
         assertEquals(1, count(quit, "sendLeave("))
         assertEquals(1, count(quit, "DistroOutboxRuntime.oweGroupSync("))
-        // §8.7: the one path that removes a group without the user's leave.
+        // §8.7: the one path that removes a group without the user's leave. Alignment decision 4
+        // (2026-10-11): its id is recorded closed on this device, so a later invite or group sync for
+        // it does not bring it back here; it is not put in D's left list (the user did not leave).
         val local = body(repo, "deleteGroupFromThisDevice")
-        assertTrue(local.contains("deleteChatLocal(chat)"))
-        for (never in listOf("sendLeave", "oweGroupSync", "closeGroup", "quitGroup", "recordGroupsLeft", "groupChatManager")) {
+        inOrder(local, "UserPreferences.closeGroup(appContext, groupId)", "deleteChatLocal(chat)")
+        for (never in listOf("sendLeave", "oweGroupSync", "quitGroup", "recordGroupsLeft", "groupChatManager")) {
             assertFalse(never, local.contains(never))
         }
     }
