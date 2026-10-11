@@ -1104,4 +1104,65 @@ mod distro_unwrap_tests {
             }
         }
     }
+
+    /// RFed SPEC §17.14 rules 1 and 2 (GROUPS-DISTRO-DESIGN.md §11.1) from real bytes: a group
+    /// sync G (the vectors' `accept_full_left`) as D signs it, the same G from a member M, and the
+    /// same G claiming D as its source but signed by X. The unwrap the app calls reports each as a
+    /// G, with the source and the verdict the app's `DistroGroupSync.disposition` decides by: the
+    /// member's is not from D (rule 1, whatever its signature), the forger's does not validate
+    /// under D's key (rule 2). The JSON each gives, exactly as `nativeDistroUnwrap` returns it, is
+    /// `tests/data/distro_group_sync_rules.json`, which the app's DistroGroupSyncRulesTest runs
+    /// through its decision; `RETICHAT_JNI_WRITE_RULES=1` writes it again.
+    #[test]
+    fn a_g_whose_source_is_not_d_and_a_forged_g_unwrap_as_the_app_must_drop_them() {
+        let v = vectors();
+        let mut d = distro(&v);
+        let dest = lxmf_rust::distro::delivery_hash(&d).unwrap();
+        let member = Identity::from_bytes(&unhex(v["member"]["private_key_hex"].as_str().unwrap())).unwrap();
+        let member_hash = lxmf_rust::distro::delivery_hash(&member).unwrap();
+        let forger = Identity::from_bytes(&unhex(v["forger"]["private_key_hex"].as_str().unwrap())).unwrap();
+        assert!(Identity::recall(&member_hash).is_none(), "M is unknown here");
+        let op = v["ops"].as_array().unwrap().iter().find(|o| o["name"] == "accept_full_left").expect("accept_full_left");
+        // [timestamp 1790000000.5, bin title "", bin content "", G's fields], as a G is packed.
+        let mut payload = unhex("94cb41daac4ee0200000c400c400");
+        payload.extend_from_slice(&unhex(op["fields_hex"].as_str().unwrap()));
+        let blob = |signer: &Identity, src: &[u8]| {
+            let mut signed = [dest.clone(), src.to_vec(), payload.clone()].concat();
+            let hash = identity::full_hash(&signed);
+            signed.extend_from_slice(&hash);
+            let signature = signer.sign(&signed);
+            [dest.clone(), d.encrypt(&[src.to_vec(), signature, payload.clone()].concat()).unwrap()].concat()
+        };
+        let cases = [
+            ("g_from_d", "the control: D's own G, signed by D", "apply", blob(&d, &dest), &dest, true, 0),
+            ("g_from_a_member", "rule 1: the G from M, signed by M, whose key is not held here", "not_from_distro", blob(&member, &member_hash), &member_hash, false, 1),
+            ("g_forged", "rule 2: the G claims D as its source, signed by X", "forged", blob(&forger, &dest), &dest, false, 2),
+        ];
+        let mut written = Vec::new();
+        for (name, why, disposition, blob, source, validated, reason) in cases {
+            let json = distro_unwrap_json(&mut d, &blob).unwrap().expect("a blob for D");
+            let out: Json = serde_json::from_str(&json).unwrap();
+            assert_eq!(out["source_hash"], Json::String(hex(source)), "{name}: source");
+            assert_eq!(out["signature_validated"], Json::Bool(validated), "{name}: signature_validated");
+            assert_eq!(out["unverified_reason"], Json::from(reason), "{name}: unverified_reason");
+            assert_eq!(out["group_sync"], op["expected"], "{name}: a G, read whatever its source or signature");
+            assert_eq!(out["has_group_id"], Json::Bool(false), "{name}: a G is no group message");
+            written.push(serde_json::json!({ "name": name, "why": why, "disposition": disposition, "unwrap": json }));
+        }
+        assert!(Identity::recall(&member_hash).is_none(), "nothing is remembered");
+        let file = serde_json::json!({
+            "spec": "RFed-rust SPEC.md §17.14 rules 1 and 2 (GROUPS-DISTRO-DESIGN.md §11.1). Written by retichat-jni src/group_status.rs a_g_whose_source_is_not_d_and_a_forged_g_unwrap_as_the_app_must_drop_them (RETICHAT_JNI_WRITE_RULES=1), from distro_group_sync_vectors.json; read by the app's DistroGroupSyncRulesTest. unwrap is the JSON nativeDistroUnwrap returns for the case's blob.",
+            "distro_hex": hex(&dest),
+            "member_hex": hex(&member_hash),
+            "device_hex": v["device_hex"],
+            "cases": written,
+        });
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/distro_group_sync_rules.json");
+        let text = serde_json::to_string_pretty(&file).unwrap() + "\n";
+        if std::env::var_os("RETICHAT_JNI_WRITE_RULES").is_some() {
+            std::fs::write(&path, &text).unwrap();
+        }
+        let kept = std::fs::read_to_string(&path).expect("tests/data/distro_group_sync_rules.json: write it with RETICHAT_JNI_WRITE_RULES=1");
+        assert_eq!(kept, text, "tests/data/distro_group_sync_rules.json is not what the unwrap gives now");
+    }
 }
