@@ -306,8 +306,9 @@ class GroupsDistroWiringTest {
         inOrder(body(client, "handleChannelSync"), "if (held && signatureValidated && ownDistro != null && srcHex == ownDistro) {", "DistroGroupSync.siblingOf(marker.byHex,")
         // A G teaches its `by` past rules 1-3 (source D, signature D's, not this device).
         assertEquals(2, count(body(repo, "onDistroGroupSync"), "learnSibling(distro!!, disposition.sibling, \"a group sync\")"))
-        // Given up, a distro's siblings go unless a group here still has it as its own address.
-        inOrder(body(repo, "onDistroChanged"), "if (chatDao.countWithOwnMember(d) > 0) continue", "UserPreferences.forgetDistroSiblings(appContext, d)")
+        // Given up, a distro's siblings go unless a group here still has it as its own address:
+        // decided by DistroChanges.plan (DistroChangeTest runs it), from the groups' own addresses.
+        inOrder(body(repo, "onDistroChanged"), "chatDao.countWithOwnMember(it) > 0", "DistroChanges.plan(holding, sets, ownMembers)", "for (d in plan.forgetSiblingsOf)", "UserPreferences.forgetDistroSiblings(appContext, d)")
     }
 
     // ---- §18.2 item 10: the placeholder ----

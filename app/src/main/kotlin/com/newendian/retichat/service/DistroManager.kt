@@ -3,6 +3,7 @@ package com.newendian.retichat.service
 import android.content.Context
 import android.util.Log
 import com.newendian.retichat.bridge.RetichatBridge
+import com.newendian.retichat.data.repository.DistroHolding
 import com.newendian.retichat.service.DistroCodec.toHex
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -45,6 +46,15 @@ object DistroManager {
     /** Null when no distro identity is loaded. */
     val state: StateFlow<DistroState?> = _state
 
+    private val _holding = MutableStateFlow<DistroHolding>(DistroHolding.Unknown)
+    /**
+     * What this device holds of a distro: [DistroHolding.Unknown] until [init]
+     * has looked at the stored key (start-up), then none, stored but not
+     * loaded, or loaded. A null [state] is start-up as often as a give-up;
+     * this says which (GROUPS-DISTRO-DESIGN.md §6.5, §8.7, §9.1).
+     */
+    val holding: StateFlow<DistroHolding> = _holding
+
     val hasDistro: Boolean get() = identityHandle != 0L
     val deliveryHashHex: String? get() = deliveryHash?.toHex()
 
@@ -53,14 +63,19 @@ object DistroManager {
     fun init(context: Context) {
         if (identityHandle != 0L) return
         val f = file(context)
-        if (!f.isFile) return
+        if (!f.isFile) {
+            _holding.value = DistroHolding.None
+            return
+        }
         val key = runCatching { f.readBytes() }.getOrNull()
         if (key == null || key.size != DistroCodec.PRIVATE_KEY_BYTES) {
             Log.w(TAG, "stored distro key unreadable (${key?.size} bytes) — ignoring")
+            _holding.value = DistroHolding.StoredNotLoaded
             return
         }
         if (!adopt(key)) {
             Log.w(TAG, "stored distro key rejected by the core: ${RetichatBridge.lastError()}")
+            _holding.value = DistroHolding.StoredNotLoaded
         }
     }
 
@@ -134,8 +149,11 @@ object DistroManager {
         deliveryHash = null
         _state.value = null
         if (h != 0L) RetichatBridge.identityDestroy(h)
-        file(context).delete()
-        Log.i(TAG, "distro identity forgotten")
+        // Given up is said only once the key file is gone: a key still stored is held.
+        val gone = file(context).delete() || !file(context).exists()
+        _holding.value = if (gone) DistroHolding.None else DistroHolding.StoredNotLoaded
+        if (gone) Log.i(TAG, "distro identity forgotten")
+        else Log.e(TAG, "distro identity unloaded, but its key file could not be deleted: it is still held here")
     }
 
     /**
@@ -181,6 +199,7 @@ object DistroManager {
         identityHandle = handle
         deliveryHash = delivery
         _state.value = DistroState(delivery.toHex(), pub.toHex(), idHash.toHex())
+        _holding.value = DistroHolding.Loaded(delivery.toHex())
         Log.i(TAG, "distro loaded: address=${delivery.toHex()}")
         return true
     }

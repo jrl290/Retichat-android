@@ -46,7 +46,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -233,11 +232,14 @@ class ChatRepository(
 
     init {
         NetworkMonitor.addOnAvailableListener(networkListener)
-        // Every change of the distro held (generated, imported, forgotten), and
-        // once at start: held arrivals of another distro and the siblings of a
-        // distro given up are forgotten (GROUPS-DISTRO-DESIGN.md §6.5, §9.1).
+        // Every change of what the device holds of a distro (looked at once the
+        // stack loads it, generated, imported, forgotten): held arrivals of
+        // another distro and the siblings of a distro given up are forgotten
+        // (GROUPS-DISTRO-DESIGN.md §6.5, §9.1). Not the loaded state: this
+        // repository is made before the stack loads the stored key, and a null
+        // there at start-up is D held, not loaded, which forgets nothing (§8.7).
         scope.launch(Dispatchers.IO) {
-            DistroManager.state.map { it?.deliveryHashHex }.distinctUntilChanged().collect { onDistroChanged(it) }
+            DistroManager.holding.collect { onDistroChanged(it) }
         }
     }
 
@@ -1818,18 +1820,27 @@ class ChatRepository(
     }
 
     /**
-     * The distro this device holds changed (generated, imported or forgotten):
-     * the held arrivals that came through another distro are forgotten, with one
-     * line giving the count (§6.5), and the known siblings of a distro given up
-     * are dropped unless a group here still has it as its own address (§8.7,
-     * §9.1). Group syncs already owed stay owed (§10.5).
+     * What this device holds of a distro changed ([DistroChanges.plan]): when D
+     * is given up or replaced, the held arrivals that came through another
+     * distro are forgotten, with one line giving the count (§6.5), and the known
+     * siblings of a distro given up are dropped unless a group here still has it
+     * as its own address (§8.7, §9.1). At start-up (D held, not loaded yet)
+     * nothing is. Group syncs already owed stay owed (§10.5).
      */
-    suspend fun onDistroChanged(heldDistro: String?) = withContext(Dispatchers.IO) {
-        val dropped = if (heldDistro == null) groupStatusDao.dropAllArrivals() else groupStatusDao.dropArrivalsNotFor(heldDistro)
-        if (dropped > 0) Log.i(TAG, "forgot $dropped held arrival(s) that came through a distro this device no longer holds (§6.5)")
-        for (d in UserPreferences.distrosWithSiblings(appContext)) {
-            if (d == heldDistro) continue
-            if (chatDao.countWithOwnMember(d) > 0) continue
+    suspend fun onDistroChanged(holding: DistroHolding) = withContext(Dispatchers.IO) {
+        val sets = UserPreferences.distrosWithSiblings(appContext)
+        val ownMembers = sets.filter { chatDao.countWithOwnMember(it) > 0 }.toSet()
+        val plan = DistroChanges.plan(holding, sets, ownMembers)
+        val dropped = when (val arrivals = plan.arrivals) {
+            DistroChanges.Arrivals.Keep -> {
+                Log.i(TAG, "distro $holding: held arrivals and known siblings kept (§8.7)")
+                0
+            }
+            DistroChanges.Arrivals.All -> groupStatusDao.dropAllArrivals()
+            is DistroChanges.Arrivals.AllBut -> groupStatusDao.dropArrivalsNotFor(arrivals.distro)
+        }
+        if (dropped > 0) Log.i(TAG, "forgot $dropped held arrival(s) that came through a distro this device no longer holds (distro $holding, §6.5)")
+        for (d in plan.forgetSiblingsOf) {
             UserPreferences.forgetDistroSiblings(appContext, d)
             Log.i(TAG, "forgot the known siblings of ${d.take(8)}: given up, and no group here has it as its own address (§9.1)")
         }
