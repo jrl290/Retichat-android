@@ -5,6 +5,7 @@ import android.util.Log
 import com.newendian.retichat.RetichatApp
 import com.newendian.retichat.bridge.AppLinkPacketCallback
 import com.newendian.retichat.bridge.ChannelLxmUnpackResult
+import com.newendian.retichat.bridge.NativeRefusal
 import com.newendian.retichat.bridge.RetichatBridge
 import com.newendian.retichat.data.db.dao.ChannelDao
 import com.newendian.retichat.data.db.dao.ContactDao
@@ -1190,9 +1191,13 @@ class RfedChannelClient(
             val lxmfData = channelHashBytes + innerBlob
 
             val raw = RetichatBridge.channelLxmUnpack(channel.channelName, lxmfData) ?: run {
+                val error = RetichatBridge.lastError()
+                // RFed SPEC §17.14 "Repeated keys": a post whose LXMF payload repeats a key is
+                // refused whole, as Python LXMF refuses it; LXMF-rust logged its one line.
+                if (NativeRefusal.isRefusal(error)) return@withContext
                 val key = channelHashHex.hashCode() xor innerBlob.contentHashCode()
                 if (failedBlobKeys.add(key)) {
-                    Log.w(TAG, "channelLxmUnpack failed (${lxmfData.size} bytes): ${RetichatBridge.lastError()}")
+                    Log.w(TAG, "channelLxmUnpack failed (${lxmfData.size} bytes): $error")
                 }
                 return@withContext
             }

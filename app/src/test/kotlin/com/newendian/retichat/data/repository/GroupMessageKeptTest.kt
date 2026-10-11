@@ -77,7 +77,7 @@ class GroupMessageKeptTest {
     @Test
     fun theDistroPathRecordsTheKeyFromWhatTheHandlerKept() {
         val b = body("onDistroGroupMessage")
-        assertTrue(b.contains("val kept = handleGroupMessage(hash, srcHex, content, timestamp, fields, here, signature, keys.senderKey, keys.packed, viaDistro = true)"))
+        assertTrue(b.contains("val kept = handleGroupMessage(hash, groupId, srcHex, content, timestamp, fields, here, signature, keys.senderKey, keys.packed, viaDistro = true)"))
         assertTrue(b.contains("if (kept) DistroGroupOutcome.KEPT else"))
         assertFalse("never kept whatever the handler did", Regex("viaDistro = true\\)\\s*\\n\\s*DistroGroupOutcome\\.KEPT").containsMatchIn(b))
     }

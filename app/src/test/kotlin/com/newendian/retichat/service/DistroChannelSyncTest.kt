@@ -224,21 +224,33 @@ class DistroChannelSyncTest {
     }
 
     @Test
-    fun aKeyMayBeInAnyIntegerWidthAndTheFirstEntryOfAKeyIsTheOneRead() {
+    fun aKeyMayBeInAnyIntegerWidth() {
         val wide = map(
             bytes(0xcc, 0xfb) to str(DistroChannelSync.TYPE),
             bytes(0xcd, 0x00, 0xfc) to array(str("join"), str("public.x"), fixint(3)),
             bytes(0xd3, be(0xfd, 8)) to str(sibling),
         )
         assertEquals(DistroChannelSync.Sync("join", "public.x", 3), DistroChannelSync.read(wide)!!.sync)
-        val twice = map(
-            key(0xfb) to str(DistroChannelSync.TYPE),
-            key(0xfc) to array(str("join"), str("public.first"), fixint(1)),
-            key(0xfc) to array(str("leave"), str("public.second"), fixint(2)),
-        )
-        assertEquals("public.first", DistroChannelSync.read(twice)!!.sync!!.name)
-        // No 0xFD: byHex is empty, never anyone's address.
-        assertEquals("", DistroChannelSync.read(twice)!!.byHex)
+    }
+
+    @Test
+    fun aMembershipMessageWhoseFieldsRepeatAKeyIsRefusedNeverReadFromOneEntry() {
+        // RFed SPEC §17.14 "Repeated keys", which settles §17.12's readers too (James,
+        // 2026-10-11): the distro unwrap refuses such a message whole first; given one anyway,
+        // this reader reads none of its entries. Until 2026-10-11 it read the first.
+        fun refused(c: ByteArray, key: Int) {
+            val marker = DistroChannelSync.read(c)!!
+            assertNull(marker.sync)
+            assertEquals("", marker.byHex)
+            assertTrue(marker.problem!!, marker.problem!!.startsWith("its fields map repeats the key 0x${key.toString(16)}: refused whole"))
+        }
+        val join = array(str("join"), str("public.first"), fixint(1))
+        refused(map(key(0xfb) to str(DistroChannelSync.TYPE), key(0xfc) to join, key(0xfc) to array(str("leave"), str("public.second"), fixint(2))), 0xfc)
+        refused(map(key(0xfb) to str("app.example"), key(0xfb) to str(DistroChannelSync.TYPE), key(0xfc) to join), 0xfb)
+        refused(map(key(0xfb) to str(DistroChannelSync.TYPE), key(0xfc) to join, key(0xfd) to str(device), key(0xfd) to str(sibling)), 0xfd)
+        refused(map(key(0x0c) to bin(ByteArray(0)), key(0x0c) to bin(ByteArray(0)), key(0xfb) to str(DistroChannelSync.TYPE), key(0xfc) to join), 0xc)
+        // A repeat in a message no entry of whose 0xFB names C: no membership message.
+        assertNull(DistroChannelSync.read(map(key(0xfb) to str("app.example"), key(0xfb) to str("app.other"), key(0xfc) to join)))
     }
 
     @Test

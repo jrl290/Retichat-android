@@ -73,13 +73,23 @@ object DistroChannelSync {
      * from 0 to [MAX_AT_MS], in any integer encoding. Elements after the third
      * are ignored. The name rules of a join are the disposition's, not this
      * reader's: a leave is not held to them. Never throws.
+     *
+     * A fields map that repeats a key is never read (RFed SPEC §17.14
+     * "Repeated keys", which settles it for §17.12 too: James, 2026-10-11).
+     * The distro unwrap refuses such a message whole, with its one log line,
+     * before the app is given its fields; one whose 0xFB names [TYPE] in any
+     * entry and whose map repeats an integer key would get here only if it did
+     * not, and is then a C with that problem (rule 4), never one read from one
+     * of its entries. Until 2026-10-11 the first entry of a key was read.
      */
     fun read(fieldsMap: ByteArray?): Marker? {
         if (fieldsMap == null || fieldsMap.isEmpty()) return null
         val b = fieldsMap
-        var typePos = -1
+        val typePositions = ArrayList<Int>()
         var dataPos = -1
         var metaPos = -1
+        val keys = HashSet<Long>()
+        var repeated: Long? = null
         try {
             val map = readHead(b, 0)
             if (map.kind != Kind.MAP) return null
@@ -88,19 +98,22 @@ object DistroChannelSync {
                 val key = readHead(b, pos)
                 pos = skip(b, pos, 0)
                 if (key.kind == Kind.INT && !key.overflow) {
-                    // The first entry of a key is the one read.
+                    if (!keys.add(key.int) && repeated == null) repeated = key.int
                     when (key.int) {
-                        FIELD_CUSTOM_TYPE.toLong() -> if (typePos < 0) typePos = pos
-                        FIELD_CUSTOM_DATA.toLong() -> if (dataPos < 0) dataPos = pos
-                        FIELD_CUSTOM_META.toLong() -> if (metaPos < 0) metaPos = pos
+                        FIELD_CUSTOM_TYPE.toLong() -> typePositions += pos
+                        FIELD_CUSTOM_DATA.toLong() -> dataPos = pos
+                        FIELD_CUSTOM_META.toLong() -> metaPos = pos
                     }
                 }
                 pos = skip(b, pos, 0)
             }
-            if (typePos < 0 || textOf(b, typePos) != TYPE) return null
+            if (typePositions.none { textOf(b, it) == TYPE }) return null
         } catch (_: IllegalArgumentException) {
             // Too broken to name its type: no membership message.
             return null
+        }
+        if (repeated != null) {
+            return Marker("", null, "its fields map repeats the key 0x${repeated.toString(16)}: refused whole (RFed SPEC §17.14 \"Repeated keys\")")
         }
         var byHex = ""
         fun bad(problem: String) = Marker(byHex, null, problem)

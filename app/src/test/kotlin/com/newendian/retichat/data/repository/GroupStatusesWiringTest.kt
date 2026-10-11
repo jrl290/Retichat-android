@@ -47,7 +47,7 @@ class GroupStatusesWiringTest {
         assertTrue(onKept.indexOf("remember(src, senderKey)") in 0 until onKept.indexOf("decideHeldLocked(src)"))
         assertTrue(onKept.contains("if (signature == Signature.VALIDATED && store.heldFrom(src) > 0)"))
         // The router's callback hands over both: the key a message carries and the message as received.
-        assertTrue(received.contains("handleGroupMessage(msgId, srcHex, content, timestamp, fields, group, signature, senderKey, packed, viaDistro = false)"))
+        assertTrue(received.contains("handleGroupMessage(msgId, groupId, srcHex, content, timestamp, fields, group, signature, senderKey, packed, viaDistro = false)"))
     }
 
     @Test

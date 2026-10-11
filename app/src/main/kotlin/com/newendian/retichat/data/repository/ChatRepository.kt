@@ -1514,31 +1514,35 @@ class ChatRepository(
         })
         // Field 0xD1, decoded by the one Rust decoder (bin or str; §3).
         val nameField = NameField.fromTrailer(RetichatBridge.displayNameDecode(fieldsRaw))
-        // The group entries as every path reads them (RFed SPEC §17.14: a repeated
-        // key from its first entry, a distro marker never a group message).
-        val entries = fields.groupEntries()
-        val groupId = entries.groupId
+        // What it is (DeliveryPolicy.directRoute, the order iOS and the web use). A
+        // message whose payload repeats a key never gets here: the router refused it
+        // whole, with its one log line (RFed SPEC §17.14 "Repeated keys").
+        val route = DeliveryPolicy.directRoute(fields)
+        val groupId = (route as? DeliveryPolicy.DirectRoute.Group)?.groupId
         Log.i(TAG, "onMessageReceived: src=${srcHash.toHex().take(16)}, groupId=$groupId, content='${content.take(40)}'")
+        when (route) {
+            // RFed SPEC §17.11: a distro sent copy reaches this device only through
+            // the distro fan-out (RfedDistroClient), never on its own address.
+            // Dropped first, whoever sent it and filter on or off, as iOS and the
+            // web drop it: kept, it would show the user's own message as someone's
+            // incoming one. Until 2026-10-05 it went on as a DM from the distro.
+            DeliveryPolicy.DirectRoute.SentCopy -> {
+                Log.i(TAG, "onMessageReceived: DROPPED distro sent-copy marker outside fan-out src=${srcHash.toHex().take(8)}")
+                return
+            }
+            // RFed SPEC §17.14, "On the direct path too": a GROUP_ID of any type in either
+            // form makes it a group message whatever its 0xFB, and one that is not 32 hex is
+            // refused here, never a DM or a group. Until 2026-10-11 a bin id went on as a DM.
+            DeliveryPolicy.DirectRoute.BadGroupId -> {
+                Log.i(TAG, "onMessageReceived: REFUSED group message from ${srcHash.toHex().take(8)}: its GROUP_ID is not a str of 32 hex characters (RFed SPEC §17.14)")
+                return
+            }
+            else -> Unit
+        }
         // A distro identity transfer from another of our devices (RFed SPEC §17.9):
         // LXMF's custom pair with our type string; not a message to display.
         // Offered below only when the privacy filter lets its sender through.
-        val transferKey = DeliveryPolicy.distroTransferKey(fields)
-        // RFed SPEC §17.11: a distro sent copy reaches this device only through
-        // the distro fan-out (RfedDistroClient), never on its own address.
-        // Dropped first, whoever sent it and filter on or off, as iOS and the
-        // web drop it: kept, it would show the user's own message as someone's
-        // incoming one. Until 2026-10-05 it went on as a DM from the distro.
-        if (DeliveryPolicy.isDistroSentCopy(fields)) {
-            Log.i(TAG, "onMessageReceived: DROPPED distro sent-copy marker outside fan-out src=${srcHash.toHex().take(8)}")
-            return
-        }
-        // RFed SPEC §17.14 step 2, on this path as on the distro's: a GROUP_ID of any
-        // type in either form makes it a group message, and one that is not 32 hex is
-        // dropped here, never shown as a DM. Until 2026-10-11 a bin id went on as one.
-        if (entries.hasGroupId && groupId == null) {
-            Log.i(TAG, "onMessageReceived: DROPPED group message from ${srcHash.toHex().take(8)}: its group id is not 32 hex characters")
-            return
-        }
+        val transferKey = (route as? DeliveryPolicy.DirectRoute.Transfer)?.key
         val signature = Signature.reason(signatureValid, unverifiedReason)
         scope.launch(Dispatchers.IO) {
             val srcHex = srcHash.toHex()
@@ -1599,7 +1603,7 @@ class ChatRepository(
             }
 
             if (groupId != null && group != null) {
-                handleGroupMessage(msgId, srcHex, content, timestamp, fields, group, signature, senderKey, packed, viaDistro = false)
+                handleGroupMessage(msgId, groupId, srcHex, content, timestamp, fields, group, signature, senderKey, packed, viaDistro = false)
             } else {
                 handleDirectMessage(msgId, srcHash, srcHex, content, timestamp, fields)
             }
@@ -1793,7 +1797,7 @@ class ChatRepository(
         }
         // §6.2: kept only when the handler applied or stored it; otherwise its key is not
         // recorded and a later copy (one whose signature validates, say) is judged again.
-        val kept = handleGroupMessage(hash, srcHex, content, timestamp, fields, here, signature, keys.senderKey, keys.packed, viaDistro = true)
+        val kept = handleGroupMessage(hash, groupId, srcHex, content, timestamp, fields, here, signature, keys.senderKey, keys.packed, viaDistro = true)
         if (kept) DistroGroupOutcome.KEPT else {
             Log.i(TAG, "$what not kept by the group handler: its key is not recorded, and its next copy is judged again (§6.2)")
             DistroGroupOutcome.DROPPED
@@ -2259,7 +2263,9 @@ class ChatRepository(
      * in [onMessageReceived] with [standing]). James's group model: the
      * members are the creator's list, fixed; an accept or a leave is the
      * packet source's own; a leave (a decline's included) is final; a pending
-     * group allows nobody and relays for nobody.
+     * group allows nobody and relays for nobody. [groupId] is the id the path
+     * read (the direct path's [DeliveryPolicy.directRoute], the distro path's
+     * unwrap), never read again here: the two read a distro marker differently.
      *
      * Returns whether the message was kept: applied or stored. The distro path
      * records its `grp:` key only then; a dropped one is judged again on its
@@ -2267,6 +2273,7 @@ class ChatRepository(
      */
     private suspend fun handleGroupMessage(
         msgId: String,
+        groupId: String,
         srcHex: String,
         content: String,
         timestamp: Double,
@@ -2277,10 +2284,6 @@ class ChatRepository(
         packed: ByteArray?,
         viaDistro: Boolean,
     ): Boolean {
-        val groupId = fields.groupEntries().groupId ?: run {
-            Log.w(TAG, "group message ${msgId.take(12)} from ${srcHex.take(8)} DROPPED: no group id")
-            return false
-        }
         val groupAction = fields.group(GroupEntry.ACTION)
 
         // What any group message the rule kept brings: the key an accept or

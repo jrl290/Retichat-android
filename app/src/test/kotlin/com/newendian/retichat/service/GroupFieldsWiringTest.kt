@@ -50,9 +50,12 @@ class GroupFieldsWiringTest {
         // 13: the distro path's group messages (GROUPS-DISTRO-DESIGN.md §6.1, §6.3) read the same entries the same way
         // (16 until the review of 8d330c4 moved that path's decision into DistroGroupAdmission, which reads GROUP_SENDER once;
         // 15 until 2026-10-11, when the direct path and the group branch took GROUP_ID from the one reading of
-        // has_group_id / group_id, LxmfFields.groupEntries, which reads it through group() too).
+        // has_group_id / group_id, LxmfFields.groupEntries, which reads it through group() too). The direct path
+        // reads them through DeliveryPolicy.directRoute (LxmfFields.directGroupEntries), and the group branch takes
+        // the id its path read: the repository reads no group entries reading itself.
         assertEquals(13, Regex("fields\\.group\\(GroupEntry\\.").findAll(repo).count())
-        assertEquals(2, Regex("fields\\.groupEntries\\(\\)").findAll(repo).count())
+        assertEquals(0, Regex("fields\\.(direct)?[gG]roupEntries\\(\\)").findAll(repo).count())
+        assertTrue(repo.contains("val route = DeliveryPolicy.directRoute(fields)"))
     }
 
     @Test

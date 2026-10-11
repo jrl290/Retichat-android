@@ -4,6 +4,7 @@ import com.newendian.retichat.GroupMemberStatuses
 import com.newendian.retichat.MemberStatus
 import com.newendian.retichat.bridge.GroupEntry
 import com.newendian.retichat.bridge.GroupNative
+import com.newendian.retichat.bridge.GroupUnpack
 import com.newendian.retichat.bridge.LxmfFields
 import com.newendian.retichat.bridge.MiniJson
 import com.newendian.retichat.bridge.UnpackedGroupMessage
@@ -354,10 +355,19 @@ class FakeGroupNative : GroupNative {
         return true
     }
 
+    /**
+     * Messages the native layer refuses whole (RFed SPEC §17.14 "Repeated
+     * keys"): LXMF-rust decides that, with Python's key equality (pinned by the
+     * JNI crate's test); this fake is told which.
+     */
+    val refused = mutableListOf<ByteArray>()
+
     /** The glue's `unpack_element`: 97..=2144 bytes. */
-    override fun unpack(packed: ByteArray): UnpackedGroupMessage? =
-        if (packed.size <= GroupStatuses.PACKED_HEADER_LENGTH || packed.size > GroupStatuses.STATUS_PACKED_LIMIT) null
-        else receipt(packed)?.unpacked
+    override fun unpack(packed: ByteArray): GroupUnpack = when {
+        packed.size <= GroupStatuses.PACKED_HEADER_LENGTH || packed.size > GroupStatuses.STATUS_PACKED_LIMIT -> GroupUnpack.NotLxmf
+        refused.any { it.contentEquals(packed) } -> GroupUnpack.Refused
+        else -> receipt(packed)?.unpacked?.let { GroupUnpack.Unpacked(it) } ?: GroupUnpack.NotLxmf
+    }
 
     /** The glue's delivery callback for a message of any size: the copy is given only up to the limit, and only for an accept or leave. */
     fun receipt(packed: ByteArray): Receipt? {

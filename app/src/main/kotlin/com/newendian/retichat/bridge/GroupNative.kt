@@ -14,9 +14,10 @@ interface GroupNative {
      * checked as if it had arrived directly: what its signature is worth under
      * the key held for its source, else under the key it carries for its own
      * sender when that binds ([UnpackedGroupMessage.signature]). Nothing is
-     * remembered. Null when it is not an LXMF message.
+     * remembered. [GroupUnpack.Refused] when its payload repeats a key
+     * ([NativeRefusal]), [GroupUnpack.NotLxmf] when it is not an LXMF message.
      */
-    fun unpack(packed: ByteArray): UnpackedGroupMessage?
+    fun unpack(packed: ByteArray): GroupUnpack
 
     /**
      * Remember [publicKey] as the key of the `lxmf.delivery` destination
@@ -28,10 +29,25 @@ interface GroupNative {
 
 /** The native implementation: [RetichatBridge]. */
 object JniGroupNative : GroupNative {
-    override fun unpack(packed: ByteArray): UnpackedGroupMessage? = RetichatBridge.groupUnpackPacked(packed)
+    override fun unpack(packed: ByteArray): GroupUnpack = RetichatBridge.groupUnpackPacked(packed)
 
     override fun rememberKey(memberHex: String, publicKey: ByteArray): Boolean {
         val hash = runCatching { memberHex.hexToBytes() }.getOrNull() ?: return false
         return RetichatBridge.identityRememberLxmfDelivery(hash, publicKey)
     }
+}
+
+/** What [GroupNative.unpack] gives for a packed message. */
+sealed class GroupUnpack {
+    data class Unpacked(val message: UnpackedGroupMessage) : GroupUnpack()
+
+    /**
+     * Refused whole: its payload holds a map that repeats a key (RFed SPEC
+     * §17.14 "Repeated keys", [NativeRefusal]). The native layer has logged
+     * it; it is never counted, held or applied.
+     */
+    object Refused : GroupUnpack() { override fun toString() = "refused whole: a map in it repeats a key, as Python LXMF refuses it (RFed SPEC §17.14)" }
+
+    /** Not an LXMF message of the size of an accept or leave, or a reply the bridge could not read. */
+    object NotLxmf : GroupUnpack() { override fun toString() = "not an LXMF message" }
 }

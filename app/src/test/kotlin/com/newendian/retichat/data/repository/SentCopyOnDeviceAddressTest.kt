@@ -40,11 +40,12 @@ class SentCopyOnDeviceAddressTest {
         val repo = File("src/main/kotlin/com/newendian/retichat/data/repository/ChatRepository.kt").readText()
         val start = repo.indexOf("fun onMessageReceived(")
         val received = repo.substring(start, repo.indexOf("\n    fun onDistroMessageReceived(", start))
-        val drop = received.indexOf("if (DeliveryPolicy.isDistroSentCopy(fields)) {")
-        assertTrue(drop >= 0)
-        // Its block returns before the next statement.
-        val block = received.substring(drop, received.indexOf("val signature = ", drop))
-        assertTrue(block.contains("            return\n        }"))
+        // DeliveryPolicy.directRoute's first case (DirectRouteTest), acted on before anything else.
+        val drop = received.indexOf("DeliveryPolicy.DirectRoute.SentCopy -> {")
+        assertTrue(drop > received.indexOf("val route = DeliveryPolicy.directRoute(fields)"))
+        // Its block returns before the next case.
+        val block = received.substring(drop, received.indexOf("DeliveryPolicy.DirectRoute.BadGroupId -> {", drop))
+        assertTrue(block.contains("                return\n            }"))
         // Before the filter and the group rule, and before any write.
         for (later in listOf("allowlisted(srcHex)", "DeliveryPolicy.groupMessage(", "ensureContact(srcHex)", "handleDirectMessage(")) {
             assertTrue(later, drop < received.indexOf(later))

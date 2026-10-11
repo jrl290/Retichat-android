@@ -1083,6 +1083,7 @@ mod distro_unwrap_tests {
         assert_eq!(refused.len(), 11);
         let pairs = v["key_equality"].as_array().unwrap();
         assert_eq!(pairs.len(), 22);
+        assert_eq!(lxmf_rust::msgpack_keys::REFUSED_WHOLE, "refused whole:");
         for vector in refused.iter().chain(pairs) {
             let name = vector["name"].as_str().unwrap();
             let refuse = vector.get("refused").map_or(true, |r| r.as_bool().unwrap());
@@ -1091,10 +1092,12 @@ mod distro_unwrap_tests {
             let unwrapped = distro_unwrap_json(&mut d, &blob);
             let received = unpack_element_with(&packed, &|_| None);
             if refuse {
+                // The words the app's NativeRefusal looks for, so it writes no second line and
+                // stores nothing (app NativeRefusal.REFUSED_WHOLE, pinned to this test).
                 let err = unwrapped.err().unwrap_or_else(|| panic!("{name}: the distro unwrap must refuse it"));
-                assert!(err.contains("repeats a key"), "{name}: {err}");
+                assert!(err.contains("repeats a key") && err.contains(lxmf_rust::msgpack_keys::REFUSED_WHOLE), "{name}: {err}");
                 let err = received.err().unwrap_or_else(|| panic!("{name}: the group receipt must refuse it"));
-                assert!(err.contains("repeats a key"), "{name}: {err}");
+                assert!(err.contains("repeats a key") && err.contains(lxmf_rust::msgpack_keys::REFUSED_WHOLE), "{name}: {err}");
             } else {
                 assert!(unwrapped.unwrap_or_else(|e| panic!("{name}: {e}")).is_some(), "{name}: a blob for D");
                 assert!(received.is_ok(), "{name}: read on the direct path");

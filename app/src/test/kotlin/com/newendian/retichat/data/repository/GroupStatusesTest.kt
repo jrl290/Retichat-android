@@ -2,6 +2,7 @@ package com.newendian.retichat.data.repository
 
 import com.newendian.retichat.MemberStatus
 import com.newendian.retichat.bridge.GroupEntry
+import com.newendian.retichat.bridge.GroupUnpack
 import com.newendian.retichat.bridge.LxmfFields
 import com.newendian.retichat.data.model.toHex
 import com.newendian.retichat.data.repository.DeliveryPolicy.Held
@@ -717,6 +718,46 @@ class GroupStatusesTest {
             assertEquals(MemberStatus.INVITED, r.status("carol"))
             assertEquals(if (switched) 1 else 0, r.store.heldRows.size)
         }
+    }
+
+    // ── RFed SPEC §17.14 "Repeated keys": what the native layer refuses whole ──
+
+    @Test
+    fun anElementTheNativeLayerRefusesIsSkippedAsRefusedNeverCountedOrHeld() = runBlocking {
+        for (switched in bothForms) {
+            val r = rig(me = "frank", switched = switched, holds = listOf("creator"))
+            r.hold(accepted = true)
+            val refused = msg("alice")
+            val unverifiable = msg("erin", key = false)
+            r.native.refused += listOf(refused, unverifiable)
+            r.receive(status("frank", listOf(refused, unverifiable, msg("bob", Action.LEAVE))))
+            assertEquals(StatusTally(3, 1, 0, 2), r.lastTally)
+            assertEquals(MemberStatus.INVITED, r.status("alice"))
+            assertEquals(MemberStatus.INVITED, r.status("erin"))
+            assertEquals(MemberStatus.LEFT, r.status("bob"))
+            assertTrue("nothing refused is held", r.store.heldRows.isEmpty())
+            // The skip names the refusal; the native layer wrote the refusal's own line.
+            for (index in 0..1) {
+                assertTrue(r.logs.toString(), r.logs.any { it.startsWith("Skipped element $index of the status") && it.endsWith(": ${GroupUnpack.Refused}") })
+            }
+            assertFalse(r.logs.any { it.contains("not an LXMF message") })
+        }
+    }
+
+    @Test
+    fun aHeldEntryTheNativeLayerNowRefusesIsReleasedNeverCounted() = runBlocking {
+        val r = rig(me = "frank", switched = true, holds = listOf("creator"))
+        r.hold(accepted = true)
+        val keyless = msg("erin", key = false)
+        r.receive(status("frank", listOf(keyless)))
+        assertEquals(1, r.store.heldRows.size)
+        // Held before this build refused such a message; erin's key arrives.
+        r.native.refused += keyless
+        r.native.know(id("erin"))
+        r.engine.decideHeld(id("erin").hashHex)
+        assertTrue(r.store.heldRows.isEmpty())
+        assertEquals(MemberStatus.INVITED, r.status("erin"))
+        assertTrue(r.logs.toString(), r.logs.any { it.startsWith("Dropped held accept") && it.endsWith("it no longer unpacks (${GroupUnpack.Refused})") })
     }
 
     @Test

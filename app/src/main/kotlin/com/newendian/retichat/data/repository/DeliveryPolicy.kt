@@ -267,4 +267,38 @@ object DeliveryPolicy {
      */
     fun isDistroSentCopy(fields: LxmfFields): Boolean =
         fields.getString(LxmfFields.FIELD_CUSTOM_TYPE) == LxmfFields.DISTRO_SENT_TYPE
+
+    /** What a message that arrived directly, on the device's own address, is ([directRoute]). */
+    sealed class DirectRoute {
+        /** A distro sent copy ([isDistroSentCopy]): dropped with a log line. */
+        object SentCopy : DirectRoute()
+        /** A distro identity transfer carrying [key] ([distroTransferKey]): offered when the filter lets its sender through. */
+        data class Transfer(val key: String) : DirectRoute()
+        /** A GROUP_ID that is not a str of 32 hex characters: refused with a log line, never a DM or a group. */
+        object BadGroupId : DirectRoute()
+        /** A group message for [groupId], 32 lowercase hex. */
+        data class Group(val groupId: String) : DirectRoute()
+        /** Everything else: a direct message, under the privacy filter. */
+        object Direct : DirectRoute()
+    }
+
+    /**
+     * How a message that arrived directly is classified, in this order, as iOS
+     * and the web classify it: a distro sent copy; an identity transfer; then,
+     * by its group id (RFed SPEC §17.14, "On the direct path too"), a group
+     * message, or one refused for a GROUP_ID that is not 32 hex (another
+     * length, not hex, a bin, an int, nil); then a direct message. Here a
+     * distro marker means nothing to the group id
+     * ([LxmfFields.directGroupEntries]): a `rfed.distro.channel` or
+     * `rfed.distro.group` marker beside a GROUP_ID leaves it a group message.
+     * Until 2026-10-11 such a marker made it a direct message on this path,
+     * and a transfer with a malformed GROUP_ID was refused instead of offered.
+     */
+    fun directRoute(fields: LxmfFields): DirectRoute {
+        if (isDistroSentCopy(fields)) return DirectRoute.SentCopy
+        distroTransferKey(fields)?.let { return DirectRoute.Transfer(it) }
+        val entries = fields.directGroupEntries()
+        if (!entries.hasGroupId) return DirectRoute.Direct
+        return entries.groupId?.let { DirectRoute.Group(it) } ?: DirectRoute.BadGroupId
+    }
 }

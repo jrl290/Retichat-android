@@ -261,14 +261,19 @@ object RfedDistroClient {
     suspend fun handleBlob(context: Context, blob: ByteArray) {
         val distro = DistroManager.identityHandle
         if (distro == 0L) return
-        val json = RetichatBridge.distroUnwrap(distro, blob)
-        if (json == null) {
-            Log.w(TAG, "blob rejected: ${RetichatBridge.lastError()}")
-            return
-        }
-        if (json.isEmpty()) {
-            Log.i(TAG, "blob for a different distro — ignored")
-            return
+        val json = when (val unwrapped = DistroUnwrapOutcome.of(RetichatBridge.distroUnwrap(distro, blob)) { RetichatBridge.lastError() }) {
+            // RFed SPEC §17.14 "Repeated keys": refused whole, as Python LXMF refuses it.
+            // LXMF-rust logged its one line; nothing is stored, marked as seen or applied.
+            DistroUnwrapOutcome.Refused -> return
+            is DistroUnwrapOutcome.Rejected -> {
+                Log.w(TAG, "blob rejected: ${unwrapped.error}")
+                return
+            }
+            DistroUnwrapOutcome.OtherDistro -> {
+                Log.i(TAG, "blob for a different distro — ignored")
+                return
+            }
+            is DistroUnwrapOutcome.Message -> unwrapped.json
         }
         val o = JSONObject(json)
         val srcHex = o.getString("source_hash")

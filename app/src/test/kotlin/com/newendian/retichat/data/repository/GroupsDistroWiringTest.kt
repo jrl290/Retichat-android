@@ -128,7 +128,7 @@ class GroupsDistroWiringTest {
             // §6.4: the sender's name row, as the direct path makes it, then the group handler.
             "ensureContact(srcHex)",
             "acceptMessageName(srcHex, nameField, unverifiedReason, timestamp)",
-            "handleGroupMessage(hash, srcHex, content, timestamp, fields, here, signature, keys.senderKey, keys.packed, viaDistro = true)",
+            "handleGroupMessage(hash, groupId, srcHex, content, timestamp, fields, here, signature, keys.senderKey, keys.packed, viaDistro = true)",
         )
         // The direct path runs the same three first rules before the group rule (§6.3).
         inOrder(body(repo, "onMessageReceived"), "DeliveryPolicy.firstRules(", "DeliveryPolicy.groupMessage(", "handleGroupMessage(")

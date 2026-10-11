@@ -4,6 +4,7 @@ import com.newendian.retichat.GroupMemberStatuses
 import com.newendian.retichat.MemberStatus
 import com.newendian.retichat.bridge.GroupEntry
 import com.newendian.retichat.bridge.GroupNative
+import com.newendian.retichat.bridge.GroupUnpack
 import com.newendian.retichat.bridge.LxmfFields
 import com.newendian.retichat.data.db.entity.ChatEntity
 import com.newendian.retichat.data.db.entity.GroupMemberEntity
@@ -321,9 +322,15 @@ class GroupStatusEngine(
         if (element.size <= GroupStatuses.PACKED_HEADER_LENGTH || element.size > GroupStatuses.STATUS_PACKED_LIMIT) {
             return "${element.size} bytes is not the size of an accept or leave"
         }
-        val unpacked = native.unpack(element) ?: return "not an LXMF message"
+        // A refused element (its payload repeats a key) is skipped as such: the
+        // native layer logged the refusal, and nothing of it is counted or held.
+        val unpacked = when (val u = native.unpack(element)) {
+            is GroupUnpack.Unpacked -> u.message
+            GroupUnpack.Refused, GroupUnpack.NotLxmf -> return u.toString()
+        }
         val fields = LxmfFields.decodeOrEmpty(unpacked.fieldsRaw)
-        val about = fields.groupEntries().groupId ?: return "no group id"
+        // Read as a message that arrived directly is read (RFed SPEC §17.14).
+        val about = fields.directGroupEntries().groupId ?: return "no group id"
         if (about != groupId) return "about another group"
         val action = fields.group(GroupEntry.ACTION)
         if (action != GroupChatManager.Action.ACCEPT && action != GroupChatManager.Action.LEAVE) {
@@ -522,11 +529,13 @@ class GroupStatusEngine(
     private suspend fun decideHeldLocked(source: String?) {
         for (entry in store.held()) {
             if (source != null && entry.srcHex != source) continue
-            val unpacked = native.unpack(entry.packed)
-            if (unpacked == null) {
-                store.release(entry)
-                log("Dropped held ${entry.action} for group ${entry.chatId} from ${entry.srcHex.take(12)}: it no longer unpacks")
-                continue
+            val unpacked = when (val u = native.unpack(entry.packed)) {
+                is GroupUnpack.Unpacked -> u.message
+                GroupUnpack.Refused, GroupUnpack.NotLxmf -> {
+                    store.release(entry)
+                    log("Dropped held ${entry.action} for group ${entry.chatId} from ${entry.srcHex.take(12)}: it no longer unpacks ($u)")
+                    continue
+                }
             }
             if (unpacked.signature == Signature.SOURCE_UNKNOWN) continue
             store.release(entry)

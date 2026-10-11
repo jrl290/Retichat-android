@@ -515,11 +515,16 @@ object RetichatBridge {
      * member's own packed accept or leave, 97..=2144 bytes), unpacked and
      * checked as if it had arrived directly (see [UnpackedGroupMessage]):
      * the signature under the key held for its source, else under the key it
-     * carries when that binds. Nothing is remembered. Null with [lastError]
-     * when it is not an LXMF message of that size.
+     * carries when that binds. Nothing is remembered. [GroupUnpack.Refused]
+     * when its payload repeats a key (the native layer has logged it,
+     * [NativeRefusal]); [GroupUnpack.NotLxmf] when it is not an LXMF message
+     * of that size.
      */
-    fun groupUnpackPacked(packed: ByteArray): UnpackedGroupMessage? =
-        nativeGroupUnpackPacked(packed)?.let { UnpackedGroupMessage.parse(it) }
+    fun groupUnpackPacked(packed: ByteArray): GroupUnpack {
+        val raw = nativeGroupUnpackPacked(packed)
+            ?: return if (NativeRefusal.isRefusal(lastError())) GroupUnpack.Refused else GroupUnpack.NotLxmf
+        return UnpackedGroupMessage.parse(raw)?.let { GroupUnpack.Unpacked(it) } ?: GroupUnpack.NotLxmf
+    }
 
     /** Clone a message as a fresh PROPAGATED copy, preserving fields/attachments. */
     fun messageClonePropagated(handle: Long): Long = nativeMessageClonePropagated(handle)
