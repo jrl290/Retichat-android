@@ -1529,8 +1529,8 @@ class ChatRepository(
         when (route) {
             // RFed SPEC §17.11: a distro sent copy reaches this device only through
             // the distro fan-out (RfedDistroClient), never on its own address.
-            // Dropped first, whoever sent it and filter on or off, as iOS and the
-            // web drop it: kept, it would show the user's own message as someone's
+            // Dropped (after a malformed GROUP_ID is refused, §17.14), whoever sent
+            // it and filter on or off, as iOS and the web drop it: kept, it would show the user's own message as someone's
             // incoming one. Until 2026-10-05 it went on as a DM from the distro.
             DeliveryPolicy.DirectRoute.SentCopy -> {
                 Log.i(TAG, "onMessageReceived: DROPPED distro sent-copy marker outside fan-out src=${srcHash.toHex().take(8)}")

@@ -11,12 +11,12 @@ import java.io.File
 
 /**
  * What a message that arrived directly, on the device's own address, is
- * (DeliveryPolicy.directRoute; RFed SPEC §17.14, "On the direct path too"): a
- * distro sent copy is dropped and an identity transfer offered first (iOS and
- * the web refuse a malformed GROUP_ID before either; that order is open for
- * James); then, by its group id whatever its 0xFB, a group message, or a
- * GROUP_ID that is not 32 hex refused with a log line, never a DM or a group;
- * then a DM. The `group_entries` vectors (LXMF-rust @16a9902) give the readings,
+ * (DeliveryPolicy.directRoute; RFed SPEC §17.14, "On the direct path too", the
+ * order decided 2026-10-11 for James): a GROUP_ID that is not 32 hex refused
+ * with a log line first, whatever else the message carries; then a distro sent
+ * copy dropped, an identity transfer offered, a group message by its group id
+ * whatever its 0xFB, and a DM. iOS and the web classify so; until 2026-10-11
+ * Android looked at the sent-copy and transfer markers before the GROUP_ID. The `group_entries` vectors (LXMF-rust @16a9902) give the readings,
  * their marker_* cases a GROUP_ID beside each of the four distro markers.
  * Until 2026-10-11 a `rfed.distro.channel` or `rfed.distro.group` marker
  * beside a GROUP_ID made the message a DM on this path. A message whose
@@ -46,16 +46,22 @@ class DirectRouteTest {
     }
 
     @Test
-    fun aSentCopyIsDroppedAndATransferOfferedWhateverGroupIdTheyCarry() {
+    fun aMalformedGroupIdIsRefusedFirstThenASentCopyIsDroppedAndATransferOffered() {
+        // Beside a well-formed GROUP_ID, the sent-copy and transfer markers still decide (steps 2 and 3).
         assertEquals(DirectRoute.SentCopy, route("marker_sent"))
         assertEquals(DirectRoute.Transfer("ab".repeat(16)), route("marker_transfer"))
-        // A transfer whose GROUP_ID is malformed is offered all the same here. iOS (cd2282f) and
-        // the web (3a0efa6) refuse it: they look at the GROUP_ID first. Which order is right is
-        // open for James (RFed SPEC §17.14, 2026-10-11); this pins Android's until it is ruled.
-        val transfer = map(
-            key(0xFB) to str("rfed.distro.transfer"), key(0xFC) to str("ab".repeat(16)), key(0xA0) to byteArrayOf(0x05),
-        )
-        assertEquals(DirectRoute.Transfer("ab".repeat(16)), DeliveryPolicy.directRoute(LxmfFields.decode(transfer)))
+        // Beside a malformed one, the message is refused (step 1), as iOS (cd2282f) and the web (3a0efa6) do.
+        // Until 2026-10-11 Android offered such a transfer and dropped such a sent copy.
+        for ((type, what) in listOf("rfed.distro.transfer" to "a transfer", "rfed.distro.sent" to "a sent copy")) {
+            for (malformed in listOf(byteArrayOf(0x05), str("xyz"), byteArrayOf(0xC0.toByte()), str("ab".repeat(15)))) {
+                val fields = map(key(0xFB) to str(type), key(0xFC) to str("ab".repeat(16)), key(0xA0) to malformed)
+                assertEquals(what, DirectRoute.BadGroupId, DeliveryPolicy.directRoute(LxmfFields.decode(fields)))
+            }
+            // Control: with no GROUP_ID at all, the marker decides.
+            val bare = map(key(0xFB) to str(type), key(0xFC) to str("ab".repeat(16)))
+            val want = if (type == "rfed.distro.sent") DirectRoute.SentCopy else DirectRoute.Transfer("ab".repeat(16))
+            assertEquals("$what without a GROUP_ID", want, DeliveryPolicy.directRoute(LxmfFields.decode(bare)))
+        }
     }
 
     @Test

@@ -299,30 +299,23 @@ object DeliveryPolicy {
     }
 
     /**
-     * How a message that arrived directly is classified, in this order: a
-     * distro sent copy; an identity transfer; then, by its group id (RFed SPEC
-     * §17.14, "On the direct path too"), a group message, or one refused for a
-     * GROUP_ID that is not 32 hex (another length, not hex, a bin, an int,
-     * nil); then a direct message. A `rfed.distro.channel` or
-     * `rfed.distro.group` marker means nothing to the group id
-     * ([LxmfFields.directGroupEntries]): beside a GROUP_ID it leaves it a group
-     * message, as on iOS and the web. Until 2026-10-11 such a marker made it a
-     * direct message on this path.
-     *
-     * Not the order iOS (cd2282f) and the web (3a0efa6) use for one case: they
-     * refuse a malformed GROUP_ID before they look at the sent-copy and
-     * transfer markers, so a transfer or a sent copy that also carries a
-     * malformed GROUP_ID is refused there, and is offered (a transfer) or
-     * dropped as a sent copy here. Which order is right is not ruled (RFed SPEC
-     * §17.14, open for James, 2026-10-11); until it is, this order is kept as
-     * it was, and DirectRouteTest pins it so a change is deliberate. (4d337d1
-     * said iOS and the web offer such a transfer; they refuse it.)
+     * How a message that arrived directly is classified, in RFed SPEC §17.14's
+     * order ("On the direct path too"): a GROUP_ID that is not 32 hex (another
+     * length, not hex, a bin, an int, nil) is refused first; then a distro sent
+     * copy; an identity transfer; a group message, by its group id; then a
+     * direct message. So a transfer or a sent copy that also carries a
+     * malformed GROUP_ID is refused, as on iOS (cd2282f) and the web (3a0efa6);
+     * until 2026-10-11 this path looked at the sent-copy and transfer markers
+     * first, and offered such a transfer or dropped such a copy. A
+     * `rfed.distro.channel` or `rfed.distro.group` marker means nothing to the
+     * group id ([LxmfFields.directGroupEntries]): beside a GROUP_ID it leaves it
+     * a group message, as on iOS and the web.
      */
     fun directRoute(fields: LxmfFields): DirectRoute {
+        val entries = fields.directGroupEntries()
+        if (entries.hasGroupId && entries.groupId == null) return DirectRoute.BadGroupId
         if (isDistroSentCopy(fields)) return DirectRoute.SentCopy
         distroTransferKey(fields)?.let { return DirectRoute.Transfer(it) }
-        val entries = fields.directGroupEntries()
-        if (!entries.hasGroupId) return DirectRoute.Direct
-        return entries.groupId?.let { DirectRoute.Group(it) } ?: DirectRoute.BadGroupId
+        return entries.groupId?.let { DirectRoute.Group(it) } ?: DirectRoute.Direct
     }
 }
