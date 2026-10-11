@@ -153,8 +153,13 @@ object DeliveryPolicy {
      *   its packet source [srcHex] is not one is never the user's own: dropped.
      * - A group message from the distro itself ([echoes]: the D this device
      *   holds, and the group's own distro) is the user's own echo: sends exclude
-     *   every self address, so it is unexpected, and dropped. A known sibling's
-     *   is the user's own act, and goes on.
+     *   every self address, so it is unexpected, and dropped.
+     * - A group message from another self address (a known sibling, another
+     *   device of D) whose signature is not validated is dropped, whatever its
+     *   action (RFed SPEC §17.14): a device of D is never another member, and
+     *   only a validly signed message from it is the user's own act, which goes
+     *   on. Until 2026-10-11 only such a post was dropped
+     *   ([GroupPost.UNPROVEN_OWN]); its accept, leave, status or invite went on.
      */
     fun firstRules(signature: Int, srcHex: String, groupSender: String?, selves: Set<String>, echoes: Set<String>): String? {
         if (signature == Signature.INVALID) return "its signature is invalid (forged)"
@@ -163,6 +168,9 @@ object DeliveryPolicy {
             return "it names the user (${named.take(8)}) as its sender, but its source ${srcHex.take(8)} is not the user's"
         }
         if (srcHex in echoes) return "its source is the user's own distro: the user's own echo"
+        if (srcHex in selves && signature != Signature.VALIDATED) {
+            return "its source ${srcHex.take(8)} is one of the user's own devices and its signature is not validated (signature=$signature): only a validly signed message from it is the user's own"
+        }
         return null
     }
 

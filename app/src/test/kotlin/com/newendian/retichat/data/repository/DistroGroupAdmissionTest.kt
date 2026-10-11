@@ -100,6 +100,16 @@ class DistroGroupAdmissionTest {
         // A forged invite never reaches the filter: nothing is recorded.
         val forged = DistroGroupAdmission.decide(facts(Action.INVITE, src = stranger, heldHere = false, signature = Signature.INVALID))
         assertTrue(dropped(forged) && !filters(forged))
+        // RFed SPEC §17.14: a device of D whose signature is not validated, whatever its action, held here or not.
+        for (action in listOf(null, Action.ACCEPT, Action.LEAVE, Action.STATUS, Action.INVITE)) {
+            for (heldHere in listOf(true, false)) {
+                val v = DistroGroupAdmission.decide(
+                    facts(action, src = sib, signature = Signature.SOURCE_UNKNOWN, listed = listOf(d, creator, m, sib), heldHere = heldHere,
+                        sourceStatus = MemberStatus.ACCEPTED, sourceAllowed = action == Action.INVITE),
+                )
+                assertTrue("$action, held here $heldHere: $v", dropped(v) && (v as Verdict.Drop).why.contains("not validated") && !filters(v))
+            }
+        }
     }
 
     @Test

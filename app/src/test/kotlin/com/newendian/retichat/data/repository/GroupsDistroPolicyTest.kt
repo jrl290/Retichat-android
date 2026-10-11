@@ -103,6 +103,28 @@ class GroupsDistroPolicyTest {
         assertTrue(DeliveryPolicy.firstRules(Signature.VALIDATED, m, device, setOf(device), emptySet())!!.contains("names the user"))
     }
 
+    @Test
+    fun aMessageFromAnotherDeviceOfDWhoseSignatureIsNotValidatedIsDroppedWhateverItNames() {
+        // RFed SPEC §17.14 (alignment decision 1): a device of D is never another member, and only a
+        // validly signed message from it is the user's own. Until 2026-10-11 only its post was dropped
+        // here (GroupPost.UNPROVEN_OWN); its accept, leave, status or invite went on to the action's rule.
+        val selves = setOf(d, device, sib)
+        val echoes = setOf(d)
+        for (named in listOf(null, sib, m, d)) {
+            val why = DeliveryPolicy.firstRules(Signature.SOURCE_UNKNOWN, sib, named, selves, echoes)
+            assertTrue("GROUP_SENDER $named: $why", why!!.contains("not validated"))
+        }
+        // An invalid one is the forged rule's, before this one.
+        assertTrue(DeliveryPolicy.firstRules(Signature.INVALID, sib, sib, selves, echoes)!!.contains("forged"))
+        // Validly signed, it is the user's own act and goes on.
+        assertNull(DeliveryPolicy.firstRules(Signature.VALIDATED, sib, sib, selves, echoes))
+        // A group not held here: self is the device, D and D's known siblings (§6.3).
+        val unheld = GroupSelves.unheld(device, d, siblings)
+        assertTrue(DeliveryPolicy.firstRules(Signature.SOURCE_UNKNOWN, sib, sib, unheld, echoes)!!.contains("not validated"))
+        // A member whose key is not known yet is no device of D: its action's own rule decides.
+        assertNull(DeliveryPolicy.firstRules(Signature.SOURCE_UNKNOWN, m, m, selves, echoes))
+    }
+
     // ---- §6.5 what is held ----
 
     @Test
