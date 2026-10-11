@@ -9,8 +9,10 @@ import com.newendian.retichat.MemberStatus
 import com.newendian.retichat.RetichatApp
 import com.newendian.retichat.bridge.RetichatBridge
 import com.newendian.retichat.data.db.entity.ChatEntity
+import com.newendian.retichat.data.repository.GroupCreation
 import com.newendian.retichat.service.DistroCodec
 import com.newendian.retichat.service.UserPreferences
+import com.newendian.retichat.ui.conversation.OutgoingText
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -36,6 +38,12 @@ import kotlinx.coroutines.launch
  *   group_accept --es group <id>   the invite's Accept button (ConversationViewModel.acceptInvite)
  *   group_decline --es group <id>  the invite's Decline button (ConversationViewModel.declineInvite)
  *   group_leave --es group <id>    the chat menu's Leave (ConversationScreen onLeave: leaveGroupChat)
+ *   group_create --es name <name> --es members <hex>[,<hex>...]
+ *                                  the New Group screen's Create (NavGraph createGroup: ChatRepository.createGroupChat),
+ *                                  the members picked from the contacts (GROUPS-DISTRO-DESIGN.md §8.5)
+ *   group_post --es group <id> --es text <text>
+ *                                  the composer's Send in the group (ConversationViewModel.send: OutgoingText.of, then
+ *                                  sendMessage). No spaces in the text: adb passes it through the device's shell.
  *
  * <id> is the group's id as the wire carries it (32 hex), a prefix of it of 8 or more, or the chat's own id
  * (`group_<16 hex>`). Answers:
@@ -52,6 +60,8 @@ import kotlinx.coroutines.launch
  *   group_accept -> Accepted|Deferred|REFUSED|NOT_HELD group=<id> ...
  *   group_decline -> Declined|REFUSED|NOT_HELD group=<id> ...
  *   group_leave -> Left|STILL_HELD|REFUSED|NOT_HELD group=<id> ...
+ *   group_create -> Created group=<id> chat=<chat id> own=<hex> | REFUSED why=<signer> | REFUSED reason=<why>
+ *   group_post -> Sent|REFUSED|NOT_HELD group=<id> ...
  *
  * Accept is Deferred while a member's key has not arrived (the screen then does nothing: the user taps again once
  * the invite's other chunks are here), so a harness repeats the op until it answers Accepted.
@@ -169,7 +179,36 @@ class GroupDebugReceiver : BroadcastReceiver() {
                 Log.i(TAG, "group_leave -> ${if (app.database.chatDao().findById(chat.id) == null) "Left" else "STILL_HELD"} group=${chat.groupIdHex}")
             }
 
-            else -> Log.w(TAG, "$op -> UNKNOWN_OP (whoami, filter_status, filter_set, contact_add, contact_status, contact_forget, group_list, group_accept, group_decline, group_leave)")
+            // The New Group screen's Create: NavGraph's createGroup -> ChatRepository.createGroupChat(name, members), the
+            // members picked from the contacts the screen lists. Created as the distro when one is loaded (§8.5).
+            "group_create" -> {
+                val name = (intent.getStringExtra("name") ?: "").trim()
+                val members = (intent.getStringExtra("members") ?: "").split(",").map { it.trim().lowercase() }.filter { it.isNotEmpty() }
+                if (name.isEmpty() || members.isEmpty() || members.any { !Regex("[0-9a-f]{32}").matches(it) }) {
+                    Log.w(TAG, "group_create -> REFUSED reason=a name and one or more 32-hex members are needed")
+                    return
+                }
+                when (val made = repo.createGroupChat(name, members.map { DistroCodec.hexToBytes(it)!! })) {
+                    is GroupCreation.Created -> {
+                        val chat = app.database.chatDao().findById(made.chatId)
+                        Log.i(TAG, "group_create -> Created group=${chat?.groupIdHex ?: "-"} chat=${made.chatId} own=${chat?.ownMember ?: repo.selfDestHash.hex()}")
+                    }
+                    is GroupCreation.Refused -> Log.w(TAG, "group_create -> REFUSED why=${made.why}")
+                }
+            }
+
+            // The composer's Send in a group: ConversationViewModel.send -> OutgoingText.of(draft), then
+            // ChatRepository.sendMessage, which answers why when the post was refused (§8.7). A blank draft does not send.
+            "group_post" -> {
+                val text = OutgoingText.of(intent.getStringExtra("text") ?: "")
+                val chat = heldGroup(app, op, intent) ?: return
+                if (text.isEmpty()) { Log.w(TAG, "group_post -> REFUSED group=${chat.groupIdHex} reason=blank text"); return }
+                val refused = repo.sendMessage(chat.id, text)
+                if (refused != null) Log.w(TAG, "group_post -> REFUSED group=${chat.groupIdHex} why=${refused.signer} own=${refused.own}")
+                else Log.i(TAG, "group_post -> Sent group=${chat.groupIdHex} chat=${chat.id}")
+            }
+
+            else -> Log.w(TAG, "$op -> UNKNOWN_OP (whoami, filter_status, filter_set, contact_add, contact_status, contact_forget, group_list, group_accept, group_decline, group_leave, group_create, group_post)")
         }
     }
 
