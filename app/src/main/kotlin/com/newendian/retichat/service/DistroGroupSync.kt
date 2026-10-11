@@ -103,6 +103,41 @@ object DistroGroupSync {
     /** The seen key of a group message on the distro path (§6.2). */
     fun messageSeenKey(hash: String): String = "grp:$hash"
 
+    /** Rule 0's record of the seen keys (on the device, UserPreferences' distro-seen list). */
+    interface SeenRecord {
+        fun has(key: String): Boolean
+        fun mark(key: String)
+    }
+
+    /**
+     * Whether a G or a group message that came to [outcome] has its seen key
+     * recorded: only when it was kept (applied, stored, an own echo, or
+     * nothing to do), never when it was held or dropped (§6.2), so a later
+     * copy, or its replay, is judged again. A forged G has the LXMF hash of D's
+     * own (the hash does not cover the signature): recorded, it would make the
+     * device skip D's real one.
+     */
+    fun recordsSeen(outcome: com.newendian.retichat.data.repository.ChatRepository.DistroGroupOutcome): Boolean =
+        outcome == com.newendian.retichat.data.repository.ChatRepository.DistroGroupOutcome.KEPT
+
+    /**
+     * Rule 0 and the record, for a G ([seenKey]) and for a group message
+     * through the distro ([messageSeenKey]): a [key] already recorded is
+     * skipped (null, and [judge] is not asked); otherwise [judge] decides, and
+     * [key] is recorded only as [recordsSeen] says. The caller holds the lock
+     * that makes the check and the record one step.
+     */
+    suspend fun throughRule0(
+        key: String,
+        record: SeenRecord,
+        judge: suspend () -> com.newendian.retichat.data.repository.ChatRepository.DistroGroupOutcome,
+    ): com.newendian.retichat.data.repository.ChatRepository.DistroGroupOutcome? {
+        if (record.has(key)) return null
+        val outcome = judge()
+        if (recordsSeen(outcome)) record.mark(key)
+        return outcome
+    }
+
     private val HEX32 = Regex("^[0-9a-f]{32}$")
     private val HEX64 = Regex("^[0-9a-f]{64}$")
 

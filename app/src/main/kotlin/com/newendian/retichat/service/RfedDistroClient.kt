@@ -441,16 +441,12 @@ object RfedDistroClient {
         }
         val key = DistroGroupSync.seenKey(hash)
         groupLock.withLock {
-            if (UserPreferences.hasDistroSeen(context, key)) {
-                Log.i(TAG, "group sync ${hash.take(12)} seen already — skipped (§17.14 rule 0)")
-                return
+            val outcome = DistroGroupSync.throughRule0(key, seenRecord(context)) {
+                app.repository.onDistroGroupSync(blob, hash, srcHex, signatureValidated, read) { groupId ->
+                    replayHeldArrivals(context, groupId)
+                }
             }
-            val outcome = app.repository.onDistroGroupSync(blob, hash, srcHex, signatureValidated, read) { groupId ->
-                replayHeldArrivals(context, groupId)
-            }
-            if (outcome == com.newendian.retichat.data.repository.ChatRepository.DistroGroupOutcome.KEPT) {
-                UserPreferences.markDistroSeen(context, key)
-            }
+            if (outcome == null) Log.i(TAG, "group sync ${hash.take(12)} seen already — skipped (§17.14 rule 0)")
         }
     }
 
@@ -478,16 +474,20 @@ object RfedDistroClient {
         }
         val key = DistroGroupSync.messageSeenKey(hash)
         groupLock.withLock {
-            if (UserPreferences.hasDistroSeen(context, key)) {
-                Log.i(TAG, "group message ${hash.take(12)} seen already — skipped (§6.2)")
-                return
+            val outcome = DistroGroupSync.throughRule0(key, seenRecord(context)) {
+                app.repository.onDistroGroupMessage(
+                    blob, groupKeys, groupId, srcHex, content, timestamp, fieldsRaw, nameField, unverifiedReason,
+                )
             }
-            val outcome = app.repository.onDistroGroupMessage(
-                blob, groupKeys, groupId, srcHex, content, timestamp, fieldsRaw, nameField, unverifiedReason,
-            )
-            if (outcome == com.newendian.retichat.data.repository.ChatRepository.DistroGroupOutcome.KEPT) {
-                UserPreferences.markDistroSeen(context, key)
-            }
+            if (outcome == null) Log.i(TAG, "group message ${hash.take(12)} seen already — skipped (§6.2)")
+        }
+    }
+
+    /** Rule 0's record on this device: the distro-seen list in UserPreferences. */
+    private fun seenRecord(context: Context): DistroGroupSync.SeenRecord = object : DistroGroupSync.SeenRecord {
+        override fun has(key: String): Boolean = UserPreferences.hasDistroSeen(context, key)
+        override fun mark(key: String) {
+            UserPreferences.markDistroSeen(context, key)
         }
     }
 

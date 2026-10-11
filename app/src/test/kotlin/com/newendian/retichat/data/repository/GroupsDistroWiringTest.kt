@@ -75,16 +75,21 @@ class GroupsDistroWiringTest {
         for ((name, key) in listOf("handleGroupSync" to "DistroGroupSync.seenKey(hash)", "handleGroupMessage" to "DistroGroupSync.messageSeenKey(hash)")) {
             val b = body(client, name)
             assertTrue(name, b.contains("val key = $key"))
+            // Rule 0 and the record through the one gate (DistroGroupSync.throughRule0, run by
+            // DistroGroupSyncRulesTest), never by hand here.
             inOrder(
                 b,
                 "groupLock.withLock {",
-                "if (UserPreferences.hasDistroSeen(context, key)) {",
+                "DistroGroupSync.throughRule0(key, seenRecord(context)) {",
                 "app.repository.onDistroGroup",
-                "if (outcome == com.newendian.retichat.data.repository.ChatRepository.DistroGroupOutcome.KEPT) {\n                UserPreferences.markDistroSeen(context, key)",
             )
-            assertEquals(name, 1, count(b, "markDistroSeen("))
+            assertEquals(name, 0, count(b, "markDistroSeen("))
+            assertFalse(name, b.contains("hasDistroSeen"))
             assertFalse(name, b.contains("forgetDistroSeen"))
         }
+        val record = body(client, "seenRecord")
+        assertTrue(record.contains("override fun has(key: String): Boolean = UserPreferences.hasDistroSeen(context, key)"))
+        assertTrue(record.contains("UserPreferences.markDistroSeen(context, key)"))
         // The outcome: a G or message held, or dropped, is not recorded (§6.2, §11.1).
         val sync = body(repo, "onDistroGroupSync")
         assertTrue(sync.contains("DistroGroupSync.Disposition.OwnEcho -> DistroGroupOutcome.KEPT"))

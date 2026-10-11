@@ -1,9 +1,13 @@
 package com.newendian.retichat.service
 
 import com.newendian.retichat.bridge.MiniJson
+import com.newendian.retichat.data.repository.ChatRepository.DistroGroupOutcome
 import com.newendian.retichat.service.DistroGroupSync.Disposition
 import com.newendian.retichat.service.DistroGroupSync.Route
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -17,7 +21,10 @@ import java.io.File
  * writes and checks them (rust/retichat-jni/tests/data/distro_group_sync_rules.json):
  * D's own G (the control), the same G from a member M, and the same G claiming
  * D as its source but signed by a forger X. Here they go through what
- * RfedDistroClient.handleBlob and ChatRepository.onDistroGroupSync decide with.
+ * RfedDistroClient.handleBlob and ChatRepository.onDistroGroupSync decide with,
+ * and through rule 0's gate (DistroGroupSync.throughRule0) with a record of the
+ * seen keys: neither is recorded, so D's own G, which has the same hash, is
+ * still applied after them.
  */
 class DistroGroupSyncRulesTest {
     @Suppress("UNCHECKED_CAST")
@@ -78,6 +85,65 @@ class DistroGroupSyncRulesTest {
         assertEquals(case("g_from_d")["hash"], unwrap["hash"])
     }
 
+    /** Rule 0's record, as UserPreferences' distro-seen list keeps it. */
+    private class Record : DistroGroupSync.SeenRecord {
+        val keys = mutableListOf<String>()
+        override fun has(key: String): Boolean = key in keys
+        override fun mark(key: String) { if (key !in keys) keys += key }
+    }
+
+    /**
+     * What ChatRepository.onDistroGroupSync makes of each disposition (pinned in its source by
+     * [theRepositoryDropsBothWithALineAndRecordsNeitherAsSeen]): rules 1, 2 and 4 drop it; D's own
+     * G is kept once applied (the apply table is not under test here) or as an own echo.
+     */
+    private fun outcomeOf(disposition: Disposition): DistroGroupOutcome = when (disposition) {
+        is Disposition.NotFromDistro, Disposition.Forged, is Disposition.BadForm -> DistroGroupOutcome.DROPPED
+        Disposition.OwnEcho, is Disposition.Apply -> DistroGroupOutcome.KEPT
+    }
+
+    @Test
+    fun aForgedGOrOneNotFromDIsNeverRecordedSoDsOwnGIsStillAppliedAfterIt() = runBlocking {
+        val own = case("g_from_d")
+        val key = DistroGroupSync.seenKey(own["hash"] as String)
+        for (name in listOf("g_forged", "g_from_a_member")) {
+            val other = case(name)
+            val otherKey = DistroGroupSync.seenKey(other["hash"] as String)
+            val record = Record()
+            var applied = 0
+            // It comes first: judged, dropped, not recorded.
+            assertEquals(name, DistroGroupOutcome.DROPPED, DistroGroupSync.throughRule0(otherKey, record) { outcomeOf(decide(other)) })
+            assertFalse("$name: $otherKey recorded as seen", record.has(otherKey))
+            // The forgery has D's own G's hash (the hash does not cover the signature): one key.
+            if (name == "g_forged") assertEquals(key, otherKey)
+            // D's own G is still judged and applied.
+            val kept = DistroGroupSync.throughRule0(key, record) {
+                applied++
+                outcomeOf(decide(own)).also { assertTrue(decide(own) is Disposition.Apply) }
+            }
+            assertEquals(name, DistroGroupOutcome.KEPT, kept)
+            assertEquals(name, 1, applied)
+            assertTrue(record.has(key))
+            // A replay of D's own is skipped by rule 0, judged by nothing.
+            assertNull(DistroGroupSync.throughRule0(key, record) { applied++; DistroGroupOutcome.KEPT })
+            assertEquals(name, 1, applied)
+        }
+    }
+
+    @Test
+    fun onlyAKeptGOrMessageIsRecordedNeverOneHeldOrDropped() = runBlocking {
+        for ((outcome, recorded) in listOf(
+            DistroGroupOutcome.KEPT to true,
+            DistroGroupOutcome.HELD to false,
+            DistroGroupOutcome.DROPPED to false,
+        )) {
+            val record = Record()
+            assertEquals(outcome, DistroGroupSync.throughRule0("gsync:x", record) { outcome })
+            assertEquals("$outcome", recorded, record.has("gsync:x"))
+            assertEquals("$outcome", recorded, DistroGroupSync.recordsSeen(outcome))
+        }
+    }
+
     @Test
     fun theRepositoryDropsBothWithALineAndRecordsNeitherAsSeen() {
         val src = File("src/main/kotlin/com/newendian/retichat/data/repository/ChatRepository.kt").readText()
@@ -88,12 +154,12 @@ class DistroGroupSyncRulesTest {
         val forged = sync.substringAfter("DistroGroupSync.Disposition.Forged ->").substringBefore("DistroGroupSync.Disposition.OwnEcho ->")
         assertTrue(forged.contains("Log.w(TAG,") && forged.contains("DistroGroupOutcome.DROPPED"))
         // The client hands the repository the unwrap's own source and verdict, and records the
-        // G's hash only when the repository kept it.
+        // G's hash through rule 0's gate only (run above), never by hand.
         val client = File("src/main/kotlin/com/newendian/retichat/service/RfedDistroClient.kt").readText()
         assertTrue(client.contains("val srcHex = o.getString(\"source_hash\")"))
         assertTrue(client.contains("handleGroupSync(context, blob, groupKeys, route.read, srcHex, o.optBoolean(\"signature_validated\", false))"))
         val handle = client.substringAfter("private suspend fun handleGroupSync(").substringBefore("private suspend fun handleGroupMessage(")
-        val mark = handle.indexOf("UserPreferences.markDistroSeen(context, key)")
-        assertTrue(mark > handle.indexOf("if (outcome == com.newendian.retichat.data.repository.ChatRepository.DistroGroupOutcome.KEPT) {"))
+        assertTrue(handle.contains("DistroGroupSync.throughRule0(key, seenRecord(context)) {\n                app.repository.onDistroGroupSync("))
+        assertFalse(handle.contains("markDistroSeen"))
     }
 }
