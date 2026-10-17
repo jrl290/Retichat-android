@@ -8,10 +8,11 @@ import java.io.File
 
 /**
  * REACTIONS-DESIGN.md §3 on every receive path, as the repository is wired:
- * a reaction is taken before anything that would store a bubble, notify,
- * count unread, or make a chat or a contact; `find_target` looks only in the
- * chat it came in on; and the user's own reaction is applied at once and sent
- * off the caller's thread. The repository is Android (Room, the JNI): its
+ * a reaction is taken before anything that would store a bubble, count
+ * unread, or make a chat or a contact; `find_target` looks only in the chat it
+ * came in on; someone else's reaction to the user's message is notified,
+ * citing it, and the user's own never is; and the user's own reaction is
+ * applied at once and sent off the caller's thread. The repository is Android (Room, the JNI): its
  * source is what is pinned; the rules are [Reactions]'s (ReactionsTest), the
  * lookups' SQL ReactionsMigrationTest's.
  */
@@ -59,7 +60,7 @@ class ReactionsWiringTest {
         inOrder(
             copy,
             "val reaction = fields.reaction()",
-            "takeDirectReaction(directChatId(recipient), distroHex, reaction,",
+            "takeDirectReaction(directChatId(recipient), distroHex, reaction, (timestamp * 1000).toLong(), \"a Distro Sync of a send\", byUser = true)",
             "return@launch",
             "ensureContact(recipientHex)",
             "chatDao.upsert(",
@@ -82,10 +83,29 @@ class ReactionsWiringTest {
         inOrder(group, "DeliveryPolicy.groupPost(standing.isSelf(srcHex), signature, hasContent = true)", "UNPROVEN_OWN", "OWN -> srcHex", "groupAuthor(fields, srcHex, standing, signature)")
         assertFalse(group.contains("ensureContact("))
         assertFalse(group.contains("MessageNotificationHelper"))
+        // Notified only once applied, and never the user's own.
+        inOrder(direct, "val applied = applyReaction(", "if (applied && !byUser) notifyReaction(target, reactor, reaction.content, chatId)")
+        inOrder(group, "val applied = applyReaction(", "if (applied && !standing.isSelf(reactor)) notifyReaction(target, reactor, valid.content, chat.id, conversationTitle = chat.name)")
+        assertFalse(body("fun onMessageReceived(").contains("byUser = true"))
+        assertFalse(body("fun onDistroMessageReceived(").contains("byUser = true"))
+        assertFalse(body("private suspend fun applyGroupSync(").contains("notifyReaction("))
         // Applied under one lock, the reactions column only: the row's rowid, so the chat list's order, stays.
         val apply = body("private suspend fun applyReaction(")
         inOrder(apply, "reactionLock.withLock {", "Reactions.apply(row.reactionsJson, reactor, emoji, atMs)", "messageDao.setReactionsJson(targetId, json)")
         assertFalse(apply.contains("upsert("))
+        assertFalse(apply.contains("MessageNotificationHelper"))
+    }
+
+    @Test
+    fun aReactionNotifiesOnlyOnTheUsersOwnMessageCitingItOutsideTheOpenChat() {
+        val notify = body("private suspend fun notifyReaction(")
+        inOrder(
+            notify,
+            "if (emoji.isEmpty() || !target.isOutbound || RetichatApp.activeChatId == chatId) return",
+            "MessageNotificationHelper.notify(",
+            "resolvedName(reactor), Reactions.notificationText(emoji, target.content), chatId,",
+            "conversationTitle = conversationTitle,",
+        )
     }
 
     @Test

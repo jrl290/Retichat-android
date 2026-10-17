@@ -8,8 +8,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * REACTIONS-DESIGN.md §3 `apply_reaction`, §6 the stored form, §7 the chips
- * and which messages take a reaction.
+ * REACTIONS-DESIGN.md §3 `apply_reaction` and a reaction's notification
+ * text, §6 the stored form, §7 the chips and which messages take a reaction.
  */
 class ReactionsTest {
     private val alice = "a".repeat(32)
@@ -108,6 +108,21 @@ class ReactionsTest {
         assertTrue(Reactions.canReact(true, msg("grp_1", postId = "0f".repeat(16))))
         assertFalse("a post from an older client", Reactions.canReact(true, msg(hash)))
         assertFalse("a system line", Reactions.canReact(true, msg("joined_1", postId = "0f".repeat(16), systemKind = "member")))
+    }
+
+    @Test
+    fun aReactionsNotificationCitesTheMessageOnOneLineCutToItsLength() {
+        assertEquals("Reacted 👍 to \"Hi there\"", Reactions.notificationText("👍", "Hi there"))
+        assertEquals("Reacted ❤️ to \"See you at 6 tomorrow\"", Reactions.notificationText("❤️", "  See you\nat 6\n\ttomorrow "))
+        assertEquals("Reacted 😂 to your attachment", Reactions.notificationText("😂", " \n"))
+        val exact = "x".repeat(Reactions.QUOTE_MAX)
+        assertEquals("Reacted 👍 to \"$exact\"", Reactions.notificationText("👍", exact))
+        assertEquals("Reacted 👍 to \"$exact…\"", Reactions.notificationText("👍", exact + "y"))
+        // Cut where a reader counts a character: an emoji whole, and no space before the "…".
+        val emoji = "👨‍👩‍👧".repeat(Reactions.QUOTE_MAX + 1)
+        assertEquals("Reacted 👍 to \"${"👨‍👩‍👧".repeat(Reactions.QUOTE_MAX)}…\"", Reactions.notificationText("👍", emoji))
+        val spaced = "a".repeat(Reactions.QUOTE_MAX - 1) + " bc"
+        assertEquals("Reacted 👍 to \"${"a".repeat(Reactions.QUOTE_MAX - 1)}…\"", Reactions.notificationText("👍", spaced))
     }
 
     @Test

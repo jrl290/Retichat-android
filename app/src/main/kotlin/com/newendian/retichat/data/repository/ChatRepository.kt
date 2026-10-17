@@ -797,31 +797,51 @@ class ChatRepository(
      * [emoji] ("" a removal, kept) as of [atMs], unless they have one as new or
      * newer ([Reactions.apply]). Read and written under [reactionLock], so two
      * reactions to one message cannot lose each other. Only the reactions
-     * column changes: no bubble, no notification, no unread, and the chat
-     * list's order stays (the row keeps its rowid). [what] names it in the log.
+     * column changes: no bubble, no unread, and the chat list's order stays
+     * (the row keeps its rowid). [what] names it in the log. Returns whether
+     * it changed anything: an older or repeated reaction does not, so it is
+     * never notified twice ([notifyReaction]).
      */
-    private suspend fun applyReaction(targetId: String, reactor: String, emoji: String, atMs: Long, what: String) {
+    private suspend fun applyReaction(targetId: String, reactor: String, emoji: String, atMs: Long, what: String): Boolean =
         reactionLock.withLock {
-            val row = messageDao.findById(targetId) ?: return
+            val row = messageDao.findById(targetId) ?: return@withLock false
             val json = Reactions.apply(row.reactionsJson, reactor, emoji, atMs)
             if (json == null) {
                 Log.i(TAG, "$what: ignored, ${reactor.take(8)} has one as new or newer")
+                false
             } else {
                 messageDao.setReactionsJson(targetId, json)
                 Log.i(TAG, "$what: ${reactor.take(8)} ${if (emoji.isEmpty()) "removed theirs" else "reacted"}")
+                true
             }
         }
-    }
 
     private val reactionLock = Mutex()
+
+    /**
+     * §3 "Notifications": someone else's [emoji] on the user's own message
+     * [target] in [chatId] is notified like a message from [reactor], citing
+     * the message ([Reactions.notificationText]). Not a take-back, not a
+     * reaction to someone else's message, not in the open chat. The user's own
+     * reactions (a Distro Sync, a Group post from a self address) never come
+     * here. [conversationTitle] names a Group.
+     */
+    private suspend fun notifyReaction(target: MessageEntity, reactor: String, emoji: String, chatId: String, conversationTitle: String? = null) {
+        if (emoji.isEmpty() || !target.isOutbound || RetichatApp.activeChatId == chatId) return
+        MessageNotificationHelper.notify(
+            appContext, resolvedName(reactor), Reactions.notificationText(emoji, target.content), chatId,
+            conversationTitle = conversationTitle,
+        )
+    }
 
     /**
      * §3 for a direct chat, [chatId]: a [reaction] from [reactor] at [atMs]
      * ([via] names the path in the log). `find_target` looks only in [chatId]
      * (by LXMF hash), and a reaction never makes a chat or a contact. Every drop
-     * is one log line.
+     * is one log line. Someone else's is notified ([notifyReaction]); [byUser]
+     * marks the user's own, from another device of their distro.
      */
-    private suspend fun takeDirectReaction(chatId: String, reactor: String, reaction: LxmfFields.Reaction, atMs: Long, via: String) {
+    private suspend fun takeDirectReaction(chatId: String, reactor: String, reaction: LxmfFields.Reaction, atMs: Long, via: String, byUser: Boolean = false) {
         when (reaction) {
             LxmfFields.Reaction.None -> Unit
             is LxmfFields.Reaction.Invalid -> Log.i(TAG, "reaction dropped: ${reaction.why} (from ${reactor.take(8)}, $via)")
@@ -830,7 +850,8 @@ class ChatRepository(
                     Log.i(TAG, "reaction dropped: target ${reaction.toHex.take(16)} not in $chatId (from ${reactor.take(8)}, $via)")
                     return
                 }
-                applyReaction(target.id, reactor, reaction.content, atMs, "reaction ${via} to ${target.id.take(12)} in $chatId")
+                val applied = applyReaction(target.id, reactor, reaction.content, atMs, "reaction ${via} to ${target.id.take(12)} in $chatId")
+                if (applied && !byUser) notifyReaction(target, reactor, reaction.content, chatId)
             }
         }
     }
@@ -879,7 +900,9 @@ class ChatRepository(
             Log.i(TAG, "reaction dropped: target ${valid.toHex.take(16)} not in ${chat.id} ($what)")
             return false
         }
-        applyReaction(target.id, reactor, valid.content, (timestamp * 1000).toLong(), "$what to ${target.id.take(12)}")
+        val applied = applyReaction(target.id, reactor, valid.content, (timestamp * 1000).toLong(), "$what to ${target.id.take(12)}")
+        // Not the user's own: from a self address, or relayed back as GROUP_SENDER.
+        if (applied && !standing.isSelf(reactor)) notifyReaction(target, reactor, valid.content, chat.id, conversationTitle = chat.name)
         return true
     }
 
@@ -2073,7 +2096,7 @@ class ChatRepository(
         Log.i(TAG, "onDistroSentCopy: to=${recipientHex.take(16)} content='${content.take(40)}'${if (reaction != LxmfFields.Reaction.None) " (a reaction)" else ""}")
         scope.launch(Dispatchers.IO) {
             if (reaction != LxmfFields.Reaction.None) {
-                takeDirectReaction(directChatId(recipient), distroHex, reaction, (timestamp * 1000).toLong(), "a Distro Sync of a send")
+                takeDirectReaction(directChatId(recipient), distroHex, reaction, (timestamp * 1000).toLong(), "a Distro Sync of a send", byUser = true)
                 return@launch
             }
             if (messageDao.findById(msgId) != null) {

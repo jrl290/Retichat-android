@@ -4,8 +4,8 @@ import com.newendian.retichat.data.db.entity.MessageEntity
 
 /**
  * Reactions (REACTIONS-DESIGN.md): what a message's `reactionsJson` holds,
- * `apply_reaction`'s ordering rule, the chips under a bubble, and which
- * messages can take a reaction. Pure logic, so the JVM tests run it;
+ * `apply_reaction`'s ordering rule, the reactions in a bubble's footer, which
+ * messages can take a reaction, and a reaction's notification text. Pure logic, so the JVM tests run it;
  * ChatRepository reads and writes the rows.
  *
  * One reaction per reactor per message (James, 2026-10-17): picking another
@@ -106,6 +106,34 @@ object Reactions {
     fun newPostId(random: java.security.SecureRandom = java.security.SecureRandom()): String {
         val bytes = ByteArray(16).also(random::nextBytes)
         return bytes.joinToString("") { "%02x".format(it) }
+    }
+
+    /** How many characters of the message a reaction's notification quotes (§3 "Notifications"). */
+    const val QUOTE_MAX = 80
+
+    /**
+     * A reaction's notification text (§3 "Notifications"): `Reacted 👍 to "Hi there"`,
+     * quoting the user's message it was given to, on one line and cut to
+     * [QUOTE_MAX] characters; `Reacted 👍 to your attachment` for one with no text.
+     */
+    fun notificationText(emoji: String, content: String): String {
+        val line = content.trim().replace(WHITESPACE, " ")
+        if (line.isEmpty()) return "Reacted $emoji to your attachment"
+        return "Reacted $emoji to \"${cut(line, QUOTE_MAX)}\""
+    }
+
+    private val WHITESPACE = Regex("\\s+")
+
+    /** [s] cut to [max] characters as a reader counts them, an emoji one, with "…" when cut. */
+    private fun cut(s: String, max: Int): String {
+        val chars = java.text.BreakIterator.getCharacterInstance().apply { setText(s) }
+        var end = 0
+        repeat(max) {
+            val next = chars.next()
+            if (next == java.text.BreakIterator.DONE) return s
+            end = next
+        }
+        return if (chars.next() == java.text.BreakIterator.DONE) s else s.substring(0, end).trimEnd() + "…"
     }
 
     // ---- The stored form: {"<reactor 32 hex>": {"e": "👍", "t": <ms>}} ----
