@@ -6,6 +6,7 @@ import android.provider.OpenableColumns
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -13,9 +14,15 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLinkStyles
@@ -28,22 +35,31 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.SelectAll
 import androidx.paging.LoadState
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.semantics.onLongClick
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -58,6 +74,7 @@ import com.newendian.retichat.bridge.RetichatBridge
 import com.newendian.retichat.data.db.entity.AttachmentEntity
 import com.newendian.retichat.data.db.entity.ChannelMessageEntity
 import com.newendian.retichat.data.db.entity.MessageEntity
+import com.newendian.retichat.data.repository.Reactions
 import com.newendian.retichat.names.ChannelLabel
 import com.newendian.retichat.names.NameBook
 import com.newendian.retichat.names.SystemText
@@ -155,6 +172,8 @@ private fun DmConversationContent(
     val dayMarkers = rememberDayMarkerText()
     val isGroup = chatEntity?.isGroup == true
     val isPendingInvite = viewModel?.isPendingInvite?.collectAsState()?.value ?: false
+    // REACTIONS-DESIGN.md §3 "Display": the addresses whose reactions are the user's.
+    val reactionSelves = viewModel?.reactionSelves?.collectAsState()?.value ?: emptySet()
     // GROUPS-DISTRO-DESIGN.md §8.7, §13: a group whose own address is a distro D.
     val acting = viewModel?.groupActing?.collectAsState()?.value
     val distroGroup = acting?.distroGroup == true
@@ -328,6 +347,9 @@ private fun DmConversationContent(
                                     text = SystemText.render(msg.systemKind, msg.content, msg.senderHashHex, names),
                                     viewModel = viewModel,
                                     zone = dayMarkers.zone,
+                                    // §7: no reaction row on a system line, a Group post with no post id, or an invite not yet accepted.
+                                    reactable = !isPendingInvite && Reactions.canReact(isGroup, msg),
+                                    reactionSelves = reactionSelves,
                                 )
                             }
                         }
@@ -947,6 +969,13 @@ private fun ChannelConversationContent(
  * grey secondary text beside it on a channel post (§5.3: the channel name
  * under a local name, or the short hash under a channel name); [text] is the body,
  * with a system line's member name already resolved.
+ *
+ * A long press opens the message's actions (REACTIONS-DESIGN.md §7): the quick
+ * reactions when [reactable], then Copy and Select text wherever there is text.
+ * Links and attachments keep their own taps: a press on them is theirs. The
+ * reactions given show as chips under the bubble, highlighted when one of
+ * their reactors is in [reactionSelves]; a tap on one makes it the user's, or
+ * removes it if it already is.
  */
 @Composable
 private fun MessageRow(
@@ -956,9 +985,16 @@ private fun MessageRow(
     text: String,
     viewModel: ConversationViewModel?,
     zone: ZoneId,
+    reactable: Boolean = false,
+    reactionSelves: Set<String> = emptySet(),
 ) {
     val isOut = msg.isOutbound
     val alignment = if (isOut) Alignment.End else Alignment.Start
+    val hasText = text.isNotBlank()
+    val hasActions = hasText || reactable
+    var actionsOpen by remember { mutableStateOf(false) }
+    var selecting by remember { mutableStateOf(false) }
+    val haptics = LocalHapticFeedback.current
 
     // Load attachments for this message
     val attachments by viewModel?.attachmentsFor(msg.id)
@@ -990,6 +1026,17 @@ private fun MessageRow(
             modifier = Modifier
                 .clip(shape)
                 .background(bgColor)
+                .pointerInput(hasActions) {
+                    if (hasActions) {
+                        detectTapGestures(onLongPress = {
+                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                            actionsOpen = true
+                        })
+                    }
+                }
+                .semantics {
+                    if (hasActions) onLongClick(label = "Message actions") { actionsOpen = true; true }
+                }
                 .padding(
                     start = 14.dp,
                     end = 14.dp,
@@ -1156,6 +1203,148 @@ private fun MessageRow(
                         )
                     }
                 }
+            }
+            // Its actions, anchored to the bubble (a popup: it takes no room in it).
+            MessageActions(
+                expanded = actionsOpen,
+                onDismiss = { actionsOpen = false },
+                text = text,
+                mine = if (reactable) Reactions.mine(msg.reactionsJson, reactionSelves) else null,
+                onReact = viewModel?.takeIf { reactable }?.let { vm -> { emoji: String -> vm.react(msg, emoji) } },
+                onSelect = { selecting = true },
+            )
+        }
+
+        val chips = remember(msg.reactionsJson, reactionSelves) { Reactions.chips(msg.reactionsJson, reactionSelves) }
+        if (chips.isNotEmpty()) {
+            ReactionChips(chips, onTap = viewModel?.takeIf { reactable }?.let { vm -> { emoji: String -> vm.react(msg, emoji) } })
+        }
+    }
+
+    if (selecting) {
+        SelectTextDialog(text, onDismiss = { selecting = false })
+    }
+}
+
+/**
+ * A message's actions (REACTIONS-DESIGN.md §7), opened by a long press on its
+ * bubble: the quick reactions when [onReact] is given (the one in [mine]
+ * highlighted; picking it again removes it), then Copy and Select text when the
+ * message has [text].
+ */
+@Composable
+private fun MessageActions(
+    expanded: Boolean,
+    onDismiss: () -> Unit,
+    text: String,
+    mine: String?,
+    onReact: ((String) -> Unit)?,
+    onSelect: () -> Unit,
+) {
+    val clipboard = LocalClipboardManager.current
+    val hasText = text.isNotBlank()
+    DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
+        if (onReact != null) {
+            Row(
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Reactions.QUICK.forEach { emoji ->
+                    val picked = emoji == mine
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(CircleShape)
+                            .background(if (picked) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent)
+                            .clickable(onClickLabel = if (picked) "Remove $emoji" else "React $emoji") {
+                                onDismiss()
+                                onReact(emoji)
+                            },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(emoji, fontSize = 22.sp)
+                    }
+                }
+            }
+            if (hasText) HorizontalDivider()
+        }
+        if (hasText) {
+            DropdownMenuItem(
+                text = { Text("Copy") },
+                leadingIcon = { Icon(Icons.Outlined.ContentCopy, contentDescription = null) },
+                onClick = {
+                    clipboard.setText(AnnotatedString(text))
+                    onDismiss()
+                },
+            )
+            DropdownMenuItem(
+                text = { Text("Select text") },
+                leadingIcon = { Icon(Icons.Outlined.SelectAll, contentDescription = null) },
+                onClick = {
+                    onDismiss()
+                    onSelect()
+                },
+            )
+        }
+    }
+}
+
+/** The text of a message, selectable (§7 "Select text"): the system's handles copy any part of it. */
+@Composable
+private fun SelectTextDialog(text: String, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } },
+        title = { Text("Select text") },
+        text = {
+            SelectionContainer {
+                Text(
+                    text = text,
+                    style = MaterialTheme.typography.bodyLarge,
+                    modifier = Modifier
+                        .heightIn(max = 400.dp)
+                        .verticalScroll(rememberScrollState()),
+                )
+            }
+        },
+    )
+}
+
+/**
+ * The reactions under a bubble (REACTIONS-DESIGN.md §3 "Display"): one chip per
+ * emoji with its count, highlighted when one of its reactors is the user. A tap
+ * makes that emoji the user's, or removes theirs if it already is; no tap where
+ * the message takes no reaction from here ([onTap] null).
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ReactionChips(chips: List<Reactions.Chip>, onTap: ((String) -> Unit)?) {
+    FlowRow(
+        modifier = Modifier.padding(top = 2.dp, start = 4.dp, end = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        chips.forEach { chip ->
+            val colors = MaterialTheme.colorScheme
+            val chipShape = RoundedCornerShape(12.dp)
+            Surface(
+                shape = chipShape,
+                color = if (chip.mine) colors.secondaryContainer else colors.surfaceVariant,
+                contentColor = if (chip.mine) colors.onSecondaryContainer else colors.onSurfaceVariant,
+                border = if (chip.mine) BorderStroke(1.dp, colors.primary) else null,
+                modifier = Modifier
+                    .clip(chipShape)
+                    .then(
+                        if (onTap != null) {
+                            Modifier.clickable(onClickLabel = if (chip.mine) "Remove ${chip.emoji}" else "React ${chip.emoji}") { onTap(chip.emoji) }
+                        } else Modifier
+                    ),
+            ) {
+                Text(
+                    text = "${chip.emoji} ${chip.count}",
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                )
             }
         }
     }

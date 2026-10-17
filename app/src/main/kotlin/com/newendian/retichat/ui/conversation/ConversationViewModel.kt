@@ -21,11 +21,13 @@ import com.newendian.retichat.data.repository.GroupActing
 import com.newendian.retichat.names.NameBook
 import com.newendian.retichat.service.ConnectionStateManager
 import com.newendian.retichat.service.DistroManager
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.firstOrNull
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -83,6 +85,25 @@ class ConversationViewModel(
         combine(repository.chatById(chatId), repository.groupMembers(chatId), DistroManager.state, repository.groupActionsReady) { chat, _, _, _ ->
             chat?.takeIf { it.isGroup }?.let { repository.groupActing(it) }
         }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    /**
+     * Every address the user sends this chat as (REACTIONS-DESIGN.md §3
+     * "Display"): a chip is highlighted when one of its reactors is one of them.
+     * Re-read when the chat, its list or the distro held changes.
+     */
+    val reactionSelves: StateFlow<Set<String>> =
+        combine(repository.chatById(chatId), repository.groupMembers(chatId), DistroManager.state) { chat, _, _ ->
+            chat?.let { repository.reactionSelves(it) } ?: emptySet()
+        }.flowOn(Dispatchers.IO).stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
+
+    /**
+     * The user picked [emoji] on [msg] (§7: the long-press row or a chip): it
+     * becomes theirs, or is removed if it already is. Applied and sent by the
+     * repository on a coroutine: the UI thread never waits on it.
+     */
+    fun react(msg: MessageEntity, emoji: String) {
+        viewModelScope.launch { repository.react(chatId, msg.id, emoji) }
+    }
 
     fun acceptInvite() {
         viewModelScope.launch { repository.acceptGroupInvite(chatId) }

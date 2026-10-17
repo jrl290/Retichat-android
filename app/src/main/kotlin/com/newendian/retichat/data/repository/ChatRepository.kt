@@ -724,17 +724,18 @@ class ChatRepository(
      * thread, nothing is retried, and no bubble is made. A message that cannot
      * take a reaction ([Reactions.canReact]), or a send that cannot be made now
      * (the start has not finished, or no signer), changes nothing, with a log line.
+     * Runs on the IO dispatcher whoever calls it, so the UI thread never waits.
      */
-    suspend fun react(chatId: String, msgId: String, emoji: String) {
+    suspend fun react(chatId: String, msgId: String, emoji: String) = withContext(Dispatchers.IO) {
         if (emoji.toByteArray().size > LxmfFields.REACTION_CONTENT_MAX) {
             Log.w(TAG, "react: not sent: the reaction is over ${LxmfFields.REACTION_CONTENT_MAX} bytes")
-            return
+            return@withContext
         }
-        val chat = chatDao.findById(chatId) ?: return
-        val msg = messageDao.findById(msgId)?.takeIf { it.chatId == chatId } ?: return
+        val chat = chatDao.findById(chatId) ?: return@withContext
+        val msg = messageDao.findById(msgId)?.takeIf { it.chatId == chatId } ?: return@withContext
         if (!Reactions.canReact(chat.isGroup, msg)) {
             Log.w(TAG, "react: ${msgId.take(16)} in $chatId takes no reaction (no hash or post id, or a system line)")
-            return
+            return@withContext
         }
         if (chat.isGroup) sendGroupReaction(chat, msg, emoji) else sendDirectReaction(chat, msg, emoji)
     }

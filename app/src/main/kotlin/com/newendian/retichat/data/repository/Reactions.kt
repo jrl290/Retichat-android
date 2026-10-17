@@ -51,6 +51,16 @@ object Reactions {
     /** [reactor]'s current reaction in [json], "" when none (or removed). */
     fun of(json: String?, reactor: String): String = decode(json)[reactor.lowercase()]?.emoji.orEmpty()
 
+    /**
+     * The user's reaction in [json] for the popup to highlight: the newest
+     * non-empty one among the addresses in [me] (any the user sends the chat
+     * as), or null when they have none.
+     */
+    fun mine(json: String?, me: Set<String>): String? {
+        val selves = me.map { it.lowercase() }.toSet()
+        return decode(json).filter { it.key in selves && it.value.emoji.isNotEmpty() }.values.maxByOrNull { it.atMs }?.emoji
+    }
+
     /** What the user's pick of [picked] makes theirs, from [current]: the same one again removes it. */
     fun toggled(current: String, picked: String): String = if (current == picked) "" else picked
 

@@ -72,6 +72,10 @@ class ReactionsTest {
             listOf(Reactions.Chip("❤️", 1, mine = false), Reactions.Chip("👍", 2, mine = true)),
             Reactions.chips(json, setOf(me, myDistro)),
         )
+        // The popup's highlight: the user's newest one under any of their addresses.
+        assertEquals("👍", Reactions.mine(json, setOf(me, myDistro)))
+        assertNull(Reactions.mine(json, setOf(myDistro)))
+        assertEquals("😂", Reactions.mine(Reactions.apply(json, myDistro, "😂", 9), setOf(me, myDistro)))
         // Mine under any address the user sends the chat as.
         assertEquals(
             listOf(Reactions.Chip("❤️", 1, mine = false), Reactions.Chip("👍", 2, mine = false)),
