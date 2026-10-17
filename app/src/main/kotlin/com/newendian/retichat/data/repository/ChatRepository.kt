@@ -50,6 +50,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -710,6 +712,176 @@ class ChatRepository(
         }
     }
 
+    // ---- Reactions (REACTIONS-DESIGN.md) ----
+
+    /**
+     * The user picked [emoji] on message [msgId] of chat [chatId] (§7: the
+     * popup's row or a chip). One reaction per person per message (James,
+     * 2026-10-17): picking the one already theirs removes it, any other
+     * replaces it. Applied here at once (optimistic), then sent: in a direct
+     * chat as a text message goes ([sendDirectReaction]), in a Group as a post
+     * goes ([sendGroupReaction]). Nothing waits on the network on the caller's
+     * thread, nothing is retried, and no bubble is made. A message that cannot
+     * take a reaction ([Reactions.canReact]), or a send that cannot be made now
+     * (the start has not finished, or no signer), changes nothing, with a log line.
+     */
+    suspend fun react(chatId: String, msgId: String, emoji: String) {
+        if (emoji.toByteArray().size > LxmfFields.REACTION_CONTENT_MAX) {
+            Log.w(TAG, "react: not sent: the reaction is over ${LxmfFields.REACTION_CONTENT_MAX} bytes")
+            return
+        }
+        val chat = chatDao.findById(chatId) ?: return
+        val msg = messageDao.findById(msgId)?.takeIf { it.chatId == chatId } ?: return
+        if (!Reactions.canReact(chat.isGroup, msg)) {
+            Log.w(TAG, "react: ${msgId.take(16)} in $chatId takes no reaction (no hash or post id, or a system line)")
+            return
+        }
+        if (chat.isGroup) sendGroupReaction(chat, msg, emoji) else sendDirectReaction(chat, msg, emoji)
+    }
+
+    /**
+     * The addresses the user sends [chat] as, for the chips' "mine" (§3
+     * "Display"): in a Group every self address (§9.1); in a direct chat the
+     * device, the distro held now and its known siblings.
+     */
+    suspend fun reactionSelves(chat: ChatEntity): Set<String> {
+        if (chat.isGroup) return groupSelf(chat).all
+        val distro = DistroManager.deliveryHashHex
+        return setOfNotNull(selfHex().takeIf { it.isNotEmpty() }, distro) + (distro?.let(::siblingsOf) ?: emptySet())
+    }
+
+    /** §2: a reaction in a direct chat, as the address a text message goes as now (the distro when held). */
+    private suspend fun sendDirectReaction(chat: ChatEntity, msg: MessageEntity, picked: String) {
+        if (!stackReady()) {
+            Log.w(TAG, "react: not sent in ${chat.id}: the start has not finished")
+            return
+        }
+        val target = Reactions.targetHash(msg)?.hexToBytes() ?: return
+        val destHash = chat.memberHashes.hexToBytes()
+        val reactor = DistroManager.sendingIdentity(selfDestHash, identityHandle).first.toHex()
+        val atMs = System.currentTimeMillis()
+        val emoji = Reactions.toggled(Reactions.of(msg.reactionsJson, reactor), picked)
+        applyReaction(msg.id, reactor, emoji, atMs, "own reaction to ${msg.id.take(12)} in ${chat.id}")
+        scope.launch(Dispatchers.IO) {
+            try {
+                dispatch("react_${atMs}_${(0..999).random()}", destHash, content = "", attachments = emptyList(),
+                    fromQueue = false, reaction = Reactions.Outgoing(target, emoji))
+            } catch (e: Exception) {
+                Log.e(TAG, "react: the reaction in ${chat.id} was not sent: ${e.message}", e)
+            }
+        }
+    }
+
+    /** §4: a Group reaction, as the group's own address resolved now, to the post's id. */
+    private suspend fun sendGroupReaction(chat: ChatEntity, msg: MessageEntity, picked: String) {
+        val groupIdHex = chat.groupIdHex ?: return
+        val postId = msg.postId ?: return
+        if (GroupSelves.post(signerKind(chat), stackReady()) == GroupSelves.Post.WAIT) {
+            Log.w(TAG, "react: not sent in ${chat.id}: the start has not finished")
+            return
+        }
+        val signer = groupSigner(chat) ?: run {
+            Log.w(TAG, "react: not sent in ${chat.id}: its own address has no signer on this device (${signerKind(chat)}, §8.7)")
+            return
+        }
+        val atMs = System.currentTimeMillis()
+        val emoji = Reactions.toggled(Reactions.of(msg.reactionsJson, signer.hex), picked)
+        applyReaction(msg.id, signer.hex, emoji, atMs, "own reaction to post ${postId.take(8)} in ${chat.id}")
+        fanOutGroupPost(chat, groupIdHex, groupMsgId = null, content = "", attachments = emptyList(), postedAt = atMs,
+            signer = signer, postId = null, reaction = GroupReaction(postId, emoji))
+    }
+
+    /**
+     * `apply_reaction` (§3) to message [targetId]: [reactor]'s reaction set to
+     * [emoji] ("" a removal, kept) as of [atMs], unless they have one as new or
+     * newer ([Reactions.apply]). Read and written under [reactionLock], so two
+     * reactions to one message cannot lose each other. Only the reactions
+     * column changes: no bubble, no notification, no unread, and the chat
+     * list's order stays (the row keeps its rowid). [what] names it in the log.
+     */
+    private suspend fun applyReaction(targetId: String, reactor: String, emoji: String, atMs: Long, what: String) {
+        reactionLock.withLock {
+            val row = messageDao.findById(targetId) ?: return
+            val json = Reactions.apply(row.reactionsJson, reactor, emoji, atMs)
+            if (json == null) {
+                Log.i(TAG, "$what: ignored, ${reactor.take(8)} has one as new or newer")
+            } else {
+                messageDao.setReactionsJson(targetId, json)
+                Log.i(TAG, "$what: ${reactor.take(8)} ${if (emoji.isEmpty()) "removed theirs" else "reacted"}")
+            }
+        }
+    }
+
+    private val reactionLock = Mutex()
+
+    /**
+     * §3 for a direct chat, [chatId]: a [reaction] from [reactor] at [atMs]
+     * ([via] names the path in the log). `find_target` looks only in [chatId]
+     * (by LXMF hash), and a reaction never makes a chat or a contact. Every drop
+     * is one log line.
+     */
+    private suspend fun takeDirectReaction(chatId: String, reactor: String, reaction: LxmfFields.Reaction, atMs: Long, via: String) {
+        when (reaction) {
+            LxmfFields.Reaction.None -> Unit
+            is LxmfFields.Reaction.Invalid -> Log.i(TAG, "reaction dropped: ${reaction.why} (from ${reactor.take(8)}, $via)")
+            is LxmfFields.Reaction.Valid -> {
+                val target = messageDao.findByLxmfHash(chatId, reaction.toHex) ?: run {
+                    Log.i(TAG, "reaction dropped: target ${reaction.toHex.take(16)} not in $chatId (from ${reactor.take(8)}, $via)")
+                    return
+                }
+                applyReaction(target.id, reactor, reaction.content, atMs, "reaction ${via} to ${target.id.take(12)} in $chatId")
+            }
+        }
+    }
+
+    /**
+     * §3 and §4 for a Group: a [reaction] in [chat] from the packet source
+     * [srcHex], attributed as a post is (a self address's own only when its
+     * signature validated; otherwise [groupAuthor]: GROUP_SENDER when a current
+     * member relayed it under the same member rules). The target is the post
+     * whose id REACTION_TO's 16 bytes are, in this Group only. Returns whether
+     * it was taken (applied, or older than what is held); a drop is one log line.
+     */
+    private suspend fun takeGroupReaction(
+        msgId: String,
+        chat: ChatEntity,
+        srcHex: String,
+        reaction: LxmfFields.Reaction,
+        timestamp: Double,
+        fields: LxmfFields,
+        standing: GroupStanding,
+        signature: Int,
+    ): Boolean {
+        val what = "group reaction ${msgId.take(12)} for ${chat.id} from ${srcHex.take(8)}"
+        val valid = when (reaction) {
+            LxmfFields.Reaction.None -> return false
+            is LxmfFields.Reaction.Invalid -> {
+                Log.i(TAG, "reaction dropped: ${reaction.why} ($what)")
+                return false
+            }
+            is LxmfFields.Reaction.Valid -> reaction
+        }
+        // As DeliveryPolicy.groupPost sorts a post with something in it.
+        val reactor = when (DeliveryPolicy.groupPost(standing.isSelf(srcHex), signature, hasContent = true)) {
+            DeliveryPolicy.GroupPost.UNPROVEN_OWN -> {
+                Log.i(TAG, "reaction dropped: $what, from a self address whose signature did not validate")
+                return false
+            }
+            DeliveryPolicy.GroupPost.OWN -> srcHex
+            else -> groupAuthor(fields, srcHex, standing, signature)
+        }
+        if (valid.to.size != 16) {
+            Log.i(TAG, "reaction dropped: $what names ${valid.to.size} bytes, not a 16-byte post id")
+            return false
+        }
+        val target = messageDao.findByPostId(chat.id, valid.toHex) ?: run {
+            Log.i(TAG, "reaction dropped: target ${valid.toHex.take(16)} not in ${chat.id} ($what)")
+            return false
+        }
+        applyReaction(target.id, reactor, valid.content, (timestamp * 1000).toLong(), "$what to ${target.id.take(12)}")
+        return true
+    }
+
     private suspend fun sendDirectMessage(
         chatId: String,
         destHash: ByteArray,
@@ -773,6 +945,14 @@ class ChatRepository(
      * router's reports ([PropagationFallbacks]). Returns once the message is
      * out; its state is followed on a coroutine of its own, so a flush waits
      * for the dispatches and not for every queued message's delivery.
+     *
+     * A [reaction] (REACTIONS-DESIGN.md §2, [sendDirectReaction]) goes the same
+     * way, DIRECT with the propagated copy behind it or PROPAGATED to a distro,
+     * with its 0x40 written on each, and the Distro Sync of the send when it
+     * goes as the distro; but it has no bubble: [localId] names no row, nothing
+     * is written or polled for it, and nothing retries it. Every message's LXMF
+     * hash is kept on its row ([MessageEntity.lxmfHash]) once the send has it,
+     * so a reaction to it can name it.
      */
     private suspend fun dispatch(
         localId: String,
@@ -780,6 +960,7 @@ class ChatRepository(
         content: String,
         attachments: List<Pair<String, ByteArray>>,
         fromQueue: Boolean,
+        reaction: Reactions.Outgoing? = null,
     ) {
         // A distro address has no device behind it to prove a direct
         // link; RFed fans the message out from the propagation node
@@ -801,17 +982,27 @@ class ChatRepository(
                         content = content,
                         method = RetichatBridge.DeliveryMethod.PROPAGATED,
                         identityHandle = sendIdentity,
-                    ).also { handle ->
+                    ).let { handle ->
                         if (handle != 0L) {
                             attachments.forEach { (name, data) ->
                                 RetichatBridge.messageAddAttachment(handle, name, data)
                             }
                         }
+                        if (handle != 0L && reaction != null && !RetichatBridge.messageSetReaction(handle, reaction.to, reaction.content)) {
+                            Log.e(TAG, "dispatch: reaction $localId not built: ${RetichatBridge.lastError()}")
+                            RetichatBridge.messageDestroy(handle)
+                            0L
+                        } else handle
                     }
                 },
                 // No DIRECT attempt here, so the propagated send is this
                 // message's only dispatch and carries the §17.11 sent-copy.
-                onSent = { sendDistroSentCopy(destHash, sendSrc, title = "", content = content) },
+                onSent = { handle ->
+                    val hash = RetichatBridge.messageGetHash(handle)?.toHex()
+                    if (reaction == null && hash != null) messageDao.setLxmfHash(localId, hash)
+                    sendDistroSentCopy(destHash, sendSrc, title = "", content = content, sentHash = hash, reaction = reaction)
+                },
+                bubble = reaction == null,
             )
             return
         }
@@ -849,6 +1040,11 @@ class ChatRepository(
         attachments.forEach { (name, data) ->
             RetichatBridge.messageAddAttachment(msgHandle, name, data)
         }
+        if (reaction != null && !RetichatBridge.messageSetReaction(msgHandle, reaction.to, reaction.content)) {
+            Log.e(TAG, "dispatch: reaction $localId not built: ${RetichatBridge.lastError()} — not sent")
+            RetichatBridge.messageDestroy(msgHandle)
+            return
+        }
 
         // Take a queued row before it goes out: the handle is recorded only
         // if the row is still queued, and from then on it is out of
@@ -868,16 +1064,34 @@ class ChatRepository(
             return
         }
         val hashHex = RetichatBridge.messageGetHash(msgHandle)?.toHex()
-        hashHex?.let { deliveryTargets.remember(it, DeliveryTargets.Target.Row(localId)) }
+        if (reaction == null && hashHex != null) {
+            deliveryTargets.remember(hashHex, DeliveryTargets.Target.Row(localId))
+            // REACTIONS-DESIGN.md §6: the hash a reaction to this message names.
+            messageDao.setLxmfHash(localId, hashHex)
+        }
 
         // RFed SPEC §17.11: the message is out, so tell our other
         // devices. Sent here, where the DIRECT send is accepted, and
         // never from the propagated copy behind it: DIRECT plus
-        // fallback is still one message and gets one copy.
-        sendDistroSentCopy(destHash, sendSrc, title = "", content = content)
+        // fallback is still one message and gets one copy. It carries
+        // the message's hash, and a reaction's 0x40 (REACTIONS-DESIGN.md §5.2).
+        sendDistroSentCopy(destHash, sendSrc, title = "", content = content, sentHash = hashHex, reaction = reaction)
 
         val state = RetichatBridge.messageGetState(msgHandle)
         Log.d(TAG, "dispatch: post-send state=$state")
+
+        if (reaction != null) {
+            // No bubble to point, write or poll: the router's reports start the
+            // propagated copy behind it, as they do for a text message.
+            if (hashHex != null) {
+                propagationFallbacks.track(
+                    hashHex, PropagationFallbacks.Send(localId, directHandle = msgHandle, bubble = false),
+                )?.let(::startPropagatedCopy)
+                if (isFailureState(state)) propagationFallbacks.onPolledState(hashHex, state)?.let(::startPropagatedCopy)
+            }
+            Log.i(TAG, "dispatch: reaction $localId to ${destHash.toHex().take(8)} out (state=$state)")
+            return
+        }
 
         // Point the bubble at the DIRECT handle before the fallback is
         // tracked: from then on a propagated copy can take the bubble over,
@@ -1081,6 +1295,7 @@ class ChatRepository(
                 // 2026-09-24 the copy was a new message with a new timestamp,
                 // and a recipient given both showed the message twice.
                 createCopy = { RetichatBridge.messageClonePropagated(send.directHandle) },
+                bubble = send.bubble,
             )
         }
     }
@@ -1107,18 +1322,24 @@ class ChatRepository(
      * A copy that can not go out shows the message failed (iOS does the
      * same) once no DIRECT attempt is left ([propagatedCopyNotSent]); a DIRECT
      * success can still replace that.
+     *
+     * A reaction has no bubble ([bubble] false, REACTIONS-DESIGN.md §2): its
+     * copy goes the same way, with no row to read, take over or poll.
      */
     private suspend fun sendPropagatedCopy(
         localId: String,
         directHandle: Long,
         createCopy: () -> Long,
-        onSent: suspend () -> Unit = {},
+        onSent: suspend (Long) -> Unit = {},
+        bubble: Boolean = true,
     ) {
         try {
-            val current = messageDao.findById(localId) ?: return
-            // Delivered already (a late proof of the DIRECT attempt): a copy
-            // would only be a duplicate for the recipient to drop.
-            if (isSuccessState(current.state)) return
+            if (bubble) {
+                val current = messageDao.findById(localId) ?: return
+                // Delivered already (a late proof of the DIRECT attempt): a copy
+                // would only be a duplicate for the recipient to drop.
+                if (isSuccessState(current.state)) return
+            }
 
             if (!stackReady()) {
                 Log.w(TAG, "propagated: stack not ready — $localId not sent")
@@ -1132,11 +1353,7 @@ class ChatRepository(
                 return
             }
 
-            Log.i(
-                TAG,
-                "propagated: sending $localId (state=${current.state}) " +
-                    "via ${nodeHash.toHex().take(16)}"
-            )
+            Log.i(TAG, "propagated: sending $localId via ${nodeHash.toHex().take(16)}")
 
             val propHandle = createCopy()
             if (propHandle == 0L) {
@@ -1153,8 +1370,12 @@ class ChatRepository(
                 return
             }
             // The copy's own late proof upgrades the same bubble.
-            rememberDeliveryTarget(propHandle, DeliveryTargets.Target.Row(localId))
-            onSent()
+            if (bubble) rememberDeliveryTarget(propHandle, DeliveryTargets.Target.Row(localId))
+            onSent(propHandle)
+            if (!bubble) {
+                Log.i(TAG, "propagated: reaction $localId out (state=${RetichatBridge.messageGetState(propHandle)})")
+                return
+            }
 
             // Re-point the bubble at the propagated handle and continue polling,
             // BUT only if the direct send hasn't already succeeded.  If direct
@@ -1303,11 +1524,22 @@ class ChatRepository(
      * whose upload was not proved, or that was made while no propagation link
      * could be had, was lost. No bubble, and the copy never touches the user's
      * message state.
+     *
+     * REACTIONS-DESIGN.md §5.2: the copy carries M's LXMF hash [sentHash] (key
+     * 12 of 0xD1), so the other devices can find M when a reaction names it,
+     * and M's 0x40 when M is a [reaction].
      */
-    private suspend fun sendDistroSentCopy(recipient: ByteArray, sentAs: ByteArray, title: String, content: String) {
+    private suspend fun sendDistroSentCopy(
+        recipient: ByteArray,
+        sentAs: ByteArray,
+        title: String,
+        content: String,
+        sentHash: String?,
+        reaction: Reactions.Outgoing?,
+    ) {
         val recipientHex = recipient.toHex()
         if (!DistroCodec.shouldSendSentCopy(sentAs.toHex(), DistroManager.deliveryHashHex, recipientHex)) return
-        DistroOutboxRuntime.oweSentCopy(appContext, recipient, title, content)
+        DistroOutboxRuntime.oweSentCopy(appContext, recipient, title, content, sentHash, reaction)
     }
 
     /**
@@ -1346,6 +1578,8 @@ class ChatRepository(
 
         // Create the outbound message record once (shared ID for the group msg)
         val groupMsgId = "grp_${System.currentTimeMillis()}_${(0..999).random()}"
+        // REACTIONS-DESIGN.md §4: the post's id, the same on every member's copy.
+        val postId = Reactions.newPostId()
 
         messageDao.upsert(
             MessageEntity(
@@ -1356,6 +1590,7 @@ class ChatRepository(
                 timestamp = postedAt,
                 isOutbound = true,
                 state = RetichatBridge.MessageState.SENDING,
+                postId = postId,
             )
         )
 
@@ -1364,7 +1599,7 @@ class ChatRepository(
             saveOutboundAttachments(groupMsgId, attachments)
         }
 
-        fanOutGroupPost(chat, groupIdHex, groupMsgId, content, attachments, postedAt, signer)
+        fanOutGroupPost(chat, groupIdHex, groupMsgId, content, attachments, postedAt, signer, postId)
         return null
     }
 
@@ -1392,6 +1627,8 @@ class ChatRepository(
                 timestamp = System.currentTimeMillis(),
                 isOutbound = true,
                 state = RetichatBridge.MessageState.GENERATING,
+                // REACTIONS-DESIGN.md §4: its id from the start, sent with it when it is released.
+                postId = Reactions.newPostId(),
             )
         )
         // Stored before it is queued, so the queue never takes it without them.
@@ -1427,7 +1664,7 @@ class ChatRepository(
             Log.w(TAG, "flushPending: group post ${msg.id} failed: its own address ${chat.ownMember?.take(8)} has no signer on this device (${signerKind(chat)}, §8.7) — nothing sent")
             return
         }
-        fanOutGroupPost(chat, groupIdHex, msg.id, msg.content, queuedAttachments(msg.id), msg.timestamp, signer)
+        fanOutGroupPost(chat, groupIdHex, msg.id, msg.content, queuedAttachments(msg.id), msg.timestamp, signer, msg.postId)
     }
 
     /**
@@ -1438,25 +1675,41 @@ class ChatRepository(
      * link (§8.4). In a D-group one `post` group sync is owed per post (§10.6),
      * once the router has accepted the first member envelope, or now if no
      * member besides the user has accepted; never for a send that throws.
+     *
+     * REACTIONS-DESIGN.md §4: every member copy carries the post's [postId]
+     * (key 11; none for a post queued before database 17), and so does its
+     * `post` sync. A Group [reaction] goes the same way to the same members:
+     * the usual envelope with its 0x40 (REACTION_TO the target's 16-byte post
+     * id, [GroupReaction.postId]), no text, no attachment, and in a D-group a
+     * `react` sync; it has no row ([groupMsgId] null), so nothing is tracked or
+     * polled for it.
      */
     private suspend fun fanOutGroupPost(
         chat: ChatEntity,
         groupIdHex: String,
-        groupMsgId: String,
+        groupMsgId: String?,
         content: String,
         attachments: List<Pair<String, ByteArray>>,
         postedAt: Long,
         signer: GroupSigner,
+        postId: String?,
+        reaction: GroupReaction? = null,
     ) {
         val selfHex = signer.hex
         val members = messageDao.groupMembersList(chat.id)
         val self = groupSelf(chat, members)
         val memberHexes = GroupMemberStatuses.acceptedMemberHexes(members = members, selfHex = selfHex)
             .filter { !self.isSelf(it) }
-        // §10.6: the post's group sync, in a D-group only, owed once.
+        // §10.6: the post's group sync, in a D-group only, owed once (a reaction's: `react`, REACTIONS-DESIGN.md §5.3).
         val postSync: GroupSync? = if (GroupSelves.isDistroGroup(chat.ownMember, selfHex())) {
-            GroupSync(DistroGroupSync.POST, groupIdHex, postedAt, text = content, left = UserPreferences.groupsLeftBy(appContext, signer.hex))
+            val left = UserPreferences.groupsLeftBy(appContext, signer.hex)
+            if (reaction != null) {
+                GroupSync(DistroGroupSync.REACT, groupIdHex, postedAt, text = reaction.content, left = left, postId = reaction.postId)
+            } else {
+                GroupSync(DistroGroupSync.POST, groupIdHex, postedAt, text = content, left = left, postId = postId)
+            }
         } else null
+        val reactionTo = reaction?.postId?.hexToBytes()
         val postSyncOwed = java.util.concurrent.atomic.AtomicBoolean(postSync == null)
 
         // Nothing to submit: no member besides the user has accepted. The post's sync is owed now.
@@ -1464,8 +1717,8 @@ class ChatRepository(
             DistroOutboxRuntime.oweGroupSync(appContext, signer.hex, postSync)
         }
 
-        // Track delivery per member
-        memberHexes.forEach { memberHex ->
+        // Track delivery per member (a post's; a reaction has no row)
+        if (groupMsgId != null) memberHexes.forEach { memberHex ->
             messageDao.upsertTracking(
                 DeliveryTrackingEntity(
                     messageId = groupMsgId,
@@ -1499,6 +1752,14 @@ class ChatRepository(
                     // Attach group metadata
                     GroupFields.set(handle, GroupEntry.ID, groupIdHex)
                     GroupFields.set(handle, GroupEntry.SENDER, selfHex)
+                    if (postId != null) GroupFields.setPostId(handle, postId)
+                    if (reaction != null &&
+                        (reactionTo == null || !RetichatBridge.messageSetReaction(handle, reactionTo, reaction.content))
+                    ) {
+                        Log.e(TAG, "sendGroupReaction: the reaction for ${memberHex.take(8)} not built: ${RetichatBridge.lastError()} — not sent")
+                        RetichatBridge.messageDestroy(handle)
+                        return@launch
+                    }
 
                     attachments.forEach { (name, data) ->
                         RetichatBridge.messageAddAttachment(handle, name, data)
@@ -1510,9 +1771,11 @@ class ChatRepository(
                         if (postSync != null && postSyncOwed.compareAndSet(false, true)) {
                             DistroOutboxRuntime.oweGroupSync(appContext, signer.hex, postSync)
                         }
-                        rememberDeliveryTarget(handle, DeliveryTargets.Target.GroupMember(groupMsgId, chat.id, memberHex))
-                        // Poll for delivery proof per-member
-                        pollGroupMemberDelivery(groupMsgId, chat.id, memberHex, handle)
+                        if (groupMsgId != null) {
+                            rememberDeliveryTarget(handle, DeliveryTargets.Target.GroupMember(groupMsgId, chat.id, memberHex))
+                            // Poll for delivery proof per-member
+                            pollGroupMemberDelivery(groupMsgId, chat.id, memberHex, handle)
+                        }
                     } else {
                         Log.e(TAG, "sendGroupMessage: failed to send to $memberHex")
                     }
@@ -1521,8 +1784,11 @@ class ChatRepository(
         }
 
         // Optimistically mark as SENT (individual proofs update tracking)
-        messageDao.updateState(groupMsgId, RetichatBridge.MessageState.SENT)
+        if (groupMsgId != null) messageDao.updateState(groupMsgId, RetichatBridge.MessageState.SENT)
     }
+
+    /** A Group reaction [fanOutGroupPost] sends (REACTIONS-DESIGN.md §4): to the post [postId] (32 hex), [content] "" removing the user's one. */
+    private class GroupReaction(val postId: String, val content: String)
 
     /**
      * Poll a single group-member send until delivered or timed out.
@@ -1654,8 +1920,9 @@ class ChatRepository(
             // any write, so a stranger leaves nothing behind. The source is
             // the packet's own, never GROUP_SENDER.
             var standing: GroupStanding? = null
+            var groupAction: String? = null
             if (groupId != null) {
-                val action = fields.group(GroupEntry.ACTION)
+                val action = fields.group(GroupEntry.ACTION).also { groupAction = it }
                 val here = groupStanding(groupId, srcHex).also { standing = it }
                 // GROUPS-DISTRO-DESIGN.md §6.3: the three first rules, on this path too.
                 DeliveryPolicy.firstRules(signature, srcHex, fields.group(GroupEntry.SENDER), here.selves, here.echoes)?.let { why ->
@@ -1681,13 +1948,26 @@ class ChatRepository(
                 return@launch
             }
 
+            // REACTIONS-DESIGN.md §3: a reaction in a direct chat is applied
+            // here, before anything that would store a bubble, notify or count
+            // unread, and goes no further. One in a Group goes on to the group
+            // handler, which takes it where a post is taken.
+            val reaction = if (groupId == null || groupAction == null) fields.reaction() else LxmfFields.Reaction.None
+            if (groupId == null && reaction != LxmfFields.Reaction.None) {
+                acceptMessageName(srcHex, nameField, unverifiedReason, timestamp)
+                takeDirectReaction(directChatId(srcHash), srcHex, reaction, (timestamp * 1000).toLong(), "direct")
+                return@launch
+            }
+
             // 0xD1 always names the LXMF source, group messages and relayed
             // copies included (there it names the relayer). A hidden row:
             // nobody becomes a contact by sending (ContactSql). Never for a
-            // self address (GROUPS-DISTRO-DESIGN.md §9.2).
+            // self address (GROUPS-DISTRO-DESIGN.md §9.2), and never for a
+            // reaction (REACTIONS-DESIGN.md §3): the name only updates a row
+            // already here.
             val group = standing
             if (group == null || !group.isSelf(srcHex)) {
-                ensureContact(srcHex)
+                if (reaction == LxmfFields.Reaction.None) ensureContact(srcHex)
                 acceptMessageName(srcHex, nameField, unverifiedReason, timestamp)
             }
 
@@ -1710,6 +1990,11 @@ class ChatRepository(
      * message's, so the attachments are saved the same way. Required, with
      * no default: until 2026-09-29 this path passed no fields and every
      * attachment sent to a distro address was dropped.
+     *
+     * [lxmfHash] is the unwrap's `hash`, M's LXMF hash, kept beside the
+     * derived id so a reaction can name the message (REACTIONS-DESIGN.md §5.1);
+     * a reaction arriving here is applied in the chat with its source and
+     * stored as nothing else (§3).
      */
     fun onDistroMessageReceived(
         srcHash: ByteArray,
@@ -1719,6 +2004,7 @@ class ChatRepository(
         fieldsRaw: ByteArray?,
         nameField: NameField = NameField.Absent,
         unverifiedReason: Int = Signature.INVALID,
+        lxmfHash: String? = null,
     ) {
         val srcHex = srcHash.toHex()
         val msgId = DistroCodec.messageId(srcHex, timestamp, content)
@@ -1738,9 +2024,16 @@ class ChatRepository(
         // No privacy filter: mail to the distro is mail to this person (iOS
         // storeIncomingDirect via distro fan-out does not filter either).
         scope.launch(Dispatchers.IO) {
+            // REACTIONS-DESIGN.md §3: before anything that would make a chat, a contact or a bubble.
+            val reaction = fields.reaction()
+            if (reaction != LxmfFields.Reaction.None) {
+                acceptMessageName(srcHex, nameField, unverifiedReason, timestamp)
+                takeDirectReaction(directChatId(srcHash), srcHex, reaction, (timestamp * 1000).toLong(), "via the distro")
+                return@launch
+            }
             ensureContact(srcHex)
             acceptMessageName(srcHex, nameField, unverifiedReason, timestamp)
-            handleDirectMessage(msgId, srcHash, srcHex, content, timestamp, fields)
+            handleDirectMessage(msgId, srcHash, srcHex, content, timestamp, fields, lxmfHash)
         }
     }
 
@@ -1758,16 +2051,30 @@ class ChatRepository(
      * gets a plain contact row (not allowlisted) with its announces watched,
      * as iOS `handleDistroSentCopy` does, so the chat's title can pick up the
      * recipient's names (DISPLAY_NAMES.md §5.1).
+     *
+     * REACTIONS-DESIGN.md §5.2: [fieldsRaw] is the copy's fields. A copy with
+     * a 0x40 is the Distro Sync of a reaction: applied as the distro's in the
+     * chat with the recipient, with no bubble, and never making that chat or
+     * a contact. Otherwise the copy's key 12 (M's LXMF hash) is kept beside
+     * the derived id, so a reaction to M finds it here too.
      */
-    fun onDistroSentCopy(recipientHex: String, title: String, content: String, timestamp: Double) {
+    fun onDistroSentCopy(recipientHex: String, title: String, content: String, timestamp: Double, fieldsRaw: ByteArray? = null) {
         val distroHex = DistroManager.deliveryHashHex ?: run {
             Log.w(TAG, "onDistroSentCopy: no distro loaded — dropped copy for ${recipientHex.take(8)}")
             return
         }
         val recipient = DistroCodec.hexToBytes(recipientHex) ?: return
         val msgId = DistroCodec.sentCopyMessageId(distroHex, timestamp, content)
-        Log.i(TAG, "onDistroSentCopy: to=${recipientHex.take(16)} content='${content.take(40)}'")
+        val fields = (LxmfFields.receive(fieldsRaw, onFailure = {
+            Log.w(TAG, "onDistroSentCopy: fields of the copy for ${recipientHex.take(8)} unreadable (${it::class.java.simpleName}: ${it.message})")
+        }) as? LxmfFields.Received.Read)?.fields ?: LxmfFields.EMPTY
+        val reaction = fields.reaction()
+        Log.i(TAG, "onDistroSentCopy: to=${recipientHex.take(16)} content='${content.take(40)}'${if (reaction != LxmfFields.Reaction.None) " (a reaction)" else ""}")
         scope.launch(Dispatchers.IO) {
+            if (reaction != LxmfFields.Reaction.None) {
+                takeDirectReaction(directChatId(recipient), distroHex, reaction, (timestamp * 1000).toLong(), "a Distro Sync of a send")
+                return@launch
+            }
             if (messageDao.findById(msgId) != null) {
                 Log.d(TAG, "onDistroSentCopy: dup msgId=${msgId.take(16)}, skipping")
                 return@launch
@@ -1798,6 +2105,7 @@ class ChatRepository(
                     timestamp = (timestamp * 1000).toLong(),
                     isOutbound = true,
                     state = RetichatBridge.MessageState.SENT,
+                    lxmfHash = fields.sentHash(),
                 )
             )
         }
@@ -1896,8 +2204,9 @@ class ChatRepository(
             DistroGroupAdmission.Verdict.Admit -> Unit
         }
         // §6.4: the sender's name row, as the direct path makes it; nothing of a DM.
+        // A reaction makes no contact (REACTIONS-DESIGN.md §3): its name only updates a row here.
         if (!here.isSelf(srcHex)) {
-            ensureContact(srcHex)
+            if (action != null || fields.reaction() == LxmfFields.Reaction.None) ensureContact(srcHex)
             acceptMessageName(srcHex, nameField, unverifiedReason, timestamp)
         }
         // §6.2: kept only when the handler applied or stored it; otherwise its key is not
@@ -2108,6 +2417,18 @@ class ChatRepository(
                 Log.i(TAG, "$label APPLIED: stored as the user's own post, SENT")
                 DistroGroupOutcome.KEPT
             }
+            DistroGroupSync.Effect.ApplyReact -> {
+                // REACTIONS-DESIGN.md §5.3: as §3, with reactor the address the user takes part in the group as (D).
+                val postId = sync.postId.orEmpty()
+                val target = messageDao.findByPostId(chat!!.id, postId)
+                if (target == null) {
+                    Log.i(TAG, "reaction dropped: target ${postId.take(16)} not in ${chat.id} ($label)")
+                    DistroGroupOutcome.DROPPED
+                } else {
+                    applyReaction(target.id, distro, sync.text.orEmpty(), sync.atMs, "$label to ${target.id.take(12)}")
+                    DistroGroupOutcome.KEPT
+                }
+            }
             DistroGroupSync.Effect.HoldPost -> {
                 if (UserPreferences.isInviteFiltered(appContext, sync.groupId)) {
                     Log.i(TAG, "$label DROPPED: its group is in the filtered-invite set, whose traffic is never held (§6.5)")
@@ -2228,7 +2549,10 @@ class ChatRepository(
         deleteChatLocal(chat)
     }
 
-    /** A post G in a joined group: the user's own outgoing post, sender D, SENT, at `at_ms`, id the G's hash, no notification (§11.2). */
+    /**
+     * A post G in a joined group: the user's own outgoing post, sender D, SENT, at `at_ms`, id the G's hash, no notification (§11.2).
+     * Its `post_id`, when the sync has one, is filed on it (REACTIONS-DESIGN.md §5.3), so reactions to it find it here.
+     */
     private suspend fun storePostFromSync(chat: ChatEntity, sync: GroupSync, hash: String, distro: String) {
         if (messageDao.findById(hash) != null) return
         messageDao.upsert(
@@ -2240,6 +2564,7 @@ class ChatRepository(
                 timestamp = sync.atMs,
                 isOutbound = true,
                 state = RetichatBridge.MessageState.SENT,
+                postId = sync.postId,
             )
         )
     }
@@ -2451,6 +2776,15 @@ class ChatRepository(
                     Log.w(TAG, "relay_req for ${chat.id}: no signer for its own address (${signerKind(chat)}, §8.7) — not relayed")
                     return false
                 }
+                // REACTIONS-DESIGN.md §4: what is relayed carries its 0x40 and key 11 along.
+                val relayedReaction = when (val r = fields.reaction()) {
+                    LxmfFields.Reaction.None -> null
+                    is LxmfFields.Reaction.Invalid -> {
+                        Log.i(TAG, "reaction dropped: ${r.why} (relay_req ${msgId.take(12)} for ${chat.id} from ${srcHex.take(8)}, not relayed)")
+                        return false
+                    }
+                    is LxmfFields.Reaction.Valid -> Reactions.Outgoing(r.to, r.content)
+                }
                 groupChatManager?.performRelay(
                     signer    = signer,
                     groupId   = groupId,
@@ -2460,6 +2794,8 @@ class ChatRepository(
                     alreadySeen            = alreadySeen,
                     requesterHex           = srcHex,
                     allAcceptedMembers     = acceptedMembers,
+                    postId                 = fields.postId(),
+                    reaction               = relayedReaction,
                 ) ?: Log.w(TAG, "relay_req: stack offline, cannot relay")
                 true
             }
@@ -2479,6 +2815,12 @@ class ChatRepository(
                 // GROUP_SENDER's only when a current member of a joined group
                 // relays a listed member's post; anyone else's is its own (a
                 // stranger's never takes a member's name).
+                // REACTIONS-DESIGN.md §3, §4: a reaction is taken here, before
+                // anything that would store a bubble, notify or count unread.
+                val reaction = fields.reaction()
+                if (reaction != LxmfFields.Reaction.None) {
+                    return takeGroupReaction(msgId, chat, srcHex, reaction, timestamp, fields, standing, signature)
+                }
                 val attachments = fields.getFileAttachments()
                 val post = DeliveryPolicy.groupPost(standing.isSelf(srcHex), signature, content.isNotBlank() || attachments.isNotEmpty())
                 when (post) {
@@ -2496,6 +2838,7 @@ class ChatRepository(
                                     timestamp = (timestamp * 1000).toLong(),
                                     isOutbound = true,
                                     state = RetichatBridge.MessageState.SENT,
+                                    postId = fields.postId(),
                                 )
                             )
                             saveInboundAttachments(msgId, fields)
@@ -2507,17 +2850,22 @@ class ChatRepository(
                     }
                     DeliveryPolicy.GroupPost.MEMBER -> {
                         val author = groupAuthor(fields, srcHex, standing, signature)
-                        messageDao.upsert(
-                            MessageEntity(
-                                id = msgId,
-                                chatId = chat.id,
-                                senderHashHex = author,
-                                content = content,
-                                timestamp = (timestamp * 1000).toLong(),
-                                isOutbound = false,
-                                state = RetichatBridge.MessageState.DELIVERED,
+                        // A copy that arrives again keeps the reactions its row has (REACTIONS-DESIGN.md §6).
+                        reactionLock.withLock {
+                            messageDao.upsert(
+                                MessageEntity(
+                                    id = msgId,
+                                    chatId = chat.id,
+                                    senderHashHex = author,
+                                    content = content,
+                                    timestamp = (timestamp * 1000).toLong(),
+                                    isOutbound = false,
+                                    state = RetichatBridge.MessageState.DELIVERED,
+                                    postId = fields.postId(),
+                                    reactionsJson = messageDao.findById(msgId)?.reactionsJson,
+                                )
                             )
-                        )
+                        }
                         saveInboundAttachments(msgId, fields)
 
                         if (RetichatApp.activeChatId != chat.id) {
@@ -2827,6 +3175,7 @@ class ChatRepository(
         content: String,
         timestamp: Double,
         fields: LxmfFields,
+        lxmfHash: String? = null,
     ) {
         // Dedup: the same LXMF message (deterministic hash) can arrive via
         // multiple transports in quick succession — PROPAGATED first, then
@@ -2868,6 +3217,8 @@ class ChatRepository(
                 timestamp = (timestamp * 1000).toLong(),
                 isOutbound = false,
                 state = RetichatBridge.MessageState.DELIVERED,
+                // REACTIONS-DESIGN.md §5.1: a Distro Fanout message's LXMF hash, beside its derived id.
+                lxmfHash = lxmfHash,
             )
         )
 

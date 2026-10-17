@@ -37,6 +37,11 @@ internal class PropagationFallbacks(private val capacity: Int = 256) {
     class Send(
         val messageId: String,
         val directHandle: Long,
+        /**
+         * False for a reaction (REACTIONS-DESIGN.md §2): it goes the way a text
+         * message goes, but has no bubble, so [messageId] names no row.
+         */
+        val bubble: Boolean = true,
     )
 
     companion object {

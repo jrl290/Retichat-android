@@ -7,6 +7,7 @@ import com.newendian.retichat.bridge.GroupEntry
 import com.newendian.retichat.bridge.RetichatBridge
 import com.newendian.retichat.data.model.hexToBytes
 import com.newendian.retichat.data.model.toHex
+import com.newendian.retichat.data.repository.Reactions
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -226,6 +227,9 @@ class GroupChatManager(
      *
      * [alreadySeen] is the set of member hashes that have already received
      * this message; the relayer will skip them to avoid duplicates.
+     * [postId] and [reaction] are what is relayed (REACTIONS-DESIGN.md §4):
+     * the post's id (key 11) and a reaction's field 0x40, carried along so the
+     * relayer copies both onto each relayed copy.
      */
     fun sendRelayRequest(
         signer: GroupSigner,
@@ -234,8 +238,10 @@ class GroupChatManager(
         originalSender: String,
         alreadySeen: List<String>,
         relayerHex: String,
+        postId: String? = null,
+        reaction: Reactions.Outgoing? = null,
     ) {
-        send(signer, relayerHex, content) { handle ->
+        sendChecked(signer, relayerHex, content) { handle ->
             GroupFields.set(handle, GroupEntry.ID,       groupId)
             GroupFields.set(handle, GroupEntry.ACTION,   Action.RELAY_REQUEST)
             GroupFields.set(handle, GroupEntry.SENDER,   originalSender)
@@ -243,6 +249,7 @@ class GroupChatManager(
             if (alreadySeen.isNotEmpty()) {
                 GroupFields.set(handle, GroupEntry.RELAY_SEEN, alreadySeen.joinToString(","))
             }
+            carried(handle, postId, reaction)
         }
     }
 
@@ -251,7 +258,9 @@ class GroupChatManager(
     /**
      * Relay a group message to all members NOT yet in [alreadySeen].
      *
-     * Sends a relay-done confirmation back to [requesterHex].
+     * Sends a relay-done confirmation back to [requesterHex]. [postId] and
+     * [reaction] are the request's key 11 and field 0x40 (REACTIONS-DESIGN.md
+     * §4), copied onto each relayed copy.
      */
     fun performRelay(
         signer: GroupSigner,
@@ -262,6 +271,8 @@ class GroupChatManager(
         alreadySeen: List<String>,
         requesterHex: String,
         allAcceptedMembers: List<String>,
+        postId: String? = null,
+        reaction: Reactions.Outgoing? = null,
     ) {
         val seenSet = (alreadySeen + listOf(requesterHex, signer.hex, originalSender)).toHashSet()
         val targets = allAcceptedMembers.filter { it !in seenSet }
@@ -271,12 +282,13 @@ class GroupChatManager(
 
         // Forward to uncovered members
         targets.forEach { target ->
-            send(signer, target, content) { handle ->
+            sendChecked(signer, target, content) { handle ->
                 GroupFields.set(handle, GroupEntry.ID,         groupId)
                 GroupFields.set(handle, GroupEntry.NAME,       groupName)
                 GroupFields.set(handle, GroupEntry.SENDER,     originalSender)
                 GroupFields.set(handle, GroupEntry.RELAY_FOR,  originalSender)
                 GroupFields.set(handle, GroupEntry.RELAY_SEEN, newSeen.joinToString(","))
+                carried(handle, postId, reaction)
             }
         }
 
@@ -285,6 +297,19 @@ class GroupChatManager(
     }
 
     // ---- Private helpers ------------------------------------------------
+
+    /**
+     * Key 11 and field 0x40 of what a relay request carries (REACTIONS-DESIGN.md
+     * §4) set on message [handle]; false (nothing sent) when either could not be.
+     */
+    private fun carried(handle: Long, postId: String?, reaction: Reactions.Outgoing?): Boolean {
+        if (postId != null && !GroupFields.setPostId(handle, postId)) return false
+        if (reaction != null && !RetichatBridge.messageSetReaction(handle, reaction.to, reaction.content)) {
+            Log.w(TAG, "relay: the reaction field was not set: ${RetichatBridge.lastError()}")
+            return false
+        }
+        return true
+    }
 
     /** Create, configure, and send a single LXMF message to [targetHex], as [signer]. */
     private fun send(signer: GroupSigner, targetHex: String, content: String = "", configure: (Long) -> Unit) =

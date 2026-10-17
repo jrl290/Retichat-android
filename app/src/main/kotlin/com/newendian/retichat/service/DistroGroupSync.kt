@@ -23,16 +23,24 @@ data class GroupSync(
     val keys: List<String>? = null,
     /** accept: the invite's authenticated source, as recorded. */
     val creator: String? = null,
-    /** post: the post's text unchanged; attachments are not copied (§17.11). */
+    /** post: the post's text unchanged; attachments are not copied (§17.11). react: the reaction, "" removing it. */
     val text: String? = null,
     /** Every op: the D-groups the device holds as left by D, most recent first, at most [DistroGroupSync.LEFT_MAX]. */
     val left: List<String> = emptyList(),
+    /**
+     * post (optional: older devices send none) and react (required): the Group
+     * post id, 32 lowercase hex (REACTIONS-DESIGN.md §4, §5.3). On the wire it
+     * follows `left`, where older readers ignore it.
+     */
+    val postId: String? = null,
 ) {
     /**
      * The JSON the writer takes (`RetichatBridge.messageSetDistroGroupSync`,
      * LXMF-rust `GroupSync::from_json`): every key, null where the op does not
-     * carry it. Written by hand: org.json is not on the JVM the tests run on, and
-     * the bridge parses it with serde_json, which reads this exactly.
+     * carry it, then `post_id` only when the sync has one (REACTIONS-DESIGN.md
+     * §5.3: so the JSON of every sync without one is unchanged). Written by hand:
+     * org.json is not on the JVM the tests run on, and the bridge parses it with
+     * serde_json, which reads this exactly.
      */
     fun toJson(): String {
         val describes = op == DistroGroupSync.CREATE || op == DistroGroupSync.ACCEPT
@@ -44,8 +52,9 @@ data class GroupSync(
             append(",\"members\":").append(if (describes) Json.str(members ?: "") else "null")
             append(",\"keys\":").append(if (describes) Json.list(keys ?: emptyList()) else "null")
             append(",\"creator\":").append(if (op == DistroGroupSync.ACCEPT && creator != null) Json.str(creator) else "null")
-            append(",\"text\":").append(if (op == DistroGroupSync.POST) Json.str(text ?: "") else "null")
+            append(",\"text\":").append(if (op == DistroGroupSync.POST || op == DistroGroupSync.REACT) Json.str(text ?: "") else "null")
             append(",\"left\":").append(Json.list(left))
+            if (postId != null) append(",\"post_id\":").append(Json.str(postId))
             append('}')
         }
     }
@@ -86,7 +95,13 @@ object DistroGroupSync {
     const val ACCEPT = "accept"
     const val LEAVE = "leave"
     const val POST = "post"
-    val OPS = setOf(CREATE, ACCEPT, LEAVE, POST)
+    /**
+     * REACTIONS-DESIGN.md §5.3: the user reacted to a Group post as D,
+     * `["react", group_id, at_ms, content, left, post_id]`, the shape of a post
+     * with the reaction (`""` removing it) in `text` and `post_id` required.
+     */
+    const val REACT = "react"
+    val OPS = setOf(CREATE, ACCEPT, LEAVE, POST, REACT)
 
     /** `left` holds at most 32 ids (§10.2), and the per-D list of them as many. */
     const val LEFT_MAX = 32
@@ -156,7 +171,7 @@ object DistroGroupSync {
         (get("problem") as? String)?.let { return GroupSyncRead(by, it, null) }
         fun bad(why: String) = GroupSyncRead(by, "the unwrap's group_sync $why", null)
         val op = get("op") as? String ?: return bad("has no op")
-        if (op !in OPS) return bad("op $op is not create, accept, leave or post")
+        if (op !in OPS) return bad("op $op is not create, accept, leave, post or react")
         val groupId = (get("group_id") as? String)?.lowercase()?.takeIf { HEX32.matches(it) } ?: return bad("group_id is not 32 hex")
         val atMs = integer(get("at_ms"))?.takeIf { it in 0..MAX_AT_MS } ?: return bad("at_ms is not an integer from 0 to 2^53 - 1")
         val left = strings(get("left"))?.map { it.lowercase() } ?: return bad("left is not an array of strings")
@@ -173,9 +188,16 @@ object DistroGroupSync {
             val creator = (get("creator") as? String)?.lowercase()?.takeIf { HEX32.matches(it) } ?: return bad("creator is not 32 hex")
             sync = sync.copy(creator = creator)
         }
-        if (op == POST) {
+        if (op == POST || op == REACT) {
             val text = get("text") as? String ?: return bad("has no text")
             sync = sync.copy(text = text)
+        }
+        // REACTIONS-DESIGN.md §5.3: a react names its post; a post may carry its own id.
+        val postId = (get("post_id") as? String)?.lowercase()?.takeIf { HEX32.matches(it) }
+        if (op == REACT) {
+            sync = sync.copy(postId = postId ?: return bad("post_id is not 32 hex"))
+        } else if (op == POST && postId != null) {
+            sync = sync.copy(postId = postId)
         }
         return GroupSyncRead(by, null, sync)
     }
@@ -262,8 +284,15 @@ object DistroGroupSync {
         object StorePost : Effect()
         /** A post G for a group pending or not held here: held (§6.5), not recorded as seen. */
         object HoldPost : Effect()
-        /** A post G for a closed group. */
+        /** A post G for a closed group (and a react G for one). */
         object DropPost : Effect()
+        /**
+         * A react G in a joined group (REACTIONS-DESIGN.md §5.3): applied as §3
+         * applies a reaction, reactor D, to the post its `post_id` names. A react
+         * G for a group pending or not held here is held as a post G is
+         * ([HoldPost]), so its replay comes after the post's.
+         */
+        object ApplyReact : Effect()
         /** Already held, or closed (final): nothing changes. */
         object Nothing : Effect()
         /** Rule 5: the group is held here with another own address (held at upgrade as the device). Its `left` still applies. */
@@ -272,7 +301,7 @@ object DistroGroupSync {
 
     /** What [sync] does to the group as held here ([local]) — §11.1 rule 5 and the table of §11.2. */
     fun effect(sync: GroupSync, local: Local, distroHex: String): Effect {
-        if (local is Local.Closed) return if (sync.op == POST) Effect.DropPost else Effect.Nothing
+        if (local is Local.Closed) return if (sync.op == POST || sync.op == REACT) Effect.DropPost else Effect.Nothing
         if (local is Local.Held && !local.ownIsD) return Effect.IgnoreOwnAddress
         return when (sync.op) {
             CREATE -> when (local) {
@@ -300,6 +329,11 @@ object DistroGroupSync {
             POST -> when (local) {
                 Local.NotHeld -> Effect.HoldPost
                 is Local.Held -> if (local.joined) Effect.StorePost else Effect.HoldPost
+                Local.Closed -> Effect.DropPost
+            }
+            REACT -> when (local) {
+                Local.NotHeld -> Effect.HoldPost
+                is Local.Held -> if (local.joined) Effect.ApplyReact else Effect.HoldPost
                 Local.Closed -> Effect.DropPost
             }
             else -> Effect.Nothing

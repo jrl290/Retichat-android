@@ -109,7 +109,8 @@ class DistroOutboxWiringTest {
     @Test
     fun theSentCopyIsOwedNotHandedToTheRouterOnce() {
         val copy = body(repository, "private suspend fun sendDistroSentCopy(", "private suspend fun sendGroupMessage(")
-        assertTrue(copy.contains("DistroOutboxRuntime.oweSentCopy(appContext, recipient, title, content)"))
+        // With M's hash and a reaction's 0x40 (REACTIONS-DESIGN.md §5.2).
+        assertTrue(copy.contains("DistroOutboxRuntime.oweSentCopy(appContext, recipient, title, content, sentHash, reaction)"))
         assertTrue(copy.contains("DistroCodec.shouldSendSentCopy("))
         // It no longer goes through the router, whose own re-send is paced by a timer and gives up after a count.
         assertFalse(copy.contains("messageSendViaAppLinks"))

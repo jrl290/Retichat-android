@@ -19,6 +19,13 @@ object Reactions {
     /** A reactor's reaction: [emoji] ("" a removal) as of [atMs], the reacting message's LXMF timestamp. */
     data class Entry(val emoji: String, val atMs: Long)
 
+    /**
+     * A reaction a send carries (§2, §4): field 0x40 with [to], the target's
+     * 32-byte LXMF hash (in a Group its 16-byte post id), and [content], ""
+     * removing the sender's one. Written with RetichatBridge.messageSetReaction.
+     */
+    class Outgoing(val to: ByteArray, val content: String)
+
     /** A chip under a bubble: [emoji] with the [count] of its reactors, [mine] when one of them is the user. */
     data class Chip(val emoji: String, val count: Int, val mine: Boolean)
 

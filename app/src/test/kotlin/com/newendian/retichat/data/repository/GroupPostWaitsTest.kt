@@ -129,7 +129,11 @@ class GroupPostWaitsTest {
         val dao = src("data/db/dao/MessageDao.kt")
         assertTrue(dao.contains("UPDATE messages SET state = :state, senderHashHex = :sender WHERE id = :id AND isOutbound = 1 AND state = 0x01 AND nativeHandle = 0"))
         // The post sent at once goes through the same fan-out, its sync and the members decided there.
-        assertTrue(body(repo, "sendGroupMessage").contains("fanOutGroupPost(chat, groupIdHex, groupMsgId, content, attachments, postedAt, signer)"))
-        assertEquals(2, Regex(Regex.escape("fanOutGroupPost(chat, ")).findAll(repo).count())
+        // With its post id (REACTIONS-DESIGN.md §4), the queued post's kept on its row.
+        assertTrue(body(repo, "sendGroupMessage").contains("fanOutGroupPost(chat, groupIdHex, groupMsgId, content, attachments, postedAt, signer, postId)"))
+        assertTrue(release.contains("fanOutGroupPost(chat, groupIdHex, msg.id, msg.content, queuedAttachments(msg.id), msg.timestamp, signer, msg.postId)"))
+        // The third: a Group reaction goes the way a post goes, with no row (REACTIONS-DESIGN.md §4).
+        assertEquals(3, Regex(Regex.escape("fanOutGroupPost(chat, ")).findAll(repo).count())
+        assertTrue(body(repo, "sendGroupReaction").contains("fanOutGroupPost(chat, groupIdHex, groupMsgId = null,"))
     }
 }

@@ -7,8 +7,8 @@ import com.newendian.retichat.bridge.InterfaceOnlineCallback
 import com.newendian.retichat.bridge.PropagationLinkCallback
 import com.newendian.retichat.bridge.PropagationUploadCallback
 import com.newendian.retichat.bridge.RetichatBridge
-import com.newendian.retichat.bridge.LxmfFields
 import com.newendian.retichat.data.repository.DistroHolding
+import com.newendian.retichat.data.repository.Reactions
 import com.newendian.retichat.service.DistroCodec.toHex
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
@@ -224,12 +224,22 @@ object DistroOutboxRuntime {
     }
 
     /**
-     * The §17.11 sent-copy of a message this device just sent as the distro to
+     * The §17.11 sent-copy of a message M this device just sent as the distro to
      * [recipient]: the same text, from D to D, with the recipient (0xFC) and
      * this device's address (0xFD), packed and signed once and owed until the
-     * node proves it. Never throws.
+     * node proves it. REACTIONS-DESIGN.md §5.2: it also carries M's LXMF hash
+     * [sentHash] (key 12) when known, and M's field 0x40 when M is a
+     * [reaction], so the other devices of D can find M, or apply the reaction.
+     * Never throws.
      */
-    suspend fun oweSentCopy(context: Context, recipient: ByteArray, title: String, content: String) {
+    suspend fun oweSentCopy(
+        context: Context,
+        recipient: ByteArray,
+        title: String,
+        content: String,
+        sentHash: String? = null,
+        reaction: Reactions.Outgoing? = null,
+    ) {
         try {
             val (distro, signer) = DistroManager.signing() ?: return
             val recipientHex = recipient.toHex()
@@ -240,9 +250,9 @@ object DistroOutboxRuntime {
             }
             val label = "the sent-copy for ${recipientHex.take(8)} (§17.11)"
             val packed = pack(distro, signer, label, title = title, content = content) { handle ->
-                RetichatBridge.messageAddFieldString(handle, LxmfFields.FIELD_CUSTOM_TYPE, LxmfFields.DISTRO_SENT_TYPE) &&
-                    RetichatBridge.messageAddFieldString(handle, LxmfFields.FIELD_CUSTOM_DATA, recipientHex) &&
-                    RetichatBridge.messageAddFieldString(handle, LxmfFields.FIELD_CUSTOM_META, deviceHex)
+                GroupFields.setSentCopy(GroupFields.Message(handle), recipientHex, deviceHex, sentHash, reaction) { to, c ->
+                    RetichatBridge.messageSetReaction(handle, to, c)
+                }
             } ?: return
             val entry = OwedEntry(
                 id = "sent:${packed.hash}", kind = OwedKind.SENT,

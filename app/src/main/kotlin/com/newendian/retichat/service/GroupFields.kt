@@ -4,6 +4,7 @@ import android.util.Log
 import com.newendian.retichat.bridge.GroupEntry
 import com.newendian.retichat.bridge.LxmfFields
 import com.newendian.retichat.bridge.RetichatBridge
+import com.newendian.retichat.data.repository.Reactions
 
 /**
  * The one place group entries are written to an outbound message
@@ -57,6 +58,43 @@ object GroupFields {
     }
 
     fun setStatuses(sink: Sink, elements: List<ByteArray>): Boolean = sink.setRetichatStatuses(elements)
+
+    /**
+     * Set GROUP_POST_ID (key 11, REACTIONS-DESIGN.md §4) on message [handle]:
+     * the Group post's id, 32 hex, the same on every copy of it and on a relay
+     * request for it and its relayed copies. Always in the Retichat field: it
+     * has no old top-level field, so a released build, which reads only those,
+     * skips it.
+     */
+    fun setPostId(handle: Long, postId: String): Boolean {
+        val ok = setPostId(Message(handle), postId)
+        if (!ok) Log.w(TAG, "GROUP_POST_ID not set: ${RetichatBridge.lastError()}")
+        return ok
+    }
+
+    fun setPostId(sink: Sink, postId: String): Boolean = sink.setRetichatString(LxmfFields.RF_GROUP_POST_ID, postId)
+
+    /**
+     * The fields of the Distro Sync of a send M (RFed SPEC §17.11) on [sink]:
+     * LXMF's custom pair with the sent type, the recipient (0xFC) and this
+     * device's address (0xFD), as before; and (REACTIONS-DESIGN.md §5.2) M's
+     * LXMF hash [sentHash] as key 12 (SENT_HASH) when it is known, and M's own
+     * field 0x40 when M is a [reaction], set through [setReaction]. False when
+     * any of it could not be set: the copy is then not made.
+     */
+    fun setSentCopy(
+        sink: Sink,
+        recipientHex: String,
+        deviceHex: String,
+        sentHash: String?,
+        reaction: Reactions.Outgoing?,
+        setReaction: (ByteArray, String) -> Boolean,
+    ): Boolean =
+        sink.addFieldString(LxmfFields.FIELD_CUSTOM_TYPE, LxmfFields.DISTRO_SENT_TYPE) &&
+            sink.addFieldString(LxmfFields.FIELD_CUSTOM_DATA, recipientHex) &&
+            sink.addFieldString(LxmfFields.FIELD_CUSTOM_META, deviceHex) &&
+            (sentHash == null || sink.setRetichatString(LxmfFields.RF_SENT_HASH, sentHash)) &&
+            (reaction == null || setReaction(reaction.to, reaction.content))
 
     fun set(
         sink: Sink,

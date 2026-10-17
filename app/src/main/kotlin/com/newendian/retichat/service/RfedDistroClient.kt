@@ -380,12 +380,14 @@ object RfedDistroClient {
                         app.repository.learnSibling(d, DistroGroupSync.siblingOf(sentBy, StackRuntime.selfDestHash.toHex()), "a sent copy (§17.11)")
                     }
                 }
-                app.repository.onDistroSentCopy(copy.recipientHex, title, content, timestamp)
+                // Its fields: M's hash (key 12) and, for a reaction, M's 0x40 (REACTIONS-DESIGN.md §5.2).
+                app.repository.onDistroSentCopy(copy.recipientHex, title, content, timestamp, fieldsRaw)
                 return
             }
         }
         val srcHash = DistroCodec.hexToBytes(srcHex) ?: return
-        app.repository.onDistroMessageReceived(srcHash, title, content, timestamp, fieldsRaw, nameField, unverifiedReason)
+        // The unwrap's hash: M's LXMF hash, kept beside the derived id (REACTIONS-DESIGN.md §5.1).
+        app.repository.onDistroMessageReceived(srcHash, title, content, timestamp, fieldsRaw, nameField, unverifiedReason, groupKeys.hash)
     }
 
     /**

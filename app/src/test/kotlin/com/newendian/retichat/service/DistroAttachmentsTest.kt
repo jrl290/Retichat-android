@@ -209,7 +209,8 @@ class DistroAttachmentsTest {
         assertFalse(handle.contains("""optString("fields""""))
         // Unreadable fields cost the attachments, not the message: no early return on them.
         assertFalse(Regex("fieldsRaw\\s*(\\?:|!!)").containsMatchIn(handle))
-        assertTrue(handle.contains("onDistroMessageReceived(srcHash, title, content, timestamp, fieldsRaw, nameField, unverifiedReason)"))
+        // With the unwrap's hash, kept beside the derived id (REACTIONS-DESIGN.md §5.1).
+        assertTrue(handle.contains("onDistroMessageReceived(srcHash, title, content, timestamp, fieldsRaw, nameField, unverifiedReason, groupKeys.hash)"))
         // GROUPS-DISTRO-DESIGN.md §6.1, §18.2 item 5: a group message (and a group sync) is routed
         // to the group branch first, with its fields (a post's attachments), and never reaches the
         // direct-message path below.
@@ -219,8 +220,9 @@ class DistroAttachmentsTest {
         assertTrue(handle.contains("handleGroupMessage(context, blob, groupKeys, route.groupId, srcHex, content, timestamp, fieldsRaw, nameField, unverifiedReason)"))
         val group = body(client, "private suspend fun handleGroupMessage(")
         assertTrue(group.contains("blob, groupKeys, groupId, srcHex, content, timestamp, fieldsRaw, nameField, unverifiedReason,"))
-        // The sent-copy path keeps its rule: text only.
-        assertTrue(handle.contains("app.repository.onDistroSentCopy(copy.recipientHex, title, content, timestamp)"))
+        // The sent-copy path keeps its rule, text only, no attachment; its fields are read only for
+        // M's hash (key 12) and a reaction's 0x40 (REACTIONS-DESIGN.md §5.2).
+        assertTrue(handle.contains("app.repository.onDistroSentCopy(copy.recipientHex, title, content, timestamp, fieldsRaw)"))
     }
 
     @Test
@@ -230,7 +232,7 @@ class DistroAttachmentsTest {
         assertTrue(Regex("timestamp: Double,\\s*fieldsRaw: ByteArray\\?,\\s*nameField").containsMatchIn(received))
         // Through the backstop: an Error from the decoder costs the attachments, not the message.
         assertTrue(received.contains("val fields = when (val received = LxmfFields.receive(fieldsRaw, onFailure = {"))
-        assertTrue(received.contains("handleDirectMessage(msgId, srcHash, srcHex, content, timestamp, fields)"))
+        assertTrue(received.contains("handleDirectMessage(msgId, srcHash, srcHex, content, timestamp, fields, lxmfHash)"))
         assertFalse(received.contains("ByteArray(0)"))
         assertFalse(received.contains("LxmfFields.EMPTY"))
         // ... where the attachments are saved, as for any direct message.
@@ -239,8 +241,9 @@ class DistroAttachmentsTest {
         // same backstop, and nothing in the repository calls the bare decoder.
         assertTrue(body(repo, "fun onMessageReceived(").contains("val received = LxmfFields.receive(fieldsRaw, onFailure = {"))
         assertFalse(repo.contains("LxmfFields.decode("))
-        // The sent copy stays text only.
-        assertTrue(repo.contains("fun onDistroSentCopy(recipientHex: String, title: String, content: String, timestamp: Double)"))
+        // The sent copy stays text only: its fields give M's hash and a reaction, never an attachment.
+        assertTrue(repo.contains("fun onDistroSentCopy(recipientHex: String, title: String, content: String, timestamp: Double, fieldsRaw: ByteArray? = null)"))
+        assertFalse(body(repo, "fun onDistroSentCopy(").contains("saveInboundAttachments("))
     }
 
     @Test

@@ -217,7 +217,10 @@ class GroupsDistroWiringTest {
     fun aDGroupPostOwesOnePostSyncOnceItsFirstEnvelopeLeftAndNoSentCopy() {
         val send = body(repo, "fanOutGroupPost")
         assertTrue(send.contains("val postSync: GroupSync? = if (GroupSelves.isDistroGroup(chat.ownMember, selfHex())) {"))
-        assertTrue(send.contains("GroupSync(DistroGroupSync.POST, groupIdHex, postedAt, text = content, left = UserPreferences.groupsLeftBy(appContext, signer.hex))"))
+        assertTrue(send.contains("val left = UserPreferences.groupsLeftBy(appContext, signer.hex)"))
+        // With the post's id; a reaction's sync is `react` (REACTIONS-DESIGN.md §5.3).
+        assertTrue(send.contains("GroupSync(DistroGroupSync.POST, groupIdHex, postedAt, text = content, left = left, postId = postId)"))
+        assertTrue(send.contains("GroupSync(DistroGroupSync.REACT, groupIdHex, postedAt, text = reaction.content, left = left, postId = reaction.postId)"))
         // Owed once: after the router accepted the first envelope, or at once when no member is a target.
         assertEquals(2, count(send, "postSyncOwed.compareAndSet(false, true)"))
         assertEquals(2, count(send, "DistroOutboxRuntime.oweGroupSync(appContext, signer.hex, postSync)"))
