@@ -6,7 +6,6 @@ import android.provider.OpenableColumns
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -52,6 +51,7 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.onLongClick
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -973,9 +973,9 @@ private fun ChannelConversationContent(
  * A long press opens the message's actions (REACTIONS-DESIGN.md §7): the quick
  * reactions when [reactable], then Copy and Select text wherever there is text.
  * Links and attachments keep their own taps: a press on them is theirs. The
- * reactions given show as chips under the bubble, highlighted when one of
- * their reactors is in [reactionSelves]; a tap on one makes it the user's, or
- * removes it if it already is.
+ * reactions given show after the time, in the checkmark's place; the popup
+ * highlights the user's own (one of [reactionSelves]), and picking it again
+ * removes it.
  */
 @Composable
 private fun MessageRow(
@@ -1192,7 +1192,12 @@ private fun MessageRow(
                         color = contentColor.copy(alpha = 0.6f),
                     )
 
-                    if (isOut) {
+                    // The reactions take the checkmark's place (REACTIONS-DESIGN.md
+                    // §7; James, 2026-10-17): each one given, once, no count, no
+                    // chip. Waiting, sending and failed keep their icon beside them.
+                    val reactions = remember(msg.reactionsJson, reactionSelves) { Reactions.chips(msg.reactionsJson, reactionSelves) }
+                    val checkmark = msg.state == RetichatBridge.MessageState.SENT || msg.state == RetichatBridge.MessageState.DELIVERED
+                    if (isOut && (reactions.isEmpty() || !checkmark)) {
                         Spacer(Modifier.width(4.dp))
                         val isFailed = msg.state == RetichatBridge.MessageState.FAILED
                         Text(
@@ -1200,6 +1205,16 @@ private fun MessageRow(
                             style = MaterialTheme.typography.bodySmall,
                             color = if (isFailed) Color(0xFFFF5252)
                                 else Color.White.copy(alpha = 0.7f),
+                        )
+                    }
+                    if (reactions.isNotEmpty()) {
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            text = reactions.joinToString("") { it.emoji },
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.semantics {
+                                contentDescription = reactions.joinToString(", ") { "${it.emoji} ${it.count}" + if (it.mine) ", including yours" else "" }
+                            },
                         )
                     }
                 }
@@ -1213,11 +1228,6 @@ private fun MessageRow(
                 onReact = viewModel?.takeIf { reactable }?.let { vm -> { emoji: String -> vm.react(msg, emoji) } },
                 onSelect = { selecting = true },
             )
-        }
-
-        val chips = remember(msg.reactionsJson, reactionSelves) { Reactions.chips(msg.reactionsJson, reactionSelves) }
-        if (chips.isNotEmpty()) {
-            ReactionChips(chips, onTap = viewModel?.takeIf { reactable }?.let { vm -> { emoji: String -> vm.react(msg, emoji) } })
         }
     }
 
@@ -1308,46 +1318,6 @@ private fun SelectTextDialog(text: String, onDismiss: () -> Unit) {
             }
         },
     )
-}
-
-/**
- * The reactions under a bubble (REACTIONS-DESIGN.md §3 "Display"): one chip per
- * emoji with its count, highlighted when one of its reactors is the user. A tap
- * makes that emoji the user's, or removes theirs if it already is; no tap where
- * the message takes no reaction from here ([onTap] null).
- */
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun ReactionChips(chips: List<Reactions.Chip>, onTap: ((String) -> Unit)?) {
-    FlowRow(
-        modifier = Modifier.padding(top = 2.dp, start = 4.dp, end = 4.dp),
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        chips.forEach { chip ->
-            val colors = MaterialTheme.colorScheme
-            val chipShape = RoundedCornerShape(12.dp)
-            Surface(
-                shape = chipShape,
-                color = if (chip.mine) colors.secondaryContainer else colors.surfaceVariant,
-                contentColor = if (chip.mine) colors.onSecondaryContainer else colors.onSurfaceVariant,
-                border = if (chip.mine) BorderStroke(1.dp, colors.primary) else null,
-                modifier = Modifier
-                    .clip(chipShape)
-                    .then(
-                        if (onTap != null) {
-                            Modifier.clickable(onClickLabel = if (chip.mine) "Remove ${chip.emoji}" else "React ${chip.emoji}") { onTap(chip.emoji) }
-                        } else Modifier
-                    ),
-            ) {
-                Text(
-                    text = "${chip.emoji} ${chip.count}",
-                    style = MaterialTheme.typography.labelMedium,
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
-                )
-            }
-        }
-    }
 }
 
 // ---- Helpers ----
