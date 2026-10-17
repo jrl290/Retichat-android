@@ -498,6 +498,17 @@ object RetichatBridge {
         nativeMessageSetRetichatBool(handle, key, value) == 0
 
     /**
+     * REACTIONS-DESIGN.md §2, §4: make the outbound message [handle] a
+     * reaction, upstream LXMF 1.2.0's `{0x40: {0x00: bin to, 0x01: bin
+     * content}}`. [to] is the target's 32-byte LXMF hash, or in a Group its
+     * 16-byte post id; [content] is the reaction, at most 64 bytes of UTF-8,
+     * `""` removing the sender's one. False, with [lastError], and the message
+     * unchanged, otherwise.
+     */
+    fun messageSetReaction(handle: Long, to: ByteArray, content: String): Boolean =
+        nativeMessageSetReaction(handle, to, content) == 0
+
+    /**
      * RFed-spec Group.md, "Member statuses and keys", DISPLAY_NAMES.md §10 key
      * 10: write `GROUP_STATUSES` on an outbound `status`: a native array of
      * bin, one for each of [elements] (a member's own packed accept or leave
@@ -583,6 +594,7 @@ object RetichatBridge {
     private external fun nativeMessageAddFieldBool(handle: Long, key: Int, value: Boolean): Int
     private external fun nativeMessageSetRetichatString(handle: Long, key: Int, value: String): Int
     private external fun nativeMessageSetRetichatBool(handle: Long, key: Int, value: Boolean): Int
+    private external fun nativeMessageSetReaction(handle: Long, to: ByteArray, content: String): Int
     private external fun nativeMessageSetRetichatStatuses(handle: Long, elements: Array<ByteArray>): Int
     private external fun nativeGroupUnpackPacked(packed: ByteArray): ByteArray?
     private external fun nativeMessageClonePropagated(handle: Long): Long

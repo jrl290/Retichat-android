@@ -1015,6 +1015,43 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeM
     ok_or_neg(lxmf::message_set_retichat_string(handle as u64, key as i64, &v))
 }
 
+/// `RetichatBridge.nativeMessageSetReaction(handle: Long, to: ByteArray, content: String): Int`
+///
+/// REACTIONS-DESIGN.md §2, §4: make the outbound message `handle` a reaction,
+/// upstream LXMF 1.2.0's `{0x40: {0x00: bin to, 0x01: bin content}}`. `to` is
+/// the target's 32-byte LXMF hash, or in a Group its 16-byte post id;
+/// `content` is the reaction, at most 64 bytes, `""` removing one. Anything
+/// else is refused: -1 with `nativeLastError`, and the message is unchanged.
+/// A null `to` or `content` is refused too.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeMessageSetReaction(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    to: JByteArray,
+    content: JString,
+) -> jint {
+    if to.is_null() || content.is_null() {
+        rns::set_error("to or content is null".to_string());
+        return -1;
+    }
+    let to = match env.convert_byte_array(&to) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            rns::set_error(format!("to: {e}"));
+            return -1;
+        }
+    };
+    let content: String = match env.get_string(&content) {
+        Ok(js) => js.into(),
+        Err(e) => {
+            rns::set_error(format!("content: {e}"));
+            return -1;
+        }
+    };
+    ok_or_neg(lxmf::message_set_reaction(handle as u64, &to, &content))
+}
+
 /// `RetichatBridge.nativeMessageSetRetichatBool(handle: Long, key: Int, value: Boolean): Int`
 ///
 /// As `nativeMessageSetRetichatString`, for a bool entry; of the defined

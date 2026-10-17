@@ -69,9 +69,12 @@ class GroupFieldsWiringTest {
 
     @Test
     fun theRetichatSettersMatchTheirJniExports() {
-        val rustToKotlin = mapOf("jlong" to "Long", "jint" to "Int", "JString" to "String", "jni::sys::jboolean" to "Boolean")
+        val rustToKotlin = mapOf("jlong" to "Long", "jint" to "Int", "JString" to "String", "jni::sys::jboolean" to "Boolean",
+                                 "JByteArray" to "ByteArray")
         for (name in listOf("nativeMessageSetRetichatString", "nativeMessageSetRetichatBool",
-                            "nativeMessageAddFieldString", "nativeMessageAddFieldBool")) {
+                            "nativeMessageAddFieldString", "nativeMessageAddFieldBool",
+                            // REACTIONS-DESIGN.md §2: the upstream reaction field 0x40.
+                            "nativeMessageSetReaction")) {
             val export = Regex("fn Java_com_newendian_retichat_bridge_RetichatBridge_$name\\(([^)]*)\\)\\s*->\\s*jint")
                 .find(jni) ?: error("no JNI export for $name")
             // (env, class, then the Kotlin parameters)
