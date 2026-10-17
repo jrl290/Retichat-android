@@ -12,6 +12,8 @@ import java.nio.charset.StandardCharsets
  */
 class LxmfFields private constructor(
     private val entries: Map<Int, Any?>,
+    /** The bytes [entries] were read from, for [reaction]'s raw str; null for [EMPTY]. */
+    private val raw: ByteArray? = null,
 ) {
     /** Get a string field, or null if absent/wrong type. */
     fun getString(key: Int): String? = when (val v = entries[key]) {
@@ -101,6 +103,78 @@ class LxmfFields private constructor(
      * released build, which reads only the old fields, skips it.
      */
     fun groupStatuses(): List<Any?>? = retichatEntry(RF_GROUP_STATUSES) as? List<*>
+
+    /**
+     * Key 11 of the Retichat field, GROUP_POST_ID (REACTIONS-DESIGN.md §4): the
+     * Group post id, 32 hex lowercased, or null when it is absent, not a str,
+     * or not 32 hex. Retichat field only, like key 10.
+     */
+    fun postId(): String? = (retichatEntry(RF_GROUP_POST_ID) as? String)?.takeIf { HEX32.matches(it) }?.lowercase()
+
+    /**
+     * Key 12 of the Retichat field, SENT_HASH (REACTIONS-DESIGN.md §5.2): on a
+     * Distro Sync of a send, the LXMF hash of the message it copies, 64 hex
+     * lowercased, or null when it is absent, not a str, or not 64 hex.
+     */
+    fun sentHash(): String? = (retichatEntry(RF_SENT_HASH) as? String)?.takeIf { HEX64.matches(it) }?.lowercase()
+
+    /**
+     * Field 0x40, upstream LXMF 1.2.0's FIELD_REACTION, as REACTIONS-DESIGN.md
+     * §3 reads it: [Reaction.None] when the message carries no 0x40 map (it
+     * is no reaction, and goes on as today); otherwise [Reaction.Valid], or
+     * [Reaction.Invalid] with the reason when REACTION_TO (0x00) or
+     * REACTION_CONTENT (0x01) is missing or not bin or str, or the content is
+     * over [REACTION_CONTENT_MAX] bytes or not UTF-8. Either value may be bin
+     * or str: a str is taken as the raw bytes it holds. Its integer keys may be
+     * of any width ([readMap]). An Invalid reaction is dropped with one log
+     * line: never a bubble.
+     */
+    fun reaction(): Reaction {
+        if (entries[FIELD_REACTION] !is Map<*, *>) return Reaction.None
+        // Read again keeping each str as its bytes: a str REACTION_TO holds raw
+        // hash bytes, which a UTF-8 String would not keep.
+        val map = raw?.let { bytes ->
+            try {
+                readMap(ByteBuffer.wrap(bytes), MsgpackKeys.FIELDS_DEPTH, rawStr = true)?.get(FIELD_REACTION) as? Map<*, *>
+            } catch (e: Exception) {
+                null
+            }
+        } ?: return Reaction.Invalid("its 0x40 could not be read again")
+        val to = bytesOf(map[REACTION_TO]) ?: return Reaction.Invalid(
+            if (map.containsKey(REACTION_TO)) "REACTION_TO is not bin or str" else "REACTION_TO is missing")
+        val content = bytesOf(map[REACTION_CONTENT]) ?: return Reaction.Invalid(
+            if (map.containsKey(REACTION_CONTENT)) "REACTION_CONTENT is not bin or str" else "REACTION_CONTENT is missing")
+        if (content.size > REACTION_CONTENT_MAX) {
+            return Reaction.Invalid("REACTION_CONTENT is ${content.size} bytes, over $REACTION_CONTENT_MAX")
+        }
+        val text = try {
+            StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(content)).toString()
+        } catch (e: java.nio.charset.CharacterCodingException) {
+            return Reaction.Invalid("REACTION_CONTENT is not UTF-8")
+        }
+        return Reaction.Valid(to, text)
+    }
+
+    private fun bytesOf(value: Any?): ByteArray? = when (value) {
+        is ByteArray -> value
+        is RawStr -> value.bytes
+        else -> null
+    }
+
+    /** What [reaction] makes of field 0x40 (REACTIONS-DESIGN.md §3). */
+    sealed class Reaction {
+        /** No 0x40 map: not a reaction. */
+        object None : Reaction()
+
+        /** A reaction to [to] (a 32-byte LXMF hash, or in a Group a 16-byte post id); [content] "" removes the reactor's one. */
+        class Valid(val to: ByteArray, val content: String) : Reaction() {
+            /** [to] in lowercase hex. */
+            val toHex: String get() = to.joinToString("") { "%02x".format(it) }
+        }
+
+        /** A 0x40 map that is no readable reaction: dropped, with [why] in its log line. */
+        data class Invalid(val why: String) : Reaction()
+    }
 
     /** Get a raw binary field, or null. */
     fun getBytes(key: Int): ByteArray? = entries[key] as? ByteArray
@@ -203,6 +277,7 @@ class LxmfFields private constructor(
         val DISTRO_MARKERS = setOf(DISTRO_TRANSFER_TYPE, DISTRO_SENT_TYPE, DISTRO_CHANNEL_TYPE, DISTRO_GROUP_TYPE)
 
         private val HEX32 = Regex("^[0-9a-fA-F]{32}$")
+        private val HEX64 = Regex("^[0-9a-fA-F]{64}$")
         /**
          * FIELD_RETICHAT (LXMF-rust/DISPLAY_NAMES.md §2.1, §10): Retichat's
          * one field number. Its value is a msgpack map with small integer
@@ -231,6 +306,23 @@ class LxmfFields private constructor(
          * written into the Retichat field in both forms.
          */
         const val RF_GROUP_STATUSES      = 10
+        /** Key 11: str, 32 hex, a Group post's id, the same on every copy of it (REACTIONS-DESIGN.md §4; [postId]). */
+        const val RF_GROUP_POST_ID       = 11
+        /** Key 12: str, 64 hex, on a Distro Sync of a send the LXMF hash of the message it copies (REACTIONS-DESIGN.md §5.2; [sentHash]). */
+        const val RF_SENT_HASH           = 12
+
+        /**
+         * Upstream LXMF 1.2.0's FIELD_REACTION (REACTIONS-DESIGN.md §1): a map of
+         * [REACTION_TO], the target's LXMF hash (in a Group its 16-byte post id),
+         * and [REACTION_CONTENT], the reaction in UTF-8 ("" removes one, a
+         * Retichat convention). Read by [reaction]; written by
+         * RetichatBridge.messageSetReaction.
+         */
+        const val FIELD_REACTION         = 0x40
+        const val REACTION_TO            = 0x00
+        const val REACTION_CONTENT       = 0x01
+        /** Retichat's bound on REACTION_CONTENT, in bytes (LXMF-rust REACTION_CONTENT_MAX). */
+        const val REACTION_CONTENT_MAX   = 64
 
         /**
          * §10 transition: false sends group entries in the old top-level
@@ -289,7 +381,7 @@ class LxmfFields private constructor(
             if (raw == null || raw.isEmpty()) return EMPTY
             MsgpackKeys.refusal(raw, MsgpackKeys.FIELDS_DEPTH)?.let { throw RefusedPayloadException(it) }
             val map = readMap(ByteBuffer.wrap(raw), MsgpackKeys.FIELDS_DEPTH) ?: return EMPTY
-            return LxmfFields(map)
+            return LxmfFields(map, raw)
         }
 
         /**
@@ -347,7 +439,13 @@ class LxmfFields private constructor(
             if (n < 0 || n > buf.remaining()) throw IllegalArgumentException("$n bytes wanted, ${buf.remaining()} left")
         }
 
-        private fun readMap(buf: ByteBuffer, depth: Int): Map<Int, Any?>? {
+        /**
+         * A str as its bytes, from a read with `rawStr` ([reaction] only): a
+         * reaction's REACTION_TO may be a str holding raw hash bytes.
+         */
+        private class RawStr(val bytes: ByteArray)
+
+        private fun readMap(buf: ByteBuffer, depth: Int, rawStr: Boolean = false): Map<Int, Any?>? {
             if (!buf.hasRemaining()) return null
             val b = buf.get().toInt() and 0xFF
             val count = when {
@@ -359,8 +457,8 @@ class LxmfFields private constructor(
             need(buf, 2L * count)  // a key and a value of a byte at least
             val result = LinkedHashMap<Int, Any?>()
             repeat(count) {
-                val key = readValue(buf, depth + 1)
-                val value = readValue(buf, depth + 1)
+                val key = readValue(buf, depth + 1, rawStr)
+                val value = readValue(buf, depth + 1, rawStr)
                 // Integer keys of any width holding 0..Int.MAX_VALUE. A
                 // negative or larger key (a uint64 above 2^63 reads as
                 // negative) matches nothing, rather than wrapping onto a
@@ -375,7 +473,7 @@ class LxmfFields private constructor(
             return result
         }
 
-        private fun readValue(buf: ByteBuffer, depth: Int): Any? {
+        private fun readValue(buf: ByteBuffer, depth: Int, rawStr: Boolean = false): Any? {
             if (!buf.hasRemaining()) return null
             val b = buf.get().toInt() and 0xFF
             // A map or an array below the deepest container an accessor reads:
@@ -391,14 +489,14 @@ class LxmfFields private constructor(
                 // negative fixint (0xE0..0xFF)
                 b in 0xE0..0xFF -> (b.toByte()).toLong()
                 // fixstr (0xA0..0xBF)
-                b in 0xA0..0xBF -> readStringBytes(buf, b and 0x1F)
+                b in 0xA0..0xBF -> readStringBytes(buf, b and 0x1F, rawStr)
                 // fixmap (0x80..0x8F) — put byte back and recurse
                 b in 0x80..0x8F -> {
                     buf.position(buf.position() - 1)
-                    readMap(buf, depth)
+                    readMap(buf, depth, rawStr)
                 }
                 // fixarray (0x90..0x9F)
-                b in 0x90..0x9F -> readArray(buf, b and 0x0F, depth)
+                b in 0x90..0x9F -> readArray(buf, b and 0x0F, depth, rawStr)
                 // nil
                 b == 0xC0 -> null
                 // false
@@ -440,24 +538,24 @@ class LxmfFields private constructor(
                 // int 64
                 b == 0xD3 -> buf.long
                 // str 8
-                b == 0xD9 -> readStringBytes(buf, buf.get().toInt() and 0xFF)
+                b == 0xD9 -> readStringBytes(buf, buf.get().toInt() and 0xFF, rawStr)
                 // str 16
-                b == 0xDA -> readStringBytes(buf, buf.short.toInt() and 0xFFFF)
+                b == 0xDA -> readStringBytes(buf, buf.short.toInt() and 0xFFFF, rawStr)
                 // str 32
-                b == 0xDB -> readStringBytes(buf, buf.int)
+                b == 0xDB -> readStringBytes(buf, buf.int, rawStr)
                 // array 16
-                b == 0xDC -> readArray(buf, buf.short.toInt() and 0xFFFF, depth)
+                b == 0xDC -> readArray(buf, buf.short.toInt() and 0xFFFF, depth, rawStr)
                 // array 32
-                b == 0xDD -> readArray(buf, buf.int, depth)
+                b == 0xDD -> readArray(buf, buf.int, depth, rawStr)
                 // map 16
                 b == 0xDE -> {
                     buf.position(buf.position() - 1)
-                    readMap(buf, depth)
+                    readMap(buf, depth, rawStr)
                 }
                 // map 32
                 b == 0xDF -> {
                     buf.position(buf.position() - 1)
-                    readMap(buf, depth)
+                    readMap(buf, depth, rawStr)
                 }
                 else -> {
                     // 0xC1, never used: its one byte, as the iOS decoder steps it
@@ -473,11 +571,11 @@ class LxmfFields private constructor(
             return null
         }
 
-        private fun readStringBytes(buf: ByteBuffer, len: Int): String {
+        private fun readStringBytes(buf: ByteBuffer, len: Int, rawStr: Boolean = false): Any {
             need(buf, len.toLong())
             val bytes = ByteArray(len)
             buf.get(bytes)
-            return String(bytes, StandardCharsets.UTF_8)
+            return if (rawStr) RawStr(bytes) else String(bytes, StandardCharsets.UTF_8)
         }
 
         private fun readBinBytes(buf: ByteBuffer, len: Int): ByteArray {
@@ -487,10 +585,10 @@ class LxmfFields private constructor(
             return bytes
         }
 
-        private fun readArray(buf: ByteBuffer, count: Int, depth: Int): List<Any?> {
+        private fun readArray(buf: ByteBuffer, count: Int, depth: Int, rawStr: Boolean = false): List<Any?> {
             need(buf, count.toLong())  // a byte per element at least
             val result = ArrayList<Any?>()
-            repeat(count) { result.add(readValue(buf, depth + 1)) }
+            repeat(count) { result.add(readValue(buf, depth + 1, rawStr)) }
             return result
         }
 
