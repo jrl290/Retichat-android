@@ -1208,7 +1208,7 @@ private fun MessageRow(
                         )
                     }
                     if (reactions.isNotEmpty()) {
-                        Spacer(Modifier.width(4.dp))
+                        Spacer(Modifier.width(8.dp))
                         Text(
                             text = reactions.joinToString("") { it.emoji },
                             style = MaterialTheme.typography.bodySmall,
