@@ -63,6 +63,11 @@ object MessageNotificationHelper {
      *
      * [senderName] is the resolved name of this message's sender (NameBook).
      * [conversationTitle] names a group or channel; a DM has none.
+     *
+     * A chat muted in its info sheet ([UserPreferences.isChatMuted]) posts
+     * nothing and stacks nothing, as on iOS. Every message, Group post, Group
+     * invite, reaction and channel post comes through here, so this is the one
+     * check. Until 2026-10-17 nothing read the switch and a muted chat notified.
      */
     fun notify(
         context: Context,
@@ -71,6 +76,10 @@ object MessageNotificationHelper {
         chatId: String,
         conversationTitle: String? = null,
     ) {
+        if (UserPreferences.isChatMuted(context, chatId)) {
+            Log.i(TAG, "notify: chat $chatId is muted — skipping")
+            return
+        }
         Log.i(TAG, "notify: sender=$senderName, content='${content.take(30)}', chatId=$chatId")
         val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
