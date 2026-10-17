@@ -27,6 +27,29 @@ interface MessageDao {
     @Query("UPDATE messages SET state = :state WHERE id = :id")
     suspend fun updateState(id: String, state: Int)
 
+    // ---- Reactions (REACTIONS-DESIGN.md §3, §6) ----
+
+    /**
+     * `find_target` in a direct chat: the message of chat [chatId] whose LXMF
+     * hash is [hash] (64 lowercase hex), by its [MessageEntity.lxmfHash] or by
+     * its id where the id is the hash (a received direct message). Never
+     * outside [chatId].
+     */
+    @Query("SELECT * FROM messages WHERE chatId = :chatId AND (lxmfHash = :hash OR id = :hash) LIMIT 1")
+    suspend fun findByLxmfHash(chatId: String, hash: String): MessageEntity?
+
+    /** `find_target` in a Group: the post of chat [chatId] whose id is [postId] (32 lowercase hex). Never outside [chatId]. */
+    @Query("SELECT * FROM messages WHERE chatId = :chatId AND postId = :postId LIMIT 1")
+    suspend fun findByPostId(chatId: String, postId: String): MessageEntity?
+
+    /** An outgoing message's LXMF hash, once its send has one. */
+    @Query("UPDATE messages SET lxmfHash = :hash WHERE id = :id")
+    suspend fun setLxmfHash(id: String, hash: String)
+
+    /** The reactions to [id], as ChatRepository's apply wrote them. Its rowid stays, so the chat list's order does not change. */
+    @Query("UPDATE messages SET reactionsJson = :json WHERE id = :id")
+    suspend fun setReactionsJson(id: String, json: String)
+
     @Query("UPDATE messages SET progress = :progress WHERE id = :id")
     suspend fun updateProgress(id: String, progress: Float)
 

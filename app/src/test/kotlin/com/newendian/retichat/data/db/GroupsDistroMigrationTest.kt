@@ -3,6 +3,7 @@ package com.newendian.retichat.data.db
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assume
@@ -115,7 +116,8 @@ class GroupsDistroMigrationTest {
     @Test
     fun theMigrationIsRegisteredAndEveryEarlierStepIsStillInTheChain() {
         val database = File("src/main/kotlin/com/newendian/retichat/data/db/RetichatDatabase.kt").readText()
-        assertTrue(database.contains("version = GroupsDistroMigration.TO,"))
+        // 17 (reactions) came after it: ReactionsMigrationTest.
+        assertFalse(database.contains("version = GroupsDistroMigration.TO,"))
         assertTrue(database.contains("MIGRATION_15_16"))
         for (step in listOf("MIGRATION_9_10", "MIGRATION_10_11", "MIGRATION_11_12", "MIGRATION_12_13", "MIGRATION_13_14", "MIGRATION_14_15", "MIGRATION_15_16")) {
             assertTrue(step, Regex("addMigrations\\([^)]*$step[^)]*\\)").containsMatchIn(database))

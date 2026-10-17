@@ -26,7 +26,7 @@ class QueuedPostsSqlTest {
     private val channelDao = File("src/main/kotlin/com/newendian/retichat/data/db/dao/ChannelDao.kt").readText()
 
     // As RetichatDatabase_Impl's createAllTables makes them (exportSchema is off; checked below).
-    private val messages = "CREATE TABLE `messages` (`id` TEXT NOT NULL, `chatId` TEXT NOT NULL, `senderHashHex` TEXT NOT NULL, `content` TEXT NOT NULL, `timestamp` INTEGER NOT NULL, `isOutbound` INTEGER NOT NULL, `state` INTEGER NOT NULL, `nativeHandle` INTEGER NOT NULL, `progress` REAL NOT NULL, `systemKind` TEXT, PRIMARY KEY(`id`))"
+    private val messages = "CREATE TABLE `messages` (`id` TEXT NOT NULL, `chatId` TEXT NOT NULL, `senderHashHex` TEXT NOT NULL, `content` TEXT NOT NULL, `timestamp` INTEGER NOT NULL, `isOutbound` INTEGER NOT NULL, `state` INTEGER NOT NULL, `nativeHandle` INTEGER NOT NULL, `progress` REAL NOT NULL, `systemKind` TEXT, `lxmfHash` TEXT, `postId` TEXT, `reactionsJson` TEXT, PRIMARY KEY(`id`))"
     private val channelMessages = "CREATE TABLE `channel_messages` (`id` TEXT NOT NULL, `channelId` TEXT NOT NULL, `sourceHashHex` TEXT NOT NULL, `title` TEXT NOT NULL, `content` TEXT NOT NULL, `timestamp` INTEGER NOT NULL, `isOutbound` INTEGER NOT NULL, `signatureValidated` INTEGER NOT NULL, `sendState` INTEGER NOT NULL, PRIMARY KEY(`id`))"
 
     private val outbound = 0x01
@@ -40,9 +40,9 @@ class QueuedPostsSqlTest {
             it.execute(messages)
             it.execute(channelMessages)
             // A group post held at start-up, a DM in flight when the process died, and one sent.
-            it.execute("INSERT INTO messages VALUES ('grp_1', 'group_1', '', 'held', 1, 1, $outbound, 0, 0, NULL)")
-            it.execute("INSERT INTO messages VALUES ('out_2', 'dm_2', '', 'in flight', 2, 1, $sending, 0, 0, NULL)")
-            it.execute("INSERT INTO messages VALUES ('out_3', 'dm_3', '', 'sent', 3, 1, 0x03, 7, 0, NULL)")
+            it.execute("INSERT INTO messages VALUES ('grp_1', 'group_1', '', 'held', 1, 1, $outbound, 0, 0, NULL, NULL, NULL, NULL)")
+            it.execute("INSERT INTO messages VALUES ('out_2', 'dm_2', '', 'in flight', 2, 1, $sending, 0, 0, NULL, NULL, NULL, NULL)")
+            it.execute("INSERT INTO messages VALUES ('out_3', 'dm_3', '', 'sent', 3, 1, 0x03, 7, 0, NULL, NULL, NULL, NULL)")
             // A channel post queued at start-up, one in flight when the process died, one sent.
             it.execute("INSERT INTO channel_messages VALUES ('pending|1', 'ch', '', '', 'queued', 1, 1, 1, $queued)")
             it.execute("INSERT INTO channel_messages VALUES ('pending|2', 'ch', '', '', 'in flight', 2, 1, 1, 0)")

@@ -102,8 +102,9 @@ class NamesMigrationTest {
         Assume.assumeTrue(impl.exists())
         val generated = impl.readText()
         // contacts changed again in 12 (isContact): ContactsMigrationTest;
-        // channel_name_state in 13 (postingHex): DistroChannelsMigrationTest.
-        for ((table, sql) in version11 - "contacts" - "channel_name_state") {
+        // channel_name_state in 13 (postingHex): DistroChannelsMigrationTest;
+        // messages in 17 (reactions): ReactionsMigrationTest.
+        for ((table, sql) in version11 - "contacts" - "channel_name_state" - "messages") {
             val room = Regex("CREATE TABLE IF NOT EXISTS `$table` \\([^\"]*").find(generated)?.value
             assertEquals(table, sql, room?.replace("IF NOT EXISTS ", ""))
         }

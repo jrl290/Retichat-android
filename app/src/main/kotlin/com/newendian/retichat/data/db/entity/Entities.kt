@@ -112,6 +112,23 @@ data class MessageEntity(
      * another device of the user's ("Your other device joined the group").
      */
     val systemKind: String? = null,
+    /**
+     * The message's LXMF hash, 64 hex, where [id] is not it (REACTIONS-DESIGN.md
+     * §6): an outgoing direct message (id `out_…`) once the send has its hash,
+     * a Distro Fanout message (the unwrap's `hash`), a Distro Sync of a send
+     * (its key 12). A reaction in a direct chat finds its target by it, or by
+     * [id] where that is the hash. Null otherwise and for rows before database 17.
+     */
+    val lxmfHash: String? = null,
+    /** A Group post's id, 32 hex (REACTIONS-DESIGN.md §4): Group reactions name it. Null for anything else. */
+    val postId: String? = null,
+    /**
+     * The reactions to this message (REACTIONS-DESIGN.md §6): `{"<reactor 32
+     * hex>": {"e": "👍", "t": <ms>}}`, `"e": ""` a removal kept so that an older
+     * one cannot bring it back. Written only through ChatRepository's apply
+     * ([com.newendian.retichat.data.repository.Reactions]). Null when nobody reacted.
+     */
+    val reactionsJson: String? = null,
 )
 
 @Entity(tableName = "attachments")

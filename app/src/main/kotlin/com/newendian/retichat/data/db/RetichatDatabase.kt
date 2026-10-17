@@ -34,7 +34,7 @@ import com.newendian.retichat.data.db.entity.*
         GroupHeldEntity::class,
         GroupArrivalEntity::class,
     ],
-    version = GroupsDistroMigration.TO,
+    version = ReactionsMigration.TO,
     exportSchema = false,
 )
 abstract class RetichatDatabase : RoomDatabase() {
@@ -100,6 +100,13 @@ abstract class RetichatDatabase : RoomDatabase() {
             }
         }
 
+        /** Migration 16 → 17: reactions, REACTIONS-DESIGN.md §6 ([ReactionsMigration]). */
+        private val MIGRATION_16_17 = object : Migration(ReactionsMigration.FROM, ReactionsMigration.TO) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                ReactionsMigration.STATEMENTS.forEach(db::execSQL)
+            }
+        }
+
         fun getInstance(context: Context): RetichatDatabase =
             INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -107,7 +114,7 @@ abstract class RetichatDatabase : RoomDatabase() {
                     RetichatDatabase::class.java,
                     "retichat.db"
                 )
-                    .addMigrations(MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16)
+                    .addMigrations(MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17)
                     .fallbackToDestructiveMigration()
                     .build().also { INSTANCE = it }
             }
