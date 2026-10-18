@@ -28,6 +28,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.newendian.retichat.IdentityShareFormat
 import com.newendian.retichat.service.DistroContacts
+import com.newendian.retichat.ui.components.CopyLabel
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.common.InputImage
 import com.google.zxing.BarcodeFormat
@@ -121,7 +122,7 @@ private fun ShowQrContent(destHashHex: String, publicKeyHex: String = "") {
                 modifier = Modifier.size(18.dp),
             )
             Spacer(Modifier.width(8.dp))
-            Text(if (copied) "Copied!" else "Copy Hash")
+            CopyLabel("Copy Hash", copied)
         }
         Spacer(Modifier.height(8.dp))
         Text(

@@ -12,12 +12,15 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asComposeRenderEffect
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.newendian.retichat.ui.theme.*
@@ -108,6 +111,22 @@ fun AvatarCircle(
             style = MaterialTheme.typography.titleMedium,
             color = MaterialTheme.colorScheme.onPrimaryContainer,
         )
+    }
+}
+
+/**
+ * A copy button's text: [title], or "Copied!" after a copy (L83). Both are
+ * laid out and only one is shown, so the button keeps the width of the wider
+ * and the switch moves nothing; TalkBack reads only the one shown.
+ */
+@Composable
+fun CopyLabel(title: String, copied: Boolean) {
+    Box(
+        modifier = Modifier.clearAndSetSemantics { contentDescription = if (copied) "Copied!" else title },
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(title, modifier = Modifier.alpha(if (copied) 0f else 1f))
+        Text("Copied!", modifier = Modifier.alpha(if (copied) 1f else 0f))
     }
 }
 
