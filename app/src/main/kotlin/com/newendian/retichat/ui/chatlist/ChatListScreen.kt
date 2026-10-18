@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -44,6 +45,21 @@ fun ChatListScreen(
 
     val filtered = if (searchQuery.isBlank()) items
     else items.filter { it.name.contains(searchQuery, ignoreCase = true) }
+
+    // A chat that takes the top (a new conversation, or one with a new message)
+    // is scrolled into view when the list was at its top. The list keeps the row
+    // that was first where it was, so until 2026-10-18 the new one sat above the
+    // screen until scrolled (L84). Whether the list was at its top is read here,
+    // in the composition that brings the new order, before the list lays it out.
+    val listState = rememberLazyListState()
+    val atTop by remember {
+        derivedStateOf { listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0 }
+    }
+    val topId = filtered.firstOrNull()?.id
+    val wasAtTop = atTop
+    LaunchedEffect(topId) {
+        if (topId != null && wasAtTop) listState.animateScrollToItem(0)
+    }
 
     Scaffold(
         floatingActionButton = {
@@ -149,6 +165,7 @@ fun ChatListScreen(
                 }
             } else {
                 LazyColumn(
+                    state = listState,
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(top = 4.dp, bottom = 88.dp),
                 ) {
