@@ -1185,7 +1185,12 @@ private fun MessageRow(
                     Spacer(Modifier.height(4.dp))
                 }
 
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                // The footer at the bubble's right edge, sent or received
+                // (James, 2026-10-17); the content above keeps the left.
+                Row(
+                    modifier = Modifier.align(Alignment.End),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     Text(
                         text = formatMessageTime(msg.timestamp, zone),
                         style = MaterialTheme.typography.bodySmall,
