@@ -339,6 +339,24 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeT
     if rns::identity_known(&h) { 1 } else { 0 }
 }
 
+/// `RetichatBridge.nativeIdentityRecallPublicKey(destHash: ByteArray): ByteArray?`
+///
+/// The 64-byte public key the stack holds for a destination (an announce, a
+/// remembered contact), as `RNS.Identity.recall(destination_hash)`; null when
+/// it holds none. iOS: `retichat_identity_recall_public_key`.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeIdentityRecallPublicKey(
+    env: JNIEnv,
+    _class: JClass,
+    dest_hash: JByteArray,
+) -> jbyteArray {
+    let h = jbytes_to_vec(&env, &dest_hash);
+    match Identity::recall_public_key(&h) {
+        Some(public_key) => vec_to_jbytes(&env, &public_key),
+        None => std::ptr::null_mut(),
+    }
+}
+
 /// `RetichatBridge.nativeTransportRequestPath(destHash: ByteArray): Int`
 #[no_mangle]
 pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeTransportRequestPath(

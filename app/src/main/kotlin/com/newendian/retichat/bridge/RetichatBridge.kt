@@ -284,6 +284,9 @@ object RetichatBridge {
     fun identityRememberLxmfDelivery(destHash: ByteArray, publicKey: ByteArray): Boolean =
         nativeIdentityRememberLxmfDelivery(destHash, publicKey) == 0
 
+    /** The 64-byte public key the stack holds for [destHash] (from an announce or a remembered contact), or null. */
+    fun identityRecallPublicKey(destHash: ByteArray): ByteArray? = nativeIdentityRecallPublicKey(destHash)
+
     fun transportRequestPath(destHash: ByteArray): Boolean =
         nativeTransportRequestPath(destHash) == 0
 
@@ -301,6 +304,7 @@ object RetichatBridge {
     private external fun nativeTransportIsPathVerifiedThisSession(destHash: ByteArray): Int
     private external fun nativeTransportIdentityKnown(destHash: ByteArray): Int
     private external fun nativeIdentityRememberLxmfDelivery(destHash: ByteArray, publicKey: ByteArray): Int
+    private external fun nativeIdentityRecallPublicKey(destHash: ByteArray): ByteArray?
     private external fun nativeTransportRequestPath(destHash: ByteArray): Int
     private external fun nativeTransportClonePathAndIdentity(
         sourceHash: ByteArray,

@@ -582,7 +582,7 @@ class ChatRepository(
                 val publicKey = when {
                     hashHex == own && distro != null -> distro.publicKeyHex
                     hashHex == selfHex() -> RetichatBridge.identityPublicKey(identityHandle)?.toHex()
-                    else -> contactDao.findByHash(hashHex)?.publicKeyHex
+                    else -> memberPublicKeyHex(hashHex)
                 }
                 if (publicKey?.length == 128) put(hashHex, publicKey.lowercase())
             }
@@ -605,6 +605,12 @@ class ChatRepository(
         Log.i(TAG, "createGroupChat: id=$chatId, groupId=$groupIdHex, ${sorted.size} members, as ${if (distro != null) "the distro ${own.take(8)}" else "the device"}")
         return GroupCreation.Created(chatId)
     }
+
+    /** A member's key from its contact row, else the stack's (an announce): [MemberKeys]. */
+    private suspend fun memberPublicKeyHex(hashHex: String): String? =
+        MemberKeys.pick(contactDao.findByHash(hashHex)?.publicKeyHex) {
+            DistroCodec.hexToBytes(hashHex)?.let { RetichatBridge.identityRecallPublicKey(it) }
+        }
 
     // ---- Messages ----
 
@@ -3119,7 +3125,7 @@ class ChatRepository(
         // Every self address is skipped (§9.4): D is never a contact, so a
         // D-group would otherwise defer for ever.
         val missingKeys = allMembers.filter { !self.isSelf(it) }
-            .filter { contactDao.findByHash(it)?.publicKeyHex?.length != 128 }
+            .filter { memberPublicKeyHex(it) == null }
         if (missingKeys.isNotEmpty()) {
             Log.i(TAG, "acceptGroupInvite deferred: still receiving ${missingKeys.size} member key(s)")
             return
@@ -3141,7 +3147,7 @@ class ChatRepository(
             val keys = DeliveryPolicy.members(chat.memberHashes).mapNotNull { hex ->
                 val key = if (hex == signer.hex) signer.publicKey
                           else if (self.isSelf(hex)) null
-                          else contactDao.findByHash(hex)?.publicKeyHex?.let { DistroCodec.hexToBytes(it) }
+                          else memberPublicKeyHex(hex)?.let { DistroCodec.hexToBytes(it) }
                 key?.takeIf { it.size == 64 }?.let { GroupStatuses.keyEntry(hex, it) }
             }
             val creator = chat.creatorHex
