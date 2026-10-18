@@ -23,8 +23,8 @@ android {
         // WorkManager asks an expedited worker for getForegroundInfo.
         minSdk = 31
         targetSdk = 36
-        versionCode = 14
-        versionName = "0.1.12"
+        versionCode = 15
+        versionName = "0.1.13"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
