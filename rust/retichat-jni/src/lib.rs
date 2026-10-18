@@ -20,6 +20,7 @@
 
 mod distro_outbox;
 mod group_status;
+mod interface_count;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -3197,6 +3198,55 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeI
     _class: JClass,
 ) -> jint {
     distro_outbox::INTERFACE_UP.clear();
+    0
+}
+
+/// `RetichatBridge.nativeOnlineInterfaceCountRegister(callback: OnlineInterfaceCountCallback): Int`
+///
+/// Tell `callback.onOnlineInterfaceCount(count)` how many interfaces are online:
+/// once now, and again at every up- and down-edge (interface_count.rs). Settings
+/// shows it (L83). One callback at a time; a later register replaces it.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeOnlineInterfaceCountRegister(
+    env: JNIEnv,
+    _class: JClass,
+    callback: JObject,
+) -> jint {
+    let jvm = match env.get_java_vm() {
+        Ok(vm) => vm,
+        Err(e) => { rns::set_error(format!("Failed to get JavaVM: {e}")); return -1; }
+    };
+    let callback = match env.new_global_ref(&callback) {
+        Ok(r) => r,
+        Err(e) => { rns::set_error(format!("Failed to create global ref: {e}")); return -1; }
+    };
+    interface_count::set(Arc::new(move |count: usize| {
+        let mut env = match jvm.attach_current_thread() {
+            Ok(env) => env,
+            Err(_) => return,
+        };
+        let _ = env.call_method(
+            callback.as_obj(),
+            "onOnlineInterfaceCount", "(I)V",
+            &[JValue::Int(count.min(i32::MAX as usize) as i32)],
+        );
+        if env.exception_check().unwrap_or(false) {
+            let _ = env.exception_describe();
+            let _ = env.exception_clear();
+        }
+    }));
+    0
+}
+
+/// `RetichatBridge.nativeOnlineInterfaceCountUnregister(): Int`
+///
+/// Stop telling the callback `nativeOnlineInterfaceCountRegister` set.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeOnlineInterfaceCountUnregister(
+    _env: JNIEnv,
+    _class: JClass,
+) -> jint {
+    interface_count::clear();
     0
 }
 

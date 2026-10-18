@@ -417,8 +417,14 @@ object StackRuntime {
         app.updateServiceState(
             isInitialized = true,
             identityHashHex = hashHex,
-            interfaceCount = interfaces.size,
         )
+        // Settings' count is what is online, told now and at every interface
+        // up- and down-edge (L83, 2026-10-18). It was the enabled rows counted
+        // here once, so it said 0 with RTNode Bluetooth up and kept a dropped
+        // backbone.
+        if (!RetichatBridge.onlineInterfaceCountRegister { app.updateInterfaceCount(it) }) {
+            Log.e(TAG, "onlineInterfaceCountRegister failed: ${RetichatBridge.lastError()}")
+        }
 
         // Register the FCM bridge token before rfed.notify so the relay path
         // is live before we ask rfed to target it. Event-driven AppLinks only,
@@ -468,6 +474,7 @@ object StackRuntime {
         DistroOutboxRuntime.stop()
 
         ConnectionStateManager.unregister()
+        runCatching { RetichatBridge.onlineInterfaceCountUnregister() }
 
         // Bluetooth first among the stack's parts: its RTNode interfaces
         // leave Transport before the stack shuts down (no-op if never started).

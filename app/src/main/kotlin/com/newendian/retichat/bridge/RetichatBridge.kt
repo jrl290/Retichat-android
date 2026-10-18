@@ -119,6 +119,17 @@ interface PropagationLinkCallback {
 }
 
 /**
+ * How many Reticulum interfaces are online: [RetichatBridge.onlineInterfaceCountRegister].
+ * Told once at the register and again at every interface up- and down-edge;
+ * an AutoInterface's peers are not counted. Fires on a Rust thread (or the
+ * caller's, for the first) and must not block.
+ */
+@Keep
+fun interface OnlineInterfaceCountCallback {
+    fun onOnlineInterfaceCount(count: Int)
+}
+
+/**
  * A Reticulum interface came online: [RetichatBridge.interfaceOnlineRegister].
  * Transport's own up-edge (an interface that was offline is online: a TCP
  * reconnect, a radio that came back), told once per edge with the interface's
@@ -886,6 +897,21 @@ object RetichatBridge {
 
     private external fun nativeInterfaceOnlineRegister(callback: InterfaceOnlineCallback): Int
     private external fun nativeInterfaceOnlineUnregister(): Int
+
+    /**
+     * Be told how many interfaces are online, now and at every up- and
+     * down-edge (Settings' "N interface(s) active", L83). One callback at a
+     * time: a later register replaces it. Register after each start;
+     * [onlineInterfaceCountUnregister] ends it at the stop.
+     */
+    fun onlineInterfaceCountRegister(callback: OnlineInterfaceCountCallback): Boolean =
+        nativeOnlineInterfaceCountRegister(callback) == 0
+
+    /** Stop telling the callback [onlineInterfaceCountRegister] set. */
+    fun onlineInterfaceCountUnregister() { nativeOnlineInterfaceCountUnregister() }
+
+    private external fun nativeOnlineInterfaceCountRegister(callback: OnlineInterfaceCountCallback): Int
+    private external fun nativeOnlineInterfaceCountUnregister(): Int
 
     private external fun nativeMessageSetDistroChannelSync(
         handle: Long, op: String, name: String, atMs: Long, deviceHex: String,

@@ -26,6 +26,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.File
@@ -226,5 +227,10 @@ class RetichatApp : Application() {
         error: String? = null,
     ) {
         _serviceState.value = ServiceState(isInitialized, identityHashHex, interfaceCount, error)
+    }
+
+    /** The interfaces online now (RetichatBridge.onlineInterfaceCountRegister), the rest kept. */
+    fun updateInterfaceCount(count: Int) {
+        _serviceState.update { it.copy(interfaceCount = count) }
     }
 }
