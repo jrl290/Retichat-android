@@ -2203,6 +2203,94 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeA
     ok_or_neg(result)
 }
 
+/// `RetichatBridge.nativeAppLinkSetOutboundSetup(identityHandle, destHash, pathsCsv, cb): Int`
+///
+/// Sets up every held outbound link to `destHash` from now on (rfed.link,
+/// RFed-spec Link.md): LINKIDENTIFY as `identityHandle` once established (0 =
+/// none), and answer the node's requests on each path in `pathsCsv` with
+/// `cb`, a Kotlin `AppLinkInboundRequestCallback`:
+/// ```kotlin
+/// interface AppLinkInboundRequestCallback { fun onRequest(path: String, data: ByteArray): Boolean }
+/// ```
+/// Its answer (true only when the app holds the blob) is the delivery proof.
+/// Call before opening the link; an open link keeps its setup until it re-opens.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeAppLinkSetOutboundSetup(
+    mut env: JNIEnv,
+    _class: JClass,
+    identity_handle: jlong,
+    dest_hash: JByteArray,
+    paths_csv: JString,
+    callback: JObject,
+) -> jint {
+    let hash = jbytes_to_vec(&env, &dest_hash);
+    if hash.is_empty() {
+        rns::set_error("dest_hash is empty".into());
+        return -1;
+    }
+    let identify_as: Option<Identity> = if identity_handle == 0 {
+        None
+    } else {
+        match rns::get_handle(identity_handle as u64) {
+            Some(id) => Some(id),
+            None => {
+                rns::set_error("invalid identity handle".into());
+                return -1;
+            }
+        }
+    };
+    let paths: Vec<String> = jstring_to_string(&mut env, &paths_csv)
+        .split(',')
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect();
+    let mut request_handlers: Vec<(String, app_links::OutboundRequestHandler)> = Vec::new();
+    if !paths.is_empty() {
+        if callback.is_null() {
+            rns::set_error("paths given without a callback".into());
+            return -1;
+        }
+        let jvm = match env.get_java_vm() {
+            Ok(vm) => Arc::new(vm),
+            Err(e) => {
+                rns::set_error(format!("Failed to get JavaVM: {}", e));
+                return -1;
+            }
+        };
+        let global_ref = match env.new_global_ref(&callback) {
+            Ok(r) => r,
+            Err(e) => {
+                rns::set_error(format!("Failed to create global ref: {}", e));
+                return -1;
+            }
+        };
+        for path in paths {
+            let jvm = jvm.clone();
+            let global_ref = global_ref.clone();
+            let handler: app_links::OutboundRequestHandler = Arc::new(move |path: &str, data: &[u8]| {
+                let mut env = match jvm.attach_current_thread() {
+                    Ok(env) => env,
+                    Err(_) => return false,
+                };
+                let (Ok(j_path), Ok(j_data)) = (env.new_string(path), env.byte_array_from_slice(data)) else {
+                    return false;
+                };
+                env.call_method(
+                    global_ref.as_obj(),
+                    "onRequest",
+                    "(Ljava/lang/String;[B)Z",
+                    &[JValue::Object(&j_path), JValue::Object(&j_data)],
+                )
+                .and_then(|v| v.z())
+                .unwrap_or(false)
+            });
+            request_handlers.push((path, handler));
+        }
+    }
+    AppLinks::set_outbound_link_setup(&hash, app_links::OutboundLinkSetup { identify_as, request_handlers });
+    0
+}
+
 /// `RetichatBridge.nativeAppLinkSendAsync(router, destHash, appName,
 ///   aspectsCsv, payload, callback): Int`
 ///

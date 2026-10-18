@@ -88,6 +88,17 @@ interface AppLinkPacketCallback {
 }
 
 /**
+ * A request the node sends on a held outbound APP_LINK (rfed.link's `/delivery`
+ * and `/lxmf/delivery` pushes). Return true only when the app now holds the blob:
+ * the answer goes back as msgpack bool and is the delivery proof. Runs on a link
+ * worker thread.
+ */
+@Keep
+interface AppLinkInboundRequestCallback {
+    fun onRequest(path: String, data: ByteArray): Boolean
+}
+
+/**
  * One-shot callback for [RetichatBridge.appLinkRequestAsync].  Fires
  * exactly once: on response, failure, or timeout.
  *
@@ -1109,6 +1120,18 @@ object RetichatBridge {
     fun appLinkRegisterStatusCallback(routerHandle: Long, cb: AppLinkStatusCallback): Boolean =
         nativeAppLinkRegisterStatusCallback(routerHandle, cb) == 0
 
+    /**
+     * Set up every held outbound link to [destHash] from now on: identify as
+     * [identityHandle] once established (0 = don't), and answer the node's
+     * requests on [paths] with [cb]. Call before opening the link.
+     */
+    fun appLinkSetOutboundSetup(
+        identityHandle: Long,
+        destHash: ByteArray,
+        paths: List<String>,
+        cb: AppLinkInboundRequestCallback?,
+    ): Boolean = nativeAppLinkSetOutboundSetup(identityHandle, destHash, paths.joinToString(","), cb) == 0
+
     /** Register a packet callback for a persistent APP_LINK destination. */
     fun appLinkRegisterPacketCallback(
         routerHandle: Long,
@@ -1170,6 +1193,10 @@ object RetichatBridge {
     ): Int
     private external fun nativeAppLinkRegisterPacketCallback(
         router: Long, destHash: ByteArray, callback: AppLinkPacketCallback
+    ): Int
+    private external fun nativeAppLinkSetOutboundSetup(
+        identityHandle: Long, destHash: ByteArray, pathsCsv: String,
+        callback: AppLinkInboundRequestCallback?
     ): Int
     private external fun nativeAppLinkRequestAsync(
         router: Long, destHash: ByteArray, path: String, payload: ByteArray,

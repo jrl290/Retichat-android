@@ -62,7 +62,8 @@ object ConnectionStateManager {
             }
 
         return normalizedApp == "rfed" && (
-            segments == listOf("channel", "stream") ||
+            segments == listOf("link") ||
+                segments == listOf("channel", "stream") ||
                 segments == listOf("propagation", "stream")
             )
     }
@@ -124,24 +125,9 @@ object ConnectionStateManager {
 
             // Aspects whose announces should also trigger app-link
             // reconnect.  LXMF only auto-reconnects under lxmf.delivery
-            // out of the box — the rest must opt in.  Legacy aspects
-            // (rfed.channel, rfed.notify) remain registered because the
-            // server still announces them for back-compat; the split
-            // aspects below are the canonical ones the app uses.
-            RetichatBridge.appLinkRegisterReconnect(routerHandle, "rfed.channel")
-            RetichatBridge.appLinkRegisterReconnect(routerHandle, "rfed.notify")
-            RetichatBridge.appLinkRegisterReconnect(routerHandle, "rfed.delivery")
-            RetichatBridge.appLinkRegisterReconnect(routerHandle, "rfed.channel.subscribe")
-            RetichatBridge.appLinkRegisterReconnect(routerHandle, "rfed.channel.unsubscribe")
-            RetichatBridge.appLinkRegisterReconnect(routerHandle, "rfed.channel.publish")
-            RetichatBridge.appLinkRegisterReconnect(routerHandle, "rfed.channel.pull")
-            RetichatBridge.appLinkRegisterReconnect(routerHandle, "rfed.channel.stream")
-            RetichatBridge.appLinkRegisterReconnect(routerHandle, "rfed.propagation.stream")
-            RetichatBridge.appLinkRegisterReconnect(routerHandle, "rfed.notify.register")
-            RetichatBridge.appLinkRegisterReconnect(routerHandle, "rfed.notify.unregister")
-            RetichatBridge.appLinkRegisterReconnect(routerHandle, "rfed.distro.register")
-            RetichatBridge.appLinkRegisterReconnect(routerHandle, "rfed.distro.unregister")
-            RetichatBridge.appLinkRegisterReconnect(routerHandle, "rfed.distro.list")
+            // out of the box — the rest must opt in.  Every RFed operation
+            // is on rfed.link since 2026-10-18 (RfedLink, RFed-spec Link.md).
+            RetichatBridge.appLinkRegisterReconnect(routerHandle, "rfed.link")
             RetichatBridge.appLinkRegisterReconnect(routerHandle, "fcm.register")
             RetichatBridge.appLinkRegisterReconnect(routerHandle, "fcm.unregister")
             RetichatBridge.appLinkRegisterReconnect(routerHandle, "apns.relay")
@@ -735,11 +721,12 @@ object ConnectionStateManager {
                     rfedCloneSources += "rfed.node" to it
                 }
 
-            RfedChannelClient.rfedDestHash(rfedIdentityHex, "rfed", listOf("channel"))
+            // Every RFed operation rides rfed.link (RfedLink).
+            RfedChannelClient.rfedDestHash(rfedIdentityHex, "rfed", listOf("link"))
                 ?.fromHexOrNull()
                 ?.let {
-                    appendDestination("rfed.channel", it)
-                    rfedServiceTargets += "rfed.channel" to it
+                    appendDestination("rfed.link", it)
+                    rfedServiceTargets += "rfed.link" to it
                 }
 
             if (derivedPropHex.isNotEmpty() && effectivePropHex == derivedPropHex) {
@@ -748,32 +735,6 @@ object ConnectionStateManager {
                 }
             }
 
-            val splitAspects = listOf(
-                "rfed.notify.register" to listOf("notify", "register"),
-                "rfed.notify.unregister" to listOf("notify", "unregister"),
-                "rfed.channel.subscribe" to listOf("channel", "subscribe"),
-                "rfed.channel.unsubscribe" to listOf("channel", "unsubscribe"),
-                "rfed.channel.publish" to listOf("channel", "publish"),
-                "rfed.channel.pull" to listOf("channel", "pull"),
-                "rfed.propagation.stream" to listOf("propagation", "stream"),
-                "rfed.distro.register" to listOf("distro", "register"),
-                "rfed.distro.unregister" to listOf("distro", "unregister"),
-                "rfed.distro.list" to listOf("distro", "list"),
-            )
-            for ((label, aspects) in splitAspects) {
-                val hash = RfedChannelClient.rfedDestHash(rfedIdentityHex, "rfed", aspects)
-                    ?.fromHexOrNull()
-                    ?: continue
-                appendDestination(label, hash)
-                rfedServiceTargets += label to hash
-            }
-
-            RfedChannelClient.rfedDestHash(rfedIdentityHex, "rfed", listOf("delivery"))
-                ?.fromHexOrNull()
-                ?.let {
-                    appendDestination("rfed.delivery", it)
-                    rfedServiceTargets += "rfed.delivery" to it
-                }
         }
 
         val nodeCandidates = PropagationNodeManager(

@@ -94,13 +94,13 @@ object RfedDistroClient {
         if (registerInFlight) return@withContext registeredForHandle == distro
         registerInFlight = true
         try {
-            val dest = destHash(context, "register") ?: return@withContext fail(NO_NODE)
+            val node = rfedNode(context) ?: return@withContext fail(NO_NODE)
+            val app = context.applicationContext as? RetichatApp ?: return@withContext fail(NO_NODE)
             val payload = RetichatBridge.distroRegisterPayload(device, distro)
                 ?: return@withContext fail("register payload: ${RetichatBridge.lastError()}")
-            ConnectionStateManager.primeAppLink(dest, "rfed", "distro.register")
-            val resp = ConnectionStateManager.appLinkSend(dest, "rfed", "distro.register", "/rfed/distro/register", payload)
+            val resp = RfedLink.request(app, node, "/distro/register", payload)
             if (!DistroCodec.isAffirmative(resp)) {
-                armRetryOnActive(context, dest)
+                armRetryOnActive(context, node)
                 // No answer is not a refusal (the truth rule): until 2026-10-10 a
                 // request that got no response read "RFed link not reachable".
                 return@withContext fail(DistroCodec.notAYes("registration", resp))
@@ -108,7 +108,7 @@ object RfedDistroClient {
             registeredForHandle = distro
             _status.value = _status.value.copy(registered = true, lastError = null)
             Log.i(TAG, "registered device with RFed (distro=${DistroManager.deliveryHashHex})")
-            publishAnnounce(context, dest, distro)
+            publishAnnounce(context, node, distro)
             scope.launch {
                 delay(PULL_AFTER_REGISTER_MS)
                 pull(context)
@@ -128,12 +128,12 @@ object RfedDistroClient {
         val distro = DistroManager.identityHandle
         if (distro == 0L || registeredForHandle != distro) return
         scope.launch {
-            val dest = destHash(context, "register") ?: return@launch
-            publishAnnounce(context, dest, distro)
+            val node = rfedNode(context) ?: return@launch
+            publishAnnounce(context, node, distro)
         }
     }
 
-    private suspend fun publishAnnounce(context: Context, dest: ByteArray, distro: Long) {
+    private suspend fun publishAnnounce(context: Context, node: String, distro: Long) {
         // [announce_name | nil, nil, [0xD0]]: the distro is anonymous unless
         // the user filled in the public Announce Display Name.
         val announceName = UserPreferences.getAnnounceDisplayName(context)
@@ -141,7 +141,8 @@ object RfedDistroClient {
             Log.w(TAG, "announce payload: ${RetichatBridge.lastError()}")
             return
         }
-        val resp = ConnectionStateManager.appLinkSend(dest, "rfed", "distro.register", "/rfed/distro/announce", payload)
+        val app = context.applicationContext as? RetichatApp ?: return
+        val resp = RfedLink.request(app, node, "/distro/announce", payload)
         if (DistroCodec.isAffirmative(resp)) {
             _status.value = _status.value.copy(announced = true)
             Log.i(TAG, "RFed is now announcing the distro address")
@@ -160,9 +161,10 @@ object RfedDistroClient {
         val distro = DistroManager.identityHandle
         val device = StackRuntime.identityHandle
         if (distro == 0L || device == 0L) return@withContext false
-        val dest = destHash(context, "unregister") ?: return@withContext false
+        val node = rfedNode(context) ?: return@withContext false
+        val app = context.applicationContext as? RetichatApp ?: return@withContext false
         val payload = RetichatBridge.distroRegisterPayload(device, distro) ?: return@withContext false
-        val resp = ConnectionStateManager.appLinkSend(dest, "rfed", "distro.unregister", "/rfed/distro/unregister", payload)
+        val resp = RfedLink.request(app, node, "/distro/unregister", payload)
         registeredForHandle = 0L
         _status.value = Status()
         DistroCodec.isAffirmative(resp)
@@ -204,10 +206,11 @@ object RfedDistroClient {
         // while it waited on pullLock is a stop under this pull too.
         val stops = StackRuntime.stops
         if (DistroManager.identityHandle == 0L) return@withContext PullOutcome(0, "no distro held")
-        val dest = destHash(context, "register") ?: run {
+        val node = rfedNode(context) ?: run {
             Log.w(TAG, "pull: $NO_NODE")
             return@withContext PullOutcome(0, NO_NODE)
         }
+        val app = context.applicationContext as? RetichatApp ?: return@withContext PullOutcome(0, NO_NODE)
         pullLock.withLock {
             var drained = 0
             var unfinished: String? = null
@@ -222,7 +225,8 @@ object RfedDistroClient {
                     unfinished = it
                     return@drain null
                 }
-                val resp = ConnectionStateManager.appLinkSend(dest, "rfed", "distro.register", "/rfed/pull", DistroCodec.MSGPACK_NIL)
+                // On rfed.link, identified as this device (Link.md "Identify").
+                val resp = RfedLink.request(app, node, "/distro/pull", DistroCodec.MSGPACK_NIL)
                 if (resp == null) {
                     unfinished = DistroPullRounds.noAnswer(stoppedSince = StackRuntime.stops != stops)
                     return@drain null
@@ -257,21 +261,24 @@ object RfedDistroClient {
      * encrypted`. Decrypt with the distro key, dedupe on source+timestamp,
      * then hand it to the repository as an inbound DM, or, when it is a
      * sibling's §17.11 sent-copy, as an outgoing message in the recipient's chat.
+     * True when this device now holds it (taken, or already seen); false when
+     * it was refused or dropped. That is rfed.link's `/lxmf/delivery` answer,
+     * the delivery proof (RFed-spec Link.md).
      */
-    suspend fun handleBlob(context: Context, blob: ByteArray) {
+    suspend fun handleBlob(context: Context, blob: ByteArray): Boolean {
         val distro = DistroManager.identityHandle
-        if (distro == 0L) return
+        if (distro == 0L) return false
         val json = when (val unwrapped = DistroUnwrapOutcome.of(RetichatBridge.distroUnwrap(distro, blob)) { RetichatBridge.lastError() }) {
             // RFed SPEC §17.14 "Repeated keys": refused whole, as Python LXMF refuses it.
             // LXMF-rust logged its one line; nothing is stored, marked as seen or applied.
-            DistroUnwrapOutcome.Refused -> return
+            DistroUnwrapOutcome.Refused -> return false
             is DistroUnwrapOutcome.Rejected -> {
                 Log.w(TAG, "blob rejected: ${unwrapped.error}")
-                return
+                return false
             }
             DistroUnwrapOutcome.OtherDistro -> {
                 Log.i(TAG, "blob for a different distro — ignored")
-                return
+                return false
             }
             is DistroUnwrapOutcome.Message -> unwrapped.json
         }
@@ -316,7 +323,7 @@ object RfedDistroClient {
         val channelSync = DistroChannelSync.read(fieldsRaw)
         if (channelSync != null) {
             handleChannelSync(context, srcHex, timestamp, channelSync, o.optBoolean("signature_validated", false))
-            return
+            return true
         }
 
         // GROUPS-DISTRO-DESIGN.md §6.1: a group sync (0xFB rfed.distro.group,
@@ -329,15 +336,15 @@ object RfedDistroClient {
         when (val route = DistroGroupSync.route(groupKeys.groupSync, groupKeys.hasGroupId, groupKeys.groupId)) {
             is DistroGroupSync.Route.Sync -> {
                 handleGroupSync(context, blob, groupKeys, route.read, srcHex, o.optBoolean("signature_validated", false))
-                return
+                return true
             }
             is DistroGroupSync.Route.Message -> {
                 handleGroupMessage(context, blob, groupKeys, route.groupId, srcHex, content, timestamp, fieldsRaw, nameField, unverifiedReason)
-                return
+                return true
             }
             DistroGroupSync.Route.BadGroupId -> {
                 Log.w(TAG, "group message from ${srcHex.take(8)} with an unusable group id DROPPED (§6.1)")
-                return
+                return false
             }
             DistroGroupSync.Route.Other -> Unit
         }
@@ -345,14 +352,14 @@ object RfedDistroClient {
         val key = DistroCodec.seenKey(srcHex, timestamp)
         if (!UserPreferences.markDistroSeen(context, key)) {
             Log.i(TAG, "duplicate fan-out copy from ${srcHex.take(8)} — skipped")
-            return
+            return true
         }
         if (transferKey != null) {
             offerTransfer(srcHex, transferKey)
-            return
+            return true
         }
-        if (isNotification) return
-        val app = context.applicationContext as? RetichatApp ?: return
+        if (isNotification) return true
+        val app = context.applicationContext as? RetichatApp ?: return false
         // A message a sibling device sent as the distro (RFed SPEC §17.11
         // receiver rules; the iOS counterpart is RfedDistroClient.swift).
         // Checked after the seen-mark so our own echo is still recorded.
@@ -364,14 +371,14 @@ object RfedDistroClient {
             sentBy = sentBy,
         )) {
             DistroCodec.SentCopy.NotACopy -> Unit
-            DistroCodec.SentCopy.OwnEcho -> return
+            DistroCodec.SentCopy.OwnEcho -> return true
             DistroCodec.SentCopy.Foreign -> {
                 Log.w(TAG, "sent-copy marker from ${srcHex.take(8)}, not our distro — ignored")
-                return
+                return false
             }
             is DistroCodec.SentCopy.Malformed -> {
                 Log.w(TAG, "sent-copy with unusable recipient '${copy.sentTo}' — dropped")
-                return
+                return false
             }
             is DistroCodec.SentCopy.Store -> {
                 // A known sibling is learned from a copy D signed (§9.1).
@@ -382,12 +389,13 @@ object RfedDistroClient {
                 }
                 // Its fields: M's hash (key 12) and, for a reaction, M's 0x40 (REACTIONS-DESIGN.md §5.2).
                 app.repository.onDistroSentCopy(copy.recipientHex, title, content, timestamp, fieldsRaw)
-                return
+                return true
             }
         }
-        val srcHash = DistroCodec.hexToBytes(srcHex) ?: return
+        val srcHash = DistroCodec.hexToBytes(srcHex) ?: return false
         // The unwrap's hash: M's LXMF hash, kept beside the derived id (REACTIONS-DESIGN.md §5.1).
         app.repository.onDistroMessageReceived(srcHash, title, content, timestamp, fieldsRaw, nameField, unverifiedReason, groupKeys.hash)
+        return true
     }
 
     /**
@@ -570,25 +578,22 @@ object RfedDistroClient {
         false
     }
 
-    private fun armRetryOnActive(context: Context, dest: ByteArray) {
-        val key = dest.toHex()
+    /** Register again on the next ACTIVE edge of [node]'s rfed.link, once. */
+    private fun armRetryOnActive(context: Context, node: String) {
         synchronized(statusHandlerArmed) {
-            if (!statusHandlerArmed.add(key)) return
+            if (!statusHandlerArmed.add(node)) return
         }
-        scope.launch {
-            ConnectionStateManager.setAppLinkStatusHandler(dest) { status ->
-                if (status != RetichatBridge.AppLinkStatus.ACTIVE) return@setAppLinkStatusHandler
-                synchronized(statusHandlerArmed) { statusHandlerArmed.remove(key) }
-                scope.launch { register(context) }
-            }
+        RfedLink.setStatusListener(node, "distro.register") { status ->
+            if (status != RetichatBridge.AppLinkStatus.ACTIVE) return@setStatusListener
+            val armed = synchronized(statusHandlerArmed) { statusHandlerArmed.remove(node) }
+            if (armed) scope.launch { register(context) }
         }
     }
 
-    private fun destHash(context: Context, op: String): ByteArray? {
-        val rfedId = UserPreferences.getEffectiveRfedNodeIdentityHash(context)
-        return FcmTokenRegistrar.rnsDestHash(rfedId, "rfed", listOf("distro", op))
-            ?.let { FcmTokenRegistrar.hexToBytes(it) }
-    }
+    /** The configured RFed node's identity hash, lowercased, or null when there is none. */
+    private fun rfedNode(context: Context): String? =
+        UserPreferences.getEffectiveRfedNodeIdentityHash(context).lowercase()
+            .takeIf { RfedLink.destHash(it) != null }
 
     private fun fail(reason: String): Boolean {
         Log.w(TAG, "registration: $reason")

@@ -33,6 +33,34 @@ internal object LiveHeldLinkOps : HeldLinkOps {
 }
 
 /**
+ * [HeldLinkOps] for one request path on [nodeHex]'s shared rfed.link: the
+ * "send" is the request, proved by rfed's msgpack `true`; the link is never
+ * closed here, as other operations ride on it.
+ */
+internal class RfedLinkOps(
+    private val app: com.newendian.retichat.RetichatApp,
+    private val nodeHex: String,
+    private val path: String,
+    private val scope: CoroutineScope,
+) : HeldLinkOps {
+    override fun status(destHash: ByteArray): Int = ConnectionStateManager.appLinkStatus(destHash)
+
+    override fun openHeld(destHash: ByteArray, app: String, aspectsCsv: String) {
+        scope.launch { RfedLink.ensure(this@RfedLinkOps.app, nodeHex) }
+    }
+
+    override fun close(destHash: ByteArray) = Unit
+
+    override suspend fun setStatusHandler(destHash: ByteArray, handler: (Int) -> Unit) =
+        RfedLink.setStatusListener(nodeHex, path, handler)
+
+    override suspend fun sendData(destHash: ByteArray, app: String, aspectsCsv: String, payload: ByteArray): Boolean {
+        val answer = RfedLink.request(this.app, nodeHex, path, payload)
+        return answer != null && answer.size == 1 && answer[0] == 0xc3.toByte()
+    }
+}
+
+/**
  * Registrations owed to one destination (`fcm.register`,
  * `rfed.notify.register`), each sent once, on an established link, with its
  * delivery proof.

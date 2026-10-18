@@ -123,18 +123,21 @@ class PullPageTest {
     @Test
     fun theScopesThatHandleReceivedContentLogWhatEscapes() {
         for ((path, decl) in listOf(
-            "service/PropagationStream.kt" to "private val scope = CoroutineScope(",
             "service/RfedDistroClient.kt" to "private val scope = CoroutineScope(",
+            "service/RfedLink.kt" to "private val scope = CoroutineScope(",
             // The repository's and the channel client's scope.
             "RetichatApp.kt" to "val applicationScope = CoroutineScope(",
         )) {
             val line = src(path).substringAfter(decl, "").substringBefore("\n")
             assertTrue("$path: $decl has no handler", line.contains("logEscapedExceptions(TAG)"))
         }
-        // The ACTIVE edge's open and the pull after it, guarded where it is launched.
-        val handler = between(src("service/PropagationStream.kt"), "ConnectionStateManager.setAppLinkStatusHandler(destHash)", "if (ConnectionStateManager.appLinkStatus(destHash)")
-        assertTrue(handler.contains("sendOpen(app, current)"))
-        assertTrue(Regex("""catch \(e: CancellationException\) \{\s*throw e""").containsMatchIn(handler))
-        assertTrue(handler.contains("catch (e: Exception) {"))
+        // rfed.link's ACTIVE edge: both stream opens (and the pull after the
+        // propagation one), each guarded, a cancellation passed on.
+        val bind = between(src("service/RfedLink.kt"), "private suspend fun bind(", "    /**")
+        assertTrue(bind.contains("PropagationStream.onLinkActive(app, node)"))
+        assertTrue(bind.contains("sendChannelStreamConfigForNode(node)"))
+        assertEquals(2, Regex("""catch \(e: CancellationException\) \{\s*throw e""").findAll(bind).count())
+        assertEquals(2, Regex("""catch \(e: Exception\) \{""").findAll(bind).count())
+        assertTrue(src("service/PropagationStream.kt").contains("suspend fun onLinkActive(app: RetichatApp, nodeHex: String) {\n        val current = session ?: return\n        if (current.nodeHex != nodeHex.lowercase()) return\n        sendOpen(app, current)"))
     }
 }

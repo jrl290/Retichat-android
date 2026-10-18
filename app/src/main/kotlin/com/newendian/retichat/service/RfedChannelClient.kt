@@ -3,7 +3,6 @@ package com.newendian.retichat.service
 import android.content.Context
 import android.util.Log
 import com.newendian.retichat.RetichatApp
-import com.newendian.retichat.bridge.AppLinkPacketCallback
 import com.newendian.retichat.bridge.ChannelLxmUnpackResult
 import com.newendian.retichat.bridge.NativeRefusal
 import com.newendian.retichat.bridge.RetichatBridge
@@ -73,6 +72,29 @@ class RfedChannelClient(
 
     companion object {
         private const val TAG = "RfedChannel"
+
+        /**
+         * rfed's answer to `/channel/publish` (RFed-spec Link.md): `[true, nil]` is
+         * accepted, stored and fanned out (null here); `[false, reason]` gives the
+         * reason; no answer, or one that isn't either, says so.
+         */
+        internal fun publishRefusal(answer: ByteArray?): String? {
+            if (answer == null) return "nothing within 5 s"
+            if (answer.size >= 2 && answer[0] == 0x92.toByte() && answer[1] == 0xc3.toByte()) return null
+            if (answer.size >= 2 && answer[0] == 0x92.toByte() && answer[1] == 0xc2.toByte()) {
+                val tag = if (answer.size > 2) answer[2].toInt() and 0xff else -1
+                val len = when {
+                    tag in 0xa0..0xbf -> tag - 0xa0
+                    tag == 0xd9 && answer.size > 3 -> answer[3].toInt() and 0xff
+                    else -> return "a refusal"
+                }
+                val start = if (tag == 0xd9) 4 else 3
+                if (answer.size < start + len) return "a refusal"
+                return String(answer, start, len, Charsets.UTF_8)
+            }
+            return "an unreadable answer ${answer.joinToString("") { "%02x".format(it) }}"
+        }
+
         /** didResubscribeOnActive is once per process: a start after a Settings restart says so. */
         internal const val ALREADY_RESUBSCRIBED =
             "The persisted channels' re-subscription ran already in this process: it does not run again at this start"
@@ -255,9 +277,12 @@ class RfedChannelClient(
         NetworkMonitor.addOnAvailableListener(networkListener)
     }
 
-    private fun legacyChannelDest(identityHashHex: String): ByteArray? =
-        rfedDestHash(identityHashHex, "rfed", listOf("channel"))
-            ?.let { FcmTokenRegistrar.hexToBytes(it) }
+    /** [identityHashHex] lowercased when it names an RFed node rfed.link can reach, else null. */
+    private fun linkNode(identityHashHex: String): String? =
+        identityHashHex.lowercase().takeIf { RfedLink.destHash(it) != null }
+
+    private val app: RetichatApp
+        get() = appContext.applicationContext as RetichatApp
 
     private fun refreshRfedNodeStatus() {
         val nextStatus = ConnectionStateManager.rfedNodeLinkStatus()
@@ -305,11 +330,11 @@ class RfedChannelClient(
             catch (t: Throwable) { return@withContext JoinResult.Failed("bad channel name: ${t.message}") }
             val channelId = channelHashBytes.toHex()
 
-            val rfedChannelDest = legacyChannelDest(rfedNodeIdentityHashHex)
+            val rfedNode = linkNode(rfedNodeIdentityHashHex)
                 ?: return@withContext JoinResult.Failed("internal: bad dest hex")
 
             val stampCost = try {
-                subscribeOnServer(channelHashBytes, rfedChannelDest, identityHandle)
+                subscribeOnServer(channelHashBytes, rfedNode, identityHandle)
             } catch (e: Exception) {
                 return@withContext JoinResult.Failed(e.message ?: "subscribe failed")
             }
@@ -356,8 +381,8 @@ class RfedChannelClient(
         val identityHandle = StackRuntime.identityHandle
         val channelHashBytes = FcmTokenRegistrar.hexToBytes(channelId) ?: return false
 
-        val rfedChannelDest = legacyChannelDest(entity.rfedNodeIdentityHashHex)
-        if (rfedChannelDest != null && identityHandle != 0L) {
+        val rfedNode = linkNode(entity.rfedNodeIdentityHashHex)
+        if (rfedNode != null && identityHandle != 0L) {
             val pubkey = RetichatBridge.identityPublicKey(identityHandle)
             val sig = RetichatBridge.identitySign(identityHandle, channelHashBytes)
             val payload = if (pubkey != null && sig != null) {
@@ -368,10 +393,7 @@ class RfedChannelClient(
             runCatching {
                 // Single-shot via the AppLinks readiness gate plus a
                 // transient authenticated request — no path-poll, no retries.
-                ConnectionStateManager.appLinkSend(
-                    rfedChannelDest, "rfed", "channel",
-                    "/rfed/unsubscribe", payload,
-                )
+                RfedLink.request(app, rfedNode, "/channel/unsubscribe", payload)
             }
         }
 
@@ -520,9 +542,9 @@ class RfedChannelClient(
         val identityHandle = StackRuntime.identityHandle
         if (identityHandle == 0L) return
         val channelHashBytes = FcmTokenRegistrar.hexToBytes(channel.id) ?: return
-        val rfedChannelDest = legacyChannelDest(channel.rfedNodeIdentityHashHex) ?: return
+        val rfedNode = linkNode(channel.rfedNodeIdentityHashHex) ?: return
         runCatching {
-            val stampCost = subscribeOnServer(channelHashBytes, rfedChannelDest, identityHandle)
+            val stampCost = subscribeOnServer(channelHashBytes, rfedNode, identityHandle)
             channelDao.updateStampCost(channel.id, stampCost)
             Log.i(TAG, "Subscribed to '${channel.channelName}' joined on another device (stampCost=$stampCost)")
         }.onFailure { e ->
@@ -661,12 +683,12 @@ class RfedChannelClient(
                 Log.w(TAG, "Re-subscribe failed for '${channel.channelName}': its stored channel hash is not hex")
                 null
             } ?: continue
-            val rfedChannelDest = legacyChannelDest(channel.rfedNodeIdentityHashHex) ?: run {
+            val rfedNode = linkNode(channel.rfedNodeIdentityHashHex) ?: run {
                 Log.w(TAG, "Re-subscribe failed for '${channel.channelName}': its stored RFed node identity hash is not 32 hex characters")
                 null
             } ?: continue
             runCatching {
-                val stampCost = subscribeOnServer(channelHashBytes, rfedChannelDest, identityHandle)
+                val stampCost = subscribeOnServer(channelHashBytes, rfedNode, identityHandle)
                 channelDao.updateStampCost(channel.id, stampCost)
                 Log.i(TAG, "Re-subscribed to '${channel.channelName}' (stampCost=$stampCost)")
             }.onFailure { e ->
@@ -694,13 +716,8 @@ class RfedChannelClient(
         }
 
         for (nodeIdentityHashHex in nodes) {
-            val streamDestHex = rfedDestHash(
-                nodeIdentityHashHex,
-                "rfed",
-                listOf("channel", "stream"),
-            ) ?: continue
-            val streamDest = FcmTokenRegistrar.hexToBytes(streamDestHex) ?: continue
-            ensureChannelStreamTracked(nodeIdentityHashHex, streamDest)
+            val streamDest = RfedLink.ensure(app, nodeIdentityHashHex) ?: continue
+            channelStreamMutex.withLock { trackedChannelStreamNodes.add(nodeIdentityHashHex) }
 
             val filters = openedChannelsByNode[nodeIdentityHashHex]
                 .orEmpty()
@@ -714,51 +731,21 @@ class RfedChannelClient(
                 continue
             }
 
+            // Not ACTIVE: RfedLink.ensure is opening it, and its ACTIVE edge
+            // sends this config (sendChannelStreamConfigForNode).
             if (status == RetichatBridge.AppLinkStatus.ACTIVE) {
                 sendChannelStreamConfig(nodeIdentityHashHex, streamDest, filters)
-            } else {
-                ConnectionStateManager.primeAppLink(streamDest, "rfed", "channel.stream")
             }
         }
     }
 
-    private suspend fun ensureChannelStreamTracked(
-        nodeIdentityHashHex: String,
-        streamDest: ByteArray,
-    ) {
-        val shouldRegister = channelStreamMutex.withLock {
-            trackedChannelStreamNodes.add(nodeIdentityHashHex)
-        }
-        if (!shouldRegister) return
-
-        ConnectionStateManager.registerAppLinkPacketCallback(
-            streamDest,
-            object : AppLinkPacketCallback {
-                override fun onPacket(bytes: ByteArray) {
-                    scope.launch(Dispatchers.IO) {
-                        runCatching { dispatchInboundBlob(bytes) }
-                            .onFailure { Log.e(TAG, "channel.stream packet dispatch failed", it) }
-                    }
-                }
-            },
-        )
-
-        ConnectionStateManager.setAppLinkStatusHandler(streamDest) { status ->
-            if (status != RetichatBridge.AppLinkStatus.ACTIVE) return@setAppLinkStatusHandler
-            scope.launch(Dispatchers.IO) {
-                runCatching { sendChannelStreamConfigForNode(nodeIdentityHashHex) }
-                    .onFailure { Log.e(TAG, "channel.stream config refresh failed", it) }
-            }
-        }
-    }
-
-    private suspend fun sendChannelStreamConfigForNode(nodeIdentityHashHex: String) {
-        val streamDestHex = rfedDestHash(
-            nodeIdentityHashHex,
-            "rfed",
-            listOf("channel", "stream"),
-        ) ?: return
-        val streamDest = FcmTokenRegistrar.hexToBytes(streamDestHex) ?: return
+    /**
+     * Bind [nodeIdentityHashHex]'s rfed.link for this device's channel pushes
+     * (`/delivery`), with the live filter set. [RfedLink] calls it on every
+     * ACTIVE edge: the binding dies with the link.
+     */
+    internal suspend fun sendChannelStreamConfigForNode(nodeIdentityHashHex: String) {
+        val streamDest = RfedLink.destHash(nodeIdentityHashHex) ?: return
         val activeChannels = channelDao.activeChannels()
         val openedChannelIds = channelStreamMutex.withLock {
             openedChannelStreamIds.toSet()
@@ -768,6 +755,7 @@ class RfedChannelClient(
         sendChannelStreamConfig(nodeIdentityHashHex, streamDest, filters)
     }
 
+    @Suppress("UNUSED_PARAMETER")
     private suspend fun sendChannelStreamConfig(
         nodeIdentityHashHex: String,
         streamDest: ByteArray,
@@ -781,13 +769,7 @@ class RfedChannelClient(
             return
         }
 
-        val response = ConnectionStateManager.appLinkSend(
-            streamDest,
-            "rfed",
-            "channel.stream",
-            "/rfed/channel/stream/open",
-            payload,
-        )
+        val response = RfedLink.request(app, nodeIdentityHashHex, "/channel/stream/open", payload)
         if (!channelStreamResponseOk(response)) {
             Log.w(
                 TAG,
@@ -1092,7 +1074,7 @@ class RfedChannelClient(
             System.arraycopy(canonical, 0, wirePayload, 0, 16)
         }
 
-        val rfedChannelDest = legacyChannelDest(channel.rfedNodeIdentityHashHex)
+        val rfedNode = linkNode(channel.rfedNodeIdentityHashHex)
             ?: return@withContext false
 
         val finalPayload = run {
@@ -1107,14 +1089,17 @@ class RfedChannelClient(
             }
         }
 
-        val ok = ConnectionStateManager.appLinkSendData(
-            rfedChannelDest, "rfed", "channel", finalPayload,
-        )
-        if (!ok) {
-            Log.w(TAG, "Send failed: AppLinks DATA delivery failed")
+        // RFed-spec Link.md "/channel/publish — the one behavior change": a
+        // request, so rfed's answer, not a link proof, says the post is stored.
+        // Until 2026-10-18 the post went as a DATA packet to rfed.channel and
+        // showed as sent before rfed had checked its stamp.
+        val answer = RfedLink.request(app, rfedNode, "/channel/publish", finalPayload)
+        val refusal = publishRefusal(answer)
+        if (refusal != null) {
+            Log.w(TAG, "Send failed: rfed answered $refusal")
             return@withContext false
         }
-        Log.i(TAG, "SEND ok: channel='${channel.channelName}' id=${channel.id} rfedDest=${rfedChannelDest.toHex()} payload=${finalPayload.size}B stamp=${(channel.stampCost ?: 0)} name=${postName.state}")
+        Log.i(TAG, "SEND ok: channel='${channel.channelName}' id=${channel.id} rfedNode=${rfedNode.take(8)} payload=${finalPayload.size}B stamp=${(channel.stampCost ?: 0)} name=${postName.state}")
         recordPostName(channel.id, postingHex, postName)
 
         // Upgrade optimistic row → canonical id (same as echo will use)
@@ -1154,7 +1139,7 @@ class RfedChannelClient(
      */
     private suspend fun subscribeOnServer(
         channelHashBytes: ByteArray,
-        rfedChannelDest: ByteArray,
+        rfedNode: String,
         identityHandle: Long,
     ): Int? = withContext(Dispatchers.IO) {
         val pubkey = RetichatBridge.identityPublicKey(identityHandle)
@@ -1163,13 +1148,10 @@ class RfedChannelClient(
             ?: throw IllegalStateException("identitySign returned null")
         val payload = msgpackSigned(channelHashBytes, pubkey, sig)
 
-        // AppLinks owns path readiness; the request itself runs on a
-        // transient identified link so wake-style flows do not retain it.
+        // On rfed.link; AppLinks owns path readiness and the 5 s budget.
         // // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1
-        val resp = ConnectionStateManager.appLinkSend(
-            rfedChannelDest, "rfed", "channel",
-            "/rfed/subscribe", payload,
-        ) ?: throw IllegalStateException("rfed.channel compatibility request failed after AppLinks readiness gate")
+        val resp = RfedLink.request(app, rfedNode, "/channel/subscribe", payload)
+            ?: throw IllegalStateException("rfed.link /channel/subscribe failed or no response within 5 s")
 
         parseSubscribeResponse(resp)
     }
@@ -1202,9 +1184,9 @@ class RfedChannelClient(
         val identityHandle = StackRuntime.identityHandle
         if (identityHandle == 0L) return@withContext channel.stampCost
         val channelHashBytes = FcmTokenRegistrar.hexToBytes(channel.id) ?: return@withContext channel.stampCost
-        val rfedChannelDest = legacyChannelDest(channel.rfedNodeIdentityHashHex)
+        val rfedNode = linkNode(channel.rfedNodeIdentityHashHex)
             ?: return@withContext channel.stampCost
-        val fresh = subscribeOnServer(channelHashBytes, rfedChannelDest, identityHandle)
+        val fresh = subscribeOnServer(channelHashBytes, rfedNode, identityHandle)
         channelDao.updateStampCost(channel.id, fresh)
         fresh
     }
@@ -1222,21 +1204,16 @@ class RfedChannelClient(
             val channelKey = pullStateKey(channel)
             val channelHashBytes = FcmTokenRegistrar.hexToBytes(channel.id)
                 ?: return@withContext 0 to false
-            val rfedChannelPullDest = FcmTokenRegistrar.rnsDestHash(
-                channel.rfedNodeIdentityHashHex, "rfed", listOf("channel", "pull"),
-            )?.let { FcmTokenRegistrar.hexToBytes(it) } ?: return@withContext 0 to false
+            val rfedNode = linkNode(channel.rfedNodeIdentityHashHex) ?: return@withContext 0 to false
 
             _pullInFlight.value = _pullInFlight.value + channelKey
             try {
-                Log.i(TAG, "PULL start: channel='${channel.channelName}' rfedDest=${rfedChannelPullDest.toHex()}")
-                // Single-shot via AppLinks readiness plus a transient
-                // identified request on rfed.channel.pull.
+                Log.i(TAG, "PULL start: channel='${channel.channelName}' rfedNode=${rfedNode.take(8)}")
+                // On rfed.link, which identified as this device before ACTIVE
+                // (the pull authenticates by link identity, Link.md "Identify").
                 // // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1
-                val resp = ConnectionStateManager.appLinkSend(
-                    rfedChannelPullDest, "rfed", "channel.pull",
-                    "/rfed/pull", msgpackBin(channelHashBytes),
-                ) ?: run {
-                    Log.w(TAG, "PULL: rfed.channel.pull request failed after AppLinks readiness gate")
+                val resp = RfedLink.request(app, rfedNode, "/channel/pull", msgpackBin(channelHashBytes)) ?: run {
+                    Log.w(TAG, "PULL: rfed.link /channel/pull failed or no response within 5 s")
                     _canPullMore.value = _canPullMore.value + (channelKey to null)
                     return@withContext 0 to false
                 }
@@ -1267,10 +1244,10 @@ class RfedChannelClient(
      * Called from the JNI rfed.delivery callback (via [StackRuntime]).
      * Blob format: `channelHash(16) | innerBlob`.
      */
-    suspend fun dispatchInboundBlob(blob: ByteArray) {
+    suspend fun dispatchInboundBlob(blob: ByteArray): Boolean {
         if (blob.size <= 16) {
             Log.w(TAG, "dispatchInboundBlob DROPPED: too short (${blob.size})")
-            return
+            return false
         }
         val channelHashHex = blob.copyOfRange(0, 16).toHex()
         val inner = blob.copyOfRange(16, blob.size)
@@ -1279,48 +1256,47 @@ class RfedChannelClient(
         // (Retichat-js app.js _handleChannelPacket → _handleDistroBlob).
         if (channelHashHex == DistroManager.deliveryHashHex) {
             Log.i(TAG, "dispatchInboundBlob distro fan-out inner=${inner.size}B")
-            RfedDistroClient.handleBlob(appContext, inner)
-            return
+            return RfedDistroClient.handleBlob(appContext, inner)
         }
         Log.i(TAG, "dispatchInboundBlob channel=$channelHashHex inner=${inner.size}B")
-        dispatchBlob(channelHashHex, inner)
+        return dispatchBlob(channelHashHex, inner)
     }
 
-    private suspend fun dispatchBlob(channelHashHex: String, innerBlob: ByteArray) =
+    private suspend fun dispatchBlob(channelHashHex: String, innerBlob: ByteArray): Boolean =
         withContext(Dispatchers.IO) {
             val channel = channelDao.findById(channelHashHex) ?: run {
                 val known = channelDao.activeChannels().joinToString(", ") { "${it.channelName}=${it.id.take(8)}" }
                 Log.w(TAG, "dispatchBlob NO MATCH for channel=$channelHashHex; subscribed: [$known]")
-                return@withContext
+                return@withContext false
             }
             // Reconstruct full lxmf_data: channelHash(16) | innerBlob
-            val channelHashBytes = FcmTokenRegistrar.hexToBytes(channelHashHex) ?: return@withContext
+            val channelHashBytes = FcmTokenRegistrar.hexToBytes(channelHashHex) ?: return@withContext false
             val lxmfData = channelHashBytes + innerBlob
 
             val raw = RetichatBridge.channelLxmUnpack(channel.channelName, lxmfData) ?: run {
                 val error = RetichatBridge.lastError()
                 // RFed SPEC §17.14 "Repeated keys", "Unhashable keys", "Nesting": a post whose
                 // LXMF payload Python LXMF refuses is refused whole; LXMF-rust logged its one line.
-                if (NativeRefusal.isRefusal(error)) return@withContext
+                if (NativeRefusal.isRefusal(error)) return@withContext false
                 val key = channelHashHex.hashCode() xor innerBlob.contentHashCode()
                 if (failedBlobKeys.add(key)) {
                     Log.w(TAG, "channelLxmUnpack failed (${lxmfData.size} bytes): $error")
                 }
-                return@withContext
+                return@withContext false
             }
-            val result = ChannelLxmUnpackResult.parse(raw) ?: return@withContext
+            val result = ChannelLxmUnpackResult.parse(raw) ?: return@withContext false
             if (!result.signatureValidated) {
                 Log.w(TAG, "REJECTED unsigned channel msg: reason=${result.unverifiedReason}")
-                return@withContext
+                return@withContext false
             }
             val content = try { String(result.content, Charsets.UTF_8) }
-            catch (_: Throwable) { return@withContext }
+            catch (_: Throwable) { return@withContext false }
             val title = try { String(result.title, Charsets.UTF_8) }
             catch (_: Throwable) { "" }
 
             val sourceHashHex = result.sourceHash.toHex()
             val msgId = canonicalMessageId(sourceHashHex, result.timestampMs)
-            if (channelDao.messageExists(channelHashHex, msgId) > 0) return@withContext
+            if (channelDao.messageExists(channelHashHex, msgId) > 0) return@withContext true
 
             // RFed-spec/Channel.md "Own posts": a post is the user's own when
             // its source is this device's lxmf.delivery hash or the hash of
@@ -1382,6 +1358,7 @@ class RfedChannelClient(
                     conversationTitle = "#${channel.channelName}",
                 )
             }
+            true
         }
 
     /**

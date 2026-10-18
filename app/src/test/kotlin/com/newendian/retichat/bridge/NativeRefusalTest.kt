@@ -55,9 +55,9 @@ class NativeRefusalTest {
     @Test
     fun theDistroPathEndsARefusalBeforeAnythingIsReadMarkedOrStoredWithNoSecondLine() {
         val client = src("service/RfedDistroClient.kt")
-        val blob = client.substringAfter("suspend fun handleBlob(context: Context, blob: ByteArray) {").substringBefore("\n    /**")
+        val blob = client.substringAfter("suspend fun handleBlob(context: Context, blob: ByteArray): Boolean {").substringBefore("\n    /**")
         val outcome = blob.indexOf("DistroUnwrapOutcome.of(RetichatBridge.distroUnwrap(distro, blob)) { RetichatBridge.lastError() }")
-        val refused = blob.indexOf("DistroUnwrapOutcome.Refused -> return\n")
+        val refused = blob.indexOf("DistroUnwrapOutcome.Refused -> return false\n")
         assertTrue(outcome >= 0 && refused > outcome)
         assertTrue(refused < blob.indexOf("val o = JSONObject(json)"))
         assertTrue(refused < blob.indexOf("UserPreferences.markDistroSeen("))

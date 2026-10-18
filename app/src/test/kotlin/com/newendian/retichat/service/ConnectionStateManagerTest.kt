@@ -75,15 +75,14 @@ class ConnectionStateManagerTest {
     }
 
     @Test
-    fun androidChannelPullSourceUsesSplitDestinationAndForegroundHooks() {
+    fun androidChannelPullGoesOnRfedLinkWithForegroundHooks() {
         val channelClient = sourceFile("src/main/kotlin/com/newendian/retichat/service/RfedChannelClient.kt")
         val conversation = sourceFile("src/main/kotlin/com/newendian/retichat/ui/conversation/ConversationScreen.kt")
         val app = sourceFile("src/main/kotlin/com/newendian/retichat/RetichatApp.kt")
         val stackRuntime = sourceFile("src/main/kotlin/com/newendian/retichat/service/StackRuntime.kt")
 
-        assertTrue(channelClient.contains("listOf(\"channel\", \"pull\")"))
-        assertTrue(channelClient.contains("\"/rfed/pull\", msgpackBin(channelHashBytes)"))
-        assertTrue(channelClient.contains("rfed.channel.pull request failed after AppLinks readiness gate"))
+        assertTrue(channelClient.contains("RfedLink.request(app, rfedNode, \"/channel/pull\", msgpackBin(channelHashBytes))"))
+        assertFalse(channelClient.contains("listOf(\"channel\", \"pull\")"))
 
         assertTrue(conversation.contains("retainRfedLinkMonitor()"))
         assertTrue(conversation.contains("rfedLinkGeneration.collectAsState()"))

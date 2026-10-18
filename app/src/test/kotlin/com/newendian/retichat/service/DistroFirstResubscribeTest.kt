@@ -166,7 +166,7 @@ class DistroFirstResubscribeTest {
         val body = client.substring(client.indexOf("suspend fun pullOutcome("), client.indexOf("suspend fun handleBlob("))
         assertTrue("the stop count is read before the pull waits its turn", body.indexOf("val stops = StackRuntime.stops") in 0 until body.indexOf("pullLock.withLock {"))
         val check = body.indexOf("DistroPullRounds.unsent(")
-        assertTrue("checked before each round is sent", check > body.indexOf("DistroPullRounds.drain(") && check < body.indexOf("ConnectionStateManager.appLinkSend("))
+        assertTrue("checked before each round is sent", check > body.indexOf("DistroPullRounds.drain(") && check < body.indexOf("RfedLink.request(app, node, \"/distro/pull\""))
         assertTrue(body.contains("stackUp = ConnectionStateManager.isRegistered"))
         assertTrue(src("service/ConnectionStateManager.kt").contains("get() = routerHandle != 0L"))
     }

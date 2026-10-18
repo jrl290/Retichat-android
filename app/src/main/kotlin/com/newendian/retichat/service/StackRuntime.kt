@@ -485,6 +485,7 @@ object StackRuntime {
 
         runCatching { RetichatBridge.rfedDeliveryStop() }
         PropagationStream.stop()
+        RfedLink.reset()
 
         if (selfDestHash.isNotEmpty()) {
             runCatching { RetichatBridge.transportUnpublishDestination(selfDestHash) }

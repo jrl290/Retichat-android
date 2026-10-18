@@ -2,6 +2,7 @@ package com.newendian.retichat.service
 
 import android.content.Context
 import android.util.Log
+import com.newendian.retichat.RetichatApp
 import com.newendian.retichat.bridge.RetichatBridge
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -9,9 +10,11 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 
 /**
- * Registers this device's FCM "wakeup" relay with rfed via a signed DATA
- * packet over the ephemeral `rfed.notify.register` / `rfed.notify.unregister`
- * APP_LINKs (split aspects — REFACTOR.md step 6).
+ * Registers this device's FCM "wakeup" relay with rfed: the signed
+ * `/notify/register` and `/notify/unregister` requests on [RfedLink]
+ * (RFed-spec Link.md), each proved by rfed's msgpack `true`. Before
+ * 2026-10-18 they were signed DATA packets to the `rfed.notify.register` /
+ * `rfed.notify.unregister` destinations.
  *
  * Direct port of `Retichat-ios/Retichat/Services/RfedNotifyRegistrar.swift`.
  *
@@ -32,15 +35,21 @@ object RfedNotifyRegistrar {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    /** One per `rfed.notify.register` destination (it changes with the node). */
+    private const val REGISTER = "/notify/register"
+    private const val UNREGISTER = "/notify/unregister"
+
+    /** One per RFed node (its rfed.link). */
     private val registrations = HashMap<String, HeldLinkRegistrations>()
 
-    private fun registrationsFor(rfedHash: ByteArray): HeldLinkRegistrations =
-        synchronized(registrations) {
-            registrations.getOrPut(rfedHash.toHex()) {
-                HeldLinkRegistrations(rfedHash, "rfed", "notify.register", scope)
+    private fun registrationsFor(context: Context, node: String): HeldLinkRegistrations? {
+        val app = context.applicationContext as? RetichatApp ?: return null
+        val dest = RfedLink.destHash(node) ?: return null
+        return synchronized(registrations) {
+            registrations.getOrPut(node) {
+                HeldLinkRegistrations(dest, "rfed", "link", scope, RfedLinkOps(app, node, REGISTER, scope))
             }
         }
+    }
 
     /**
      * Owe the node this device's LXMF wake registration: sent on a held link
@@ -49,7 +58,7 @@ object RfedNotifyRegistrar {
      * registered in this process: nothing is sent.
      */
     fun registerIfNeeded(context: Context, identityHandle: Long) {
-        val rfedHash = rfedNotifyDestHash(context, "register") ?: return
+        val node = rfedNode(context) ?: return
         val relayHex = relayHexOrNull(context) ?: run {
             Log.i(TAG, "PushBridgeConfig.json missing or invalid — skipping register")
             return
@@ -59,15 +68,15 @@ object RfedNotifyRegistrar {
             return
         }
         val key = "lxmf relay=${relayHex.take(8)} identity=$identityHandle"
-        scope.launch { registrationsFor(rfedHash).owe(key, payload) }
+        scope.launch { registrationsFor(context, node)?.owe(key, payload) }
     }
 
     /** Per-channel registration: owed like [registerIfNeeded]. */
     fun registerForChannel(context: Context, identityHandle: Long, channelHash: ByteArray) {
-        val rfedHash = rfedNotifyDestHash(context, "register") ?: return
+        val node = rfedNode(context) ?: return
         val relayHex = relayHexOrNull(context) ?: return
         val payload = buildSignedPayload(identityHandle, "register", relayHex, channelHash) ?: return
-        scope.launch { registrationsFor(rfedHash).owe(channelKey(channelHash, relayHex, identityHandle), payload) }
+        scope.launch { registrationsFor(context, node)?.owe(channelKey(channelHash, relayHex, identityHandle), payload) }
     }
 
     private fun channelKey(channelHash: ByteArray, relayHex: String, identityHandle: Long): String =
@@ -75,58 +84,43 @@ object RfedNotifyRegistrar {
 
     /** Per-channel deregistration — best-effort single attempt. */
     fun deregisterForChannel(context: Context, identityHandle: Long, channelHash: ByteArray) {
-        val rfedHash = rfedNotifyDestHash(context, "unregister") ?: return
+        val node = rfedNode(context) ?: return
         val relayHex = relayHexOrNull(context) ?: return
         val payload = buildSignedPayload(identityHandle, "unregister", relayHex, channelHash) ?: return
-        val registerHash = rfedNotifyDestHash(context, "register")
         scope.launch {
             // A registration still owed must not go out after this.
-            registerHash?.let { registrationsFor(it).forget(channelKey(channelHash, relayHex, identityHandle)) }
-            val delivered = ConnectionStateManager.appLinkSendData(
-                rfedHash, "rfed", "notify.unregister", payload,
-            )
-            logSendResult("channel-unregister", delivered)
+            registrationsFor(context, node)?.forget(channelKey(channelHash, relayHex, identityHandle))
+            logSendResult("channel-unregister", sendOnce(context, node, UNREGISTER, payload))
         }
     }
 
-    /** Best-effort unregister from an old rfed node before switching nodes. */
-    fun deregisterFrom(context: Context, identityHandle: Long, oldRfedNotifyHashHex: String) {
-        if (oldRfedNotifyHashHex.isEmpty()) return
-        val rfedHash = FcmTokenRegistrar.hexToBytes(oldRfedNotifyHashHex) ?: return
+    /** Best-effort unregister from an old rfed node (its identity hash) before switching nodes. */
+    fun deregisterFrom(context: Context, identityHandle: Long, oldRfedNodeIdentityHex: String) {
+        val node = oldRfedNodeIdentityHex.lowercase().takeIf { RfedLink.destHash(it) != null } ?: return
         val relayHex = relayHexOrNull(context) ?: return
         val payload = buildSignedPayload(identityHandle, "unregister", relayHex, channelHash = null) ?: return
-        scope.launch {
-            val delivered = ConnectionStateManager.appLinkSendData(
-                rfedHash, "rfed", "notify.unregister", payload,
-            )
-            logSendResult("unregister-old", delivered)
-        }
+        scope.launch { logSendResult("unregister-old", sendOnce(context, node, UNREGISTER, payload)) }
     }
 
     // ---- Internal ----
 
-    /// Single-attempt registration via a signed DATA packet on the ephemeral
-    /// rfed.notify.{register,unregister} APP_LINK.
+    /// Single attempt: one request on the node's rfed.link, proved by its `true`.
     /// // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1
-    private suspend fun sendOnce(rfedHash: ByteArray, payload: ByteArray, kind: String, op: String) {
-        val delivered = ConnectionStateManager.appLinkSendData(
-            rfedHash, "rfed", "notify.$op", payload,
-        )
-        logSendResult(kind, delivered)
+    private suspend fun sendOnce(context: Context, node: String, path: String, payload: ByteArray): Boolean {
+        val app = context.applicationContext as? RetichatApp ?: return false
+        val answer = RfedLink.request(app, node, path, payload)
+        return answer != null && answer.size == 1 && answer[0] == 0xc3.toByte()
     }
 
     private fun logSendResult(kind: String, delivered: Boolean) {
-        if (delivered) Log.i(TAG, "$kind: delivered to rfed.notify")
-        else Log.w(TAG, "$kind: no delivery proof within budget")
+        if (delivered) Log.i(TAG, "$kind: rfed answered true")
+        else Log.w(TAG, "$kind: no true from rfed within budget")
     }
 
-    private fun rfedNotifyDestHash(context: Context, op: String): ByteArray? {
-        val identityHex = UserPreferences.getEffectiveRfedNodeIdentityHash(context)
-        if (identityHex.isEmpty()) return null
-        val rfedNotifyHex = FcmTokenRegistrar.rnsDestHash(identityHex, "rfed", listOf("notify", op))
-            ?: return null
-        return FcmTokenRegistrar.hexToBytes(rfedNotifyHex)
-    }
+    /** The configured RFed node's identity hash, lowercased, or null when there is none. */
+    private fun rfedNode(context: Context): String? =
+        UserPreferences.getEffectiveRfedNodeIdentityHash(context).lowercase()
+            .takeIf { it.isNotEmpty() && RfedLink.destHash(it) != null }
 
     private fun relayHexOrNull(context: Context): String? {
         return FcmBridgeHashes.relayHex(context)
