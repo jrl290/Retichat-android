@@ -1007,11 +1007,7 @@ class ChatRepository(
                         method = RetichatBridge.DeliveryMethod.PROPAGATED,
                         identityHandle = sendIdentity,
                     ).let { handle ->
-                        if (handle != 0L) {
-                            attachments.forEach { (name, data) ->
-                                RetichatBridge.messageAddAttachment(handle, name, data)
-                            }
-                        }
+                        if (handle != 0L) RetichatBridge.messageAddAttachments(handle, attachments)
                         if (handle != 0L && reaction != null && !RetichatBridge.messageSetReaction(handle, reaction.to, reaction.content)) {
                             Log.e(TAG, "dispatch: reaction $localId not built: ${RetichatBridge.lastError()}")
                             RetichatBridge.messageDestroy(handle)
@@ -1061,9 +1057,7 @@ class ChatRepository(
         }
         Log.d(TAG, "dispatch: messageCreate OK handle=$msgHandle")
 
-        attachments.forEach { (name, data) ->
-            RetichatBridge.messageAddAttachment(msgHandle, name, data)
-        }
+        RetichatBridge.messageAddAttachments(msgHandle, attachments)
         if (reaction != null && !RetichatBridge.messageSetReaction(msgHandle, reaction.to, reaction.content)) {
             Log.e(TAG, "dispatch: reaction $localId not built: ${RetichatBridge.lastError()} — not sent")
             RetichatBridge.messageDestroy(msgHandle)
@@ -1785,9 +1779,7 @@ class ChatRepository(
                         return@launch
                     }
 
-                    attachments.forEach { (name, data) ->
-                        RetichatBridge.messageAddAttachment(handle, name, data)
-                    }
+                    RetichatBridge.messageAddAttachments(handle, attachments)
 
                     val sent = RetichatBridge.messageSendViaAppLinks(handle)
                     if (sent) {
@@ -3447,6 +3439,7 @@ class ChatRepository(
             "png" -> "image/png"
             "gif" -> "image/gif"
             "webp" -> "image/webp"
+            "heic" -> "image/heic"
             "bmp" -> "image/bmp"
             "svg" -> "image/svg+xml"
             "mp4" -> "video/mp4"

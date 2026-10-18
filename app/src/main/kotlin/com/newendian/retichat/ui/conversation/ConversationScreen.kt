@@ -1352,7 +1352,7 @@ private fun stateIcon(state: Int): String = when (state) {
 /** Check whether a filename looks like an image. */
 private fun isImageFile(filename: String): Boolean {
     val ext = filename.substringAfterLast('.', "").lowercase()
-    return ext in listOf("jpg", "jpeg", "png", "gif", "webp", "bmp")
+    return ext in listOf("jpg", "jpeg", "png", "gif", "webp", "heic", "bmp")
 }
 
 /** Regex matching http/https URLs and lxma:// or lxmf:// addresses. */

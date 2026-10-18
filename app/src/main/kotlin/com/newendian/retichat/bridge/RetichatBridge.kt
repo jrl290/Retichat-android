@@ -472,6 +472,30 @@ object RetichatBridge {
         nativeMessageAddAttachment(handle, filename, data) == 0
 
     /**
+     * FIELD_IMAGE (0x06): `[imageType, data]`, how MeshChat and Sideband send
+     * a picture and show one inline. One per message. The type is 1 to 16
+     * ASCII letters or digits ("jpg"); anything else, or no data, is false.
+     */
+    fun messageSetImage(handle: Long, imageType: String, data: ByteArray): Boolean =
+        nativeMessageSetImage(handle, imageType, data) == 0
+
+    /**
+     * A message's outgoing attachments, the one way every send writes them:
+     * the picture [LxmfFields.outgoingImage] picks as FIELD_IMAGE, the rest as
+     * FIELD_FILE_ATTACHMENTS, in order (James, 2026-10-17: photos go as 0x06,
+     * which MeshChat and Sideband show inline; as 0x05 they were a download
+     * there). If the image field cannot be written the picture goes as a
+     * file, as before.
+     */
+    fun messageAddAttachments(handle: Long, attachments: List<Pair<String, ByteArray>>) {
+        val image = LxmfFields.outgoingImage(attachments)
+        attachments.forEachIndexed { i, (name, data) ->
+            if (image != null && i == image.first && messageSetImage(handle, image.second, data)) return@forEachIndexed
+            messageAddAttachment(handle, name, data)
+        }
+    }
+
+    /**
      * Add a string-valued top-level LXMF field. 0xD1 (the Retichat field) is
      * refused: its entries go through [messageSetRetichatString]. Group
      * entries are written only by `service.GroupFields`.
@@ -590,6 +614,7 @@ object RetichatBridge {
         identityHandle: Long,
     ): Long
     private external fun nativeMessageAddAttachment(handle: Long, filename: String, data: ByteArray): Int
+    private external fun nativeMessageSetImage(handle: Long, imageType: String, data: ByteArray): Int
     private external fun nativeMessageAddFieldString(handle: Long, key: Int, value: String): Int
     private external fun nativeMessageAddFieldBool(handle: Long, key: Int, value: Boolean): Int
     private external fun nativeMessageSetRetichatString(handle: Long, key: Int, value: String): Int

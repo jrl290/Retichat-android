@@ -95,6 +95,7 @@ private fun guessMime(name: String): String = when {
     name.endsWith(".jpg", true) || name.endsWith(".jpeg", true) -> "image/jpeg"
     name.endsWith(".gif", true)  -> "image/gif"
     name.endsWith(".webp", true) -> "image/webp"
+    name.endsWith(".heic", true) -> "image/heic"
     name.endsWith(".mp4", true)  -> "video/mp4"
     name.endsWith(".pdf", true)  -> "application/pdf"
     else -> "application/octet-stream"

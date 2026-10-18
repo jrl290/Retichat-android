@@ -943,6 +943,21 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeM
     ok_or_neg(lxmf::message_add_attachment(handle as u64, &f, &d))
 }
 
+/// `RetichatBridge.nativeMessageSetImage(handle: Long, imageType: String, data: ByteArray): Int`
+/// FIELD_IMAGE (0x06) `[imageType, data]` (lxmf::message_set_image).
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeMessageSetImage(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    image_type: JString,
+    data: JByteArray,
+) -> jint {
+    let t = jstring_to_string(&mut env, &image_type);
+    let d = jbytes_to_vec(&env, &data);
+    ok_or_neg(lxmf::message_set_image(handle as u64, &t, &d))
+}
+
 /// An LXMF field key from Kotlin's Int: `lxmf_rust::ffi::field_key` rejects
 /// anything outside 0..=255 (-1, `nativeLastError`) rather than truncating
 /// it, which used to let e.g. 0x1D1 alias 0xD1 (FIELD_RETICHAT). The

@@ -276,10 +276,31 @@ class LxmfFields private constructor(
 
         /**
          * The image types a FIELD_IMAGE is named for, the same set as iOS
-         * (LxmfFieldsDecoder.imageTypes, what its bubble shows inline). Here
-         * guessMimeType shows all but heic inline; a heic is a file.
+         * (LxmfFieldsDecoder.imageTypes); a bubble shows each inline
+         * (ChatRepository.guessMimeType gives an image/ type).
          */
         private val IMAGE_TYPES = setOf("jpg", "jpeg", "png", "gif", "webp", "heic")
+
+        /**
+         * The image types sent as FIELD_IMAGE: the ones MeshChat (a browser's
+         * <img>) and Sideband (Kivy) show inline. heic is not one of them and
+         * goes as a file.
+         */
+        private val SENT_IMAGE_TYPES = setOf("jpg", "jpeg", "png", "gif", "webp")
+
+        /**
+         * Which outgoing attachment leaves as FIELD_IMAGE, and its type (the
+         * name's extension, lower case): the LAST one whose extension is in
+         * SENT_IMAGE_TYPES, or null when none is. The field holds one picture,
+         * so any others stay FIELD_FILE_ATTACHMENTS. The last one because a
+         * receiver that lists 0x05 and then 0x06 (Retichat, the web) then
+         * shows several photos in the order they were sent.
+         */
+        fun outgoingImage(attachments: List<Pair<String, ByteArray>>): Pair<Int, String>? {
+            val type = { name: String -> name.substringAfterLast('.', "").lowercase().takeIf { it in SENT_IMAGE_TYPES } }
+            val i = attachments.indexOfLast { type(it.first) != null }
+            return if (i < 0) null else i to type(attachments[i].first)!!
+        }
 
         /**
          * A FIELD_IMAGE's filename from the sender's type ("webp", "png",
