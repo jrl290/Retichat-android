@@ -125,17 +125,21 @@ class DistroDebugReceiver : BroadcastReceiver() {
                 UserPreferences.setDefaultTcpEnabled(app, defaults)
                 Log.i(TAG, "production -> staging row removed, default backbones=$defaults (restart the app)")
             }
-            // Send a DM from this phone (as the distro when one is loaded):
-            //   --es op send --es to <32 hex> --es text "hello"
+            // Send a DM from this phone (as the distro when one is loaded), with a file attached as the composer
+            // attaches one when --es file names a readable file (adb push it to /data/local/tmp):
+            //   --es op send --es to <32 hex> --es text "hello" [--es file /data/local/tmp/<name>]
             "send" -> CoroutineScope(Dispatchers.IO).launch {
                 val to = intent.getStringExtra("to") ?: ""
                 val text = intent.getStringExtra("text") ?: "ping"
                 val dest = com.newendian.retichat.service.DistroCodec.hexToBytes(to.lowercase())
                 if (dest == null || dest.size != 16) { Log.w(TAG, "send: bad address"); return@launch }
+                val file = intent.getStringExtra("file")?.let { java.io.File(it) }
+                if (file != null && !file.canRead()) { Log.w(TAG, "send -> REFUSED reason=cannot read $file"); return@launch }
+                val attachments = file?.let { listOf(it.name to it.readBytes()) } ?: emptyList()
                 val repo = (app as com.newendian.retichat.RetichatApp).repository
                 val chatId = repo.getOrCreateDirectChat(dest)
-                repo.sendMessage(chatId, text)
-                Log.i(TAG, "send -> queued '$text' to ${to.take(8)} in $chatId")
+                repo.sendMessage(chatId, text, attachments)
+                Log.i(TAG, "send -> queued '$text' to ${to.take(8)} in $chatId attachments=${attachments.map { "${it.first}:${it.second.size}" }}")
             }
             // A contact with its key, as from a contact link (`lxma://<hash>:<key>`): a group's invites carry every
             // member's key, read from the contact rows.
