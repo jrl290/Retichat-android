@@ -40,6 +40,8 @@ class LxmfImageAudioFieldsTest {
         assertEquals(listOf("image.jpeg"), names(decode("8106" + "92" + "aa696d6167652f6a706567" + data)))
         assertEquals(listOf("image.jpg"), names(decode("8106" + "92" + "a34a5047" + data)))
         assertEquals(listOf("image.png"), names(decode("8106" + "92" + "c403706e67" + data)))
+        // heic, named as on iOS (shown there inline, here as a file).
+        assertEquals(listOf("image.heic"), names(decode("8106" + "92" + "a468656963" + data)))
     }
 
     @Test

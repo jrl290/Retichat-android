@@ -274,18 +274,22 @@ class LxmfFields private constructor(
         const val FIELD_GROUP            = 0x0B
         const val FIELD_TICKET           = 0x0C
 
-        /** The image types a bubble shows inline, as a name's extension. */
-        private val INLINE_IMAGE_TYPES = setOf("jpg", "jpeg", "png", "gif", "webp")
+        /**
+         * The image types a FIELD_IMAGE is named for, the same set as iOS
+         * (LxmfFieldsDecoder.imageTypes, what its bubble shows inline). Here
+         * guessMimeType shows all but heic inline; a heic is a file.
+         */
+        private val IMAGE_TYPES = setOf("jpg", "jpeg", "png", "gif", "webp", "heic")
 
         /**
          * A FIELD_IMAGE's filename from the sender's type ("webp", "png",
-         * "image/jpeg", any case): "image.<type>" for a type a bubble shows
-         * inline, else "image", offered as a file. The type is the sender's
-         * string, so it never makes a name (or a MIME type) by itself.
+         * "image/jpeg", any case): "image.<type>" for one of IMAGE_TYPES,
+         * else "image", offered as a file. The type is the sender's string,
+         * so it never makes a name (or a MIME type) by itself.
          */
         fun imageName(type: String?): String {
             val ext = type?.trim()?.lowercase()?.removePrefix("image/")
-            return if (ext in INLINE_IMAGE_TYPES) "image.$ext" else "image"
+            return if (ext in IMAGE_TYPES) "image.$ext" else "image"
         }
 
         /**
