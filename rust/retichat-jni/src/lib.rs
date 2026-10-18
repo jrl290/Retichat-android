@@ -2523,8 +2523,12 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeA
 
     let state_fail = cb_state.clone();
     let fired_fail = fired.clone();
+    let link_for_fail = link_handle.clone();
     let failed_cb: Arc<dyn Fn(reticulum_rust::link::RequestReceipt) + Send + Sync> =
         Arc::new(move |_receipt| {
+            // The link's own failure, not the caller's deadline: the next
+            // request opens a fresh link (LXMRouter.message_get_failed).
+            AppLinks::request_failed(&link_for_fail);
             if fired_fail.swap(true, Ordering::SeqCst) {
                 return;
             }
