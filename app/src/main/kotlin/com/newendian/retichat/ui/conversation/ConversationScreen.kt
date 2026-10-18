@@ -47,7 +47,6 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -59,7 +58,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
-import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
@@ -1046,7 +1044,7 @@ private fun MessageRow(
                     bottom = 10.dp,
                 ),
         ) {
-            BubbleColumn {
+            Column {
                 // Sender name for incoming messages (a system line names its
                 // member in the text instead)
                 if (!isOut && showSender && msg.systemKind == null) {
@@ -1187,16 +1185,12 @@ private fun MessageRow(
                     Spacer(Modifier.height(4.dp))
                 }
 
-                // The footer across the bubble, sent or received: the time at
-                // its left, the delivery icon and reactions at its right (James,
-                // 2026-10-17). Last, so BubbleColumn gives it the bubble's width.
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         text = formatMessageTime(msg.timestamp, zone),
                         style = MaterialTheme.typography.bodySmall,
                         color = contentColor.copy(alpha = 0.6f),
                     )
-                    Spacer(Modifier.weight(1f))
 
                     // The reactions take the checkmark's place (REACTIONS-DESIGN.md
                     // §7; James, 2026-10-17): each one given, once, no count, no
@@ -1324,30 +1318,6 @@ private fun SelectTextDialog(text: String, onDismiss: () -> Unit) {
             }
         },
     )
-}
-
-/**
- * A bubble's content, one under another at its left as a Column places it,
- * except the last child, the footer, which is measured at the bubble's width
- * (James, 2026-10-17). The bubble is as wide as its widest child, the
- * footer's own width included: a footer filling the width it is offered
- * would widen every bubble.
- */
-@Composable
-private fun BubbleColumn(content: @Composable () -> Unit) {
-    Layout(content) { measurables, constraints ->
-        val loose = constraints.copy(minWidth = 0, minHeight = 0)
-        val body = measurables.dropLast(1).map { it.measure(loose) }
-        val footer = measurables.last()
-        val width = maxOf(body.maxOfOrNull { it.width } ?: 0, footer.maxIntrinsicWidth(Constraints.Infinity))
-            .coerceIn(constraints.minWidth, constraints.maxWidth)
-        val foot = footer.measure(Constraints.fixedWidth(width))
-        layout(width, body.sumOf { it.height } + foot.height) {
-            var y = 0
-            body.forEach { it.placeRelative(0, y); y += it.height }
-            foot.placeRelative(0, y)
-        }
-    }
 }
 
 // ---- Helpers ----
