@@ -2044,7 +2044,7 @@ class ChatRepository(
             }
             is LxmfFields.Received.Read -> received.fields
         }
-        Log.i(TAG, "onDistroMessageReceived: src=${srcHex.take(16)} via=distro content='${content.take(40)}' fields=${fieldsRaw?.let { "${it.size}B" } ?: "none"} attachments=${fields.getFileAttachments().size}")
+        Log.i(TAG, "onDistroMessageReceived: src=${srcHex.take(16)} via=distro content='${content.take(40)}' fields=${fieldsRaw?.let { "${it.size}B" } ?: "none"} attachments=${fields.getAttachments().size}")
         // No privacy filter: mail to the distro is mail to this person (iOS
         // storeIncomingDirect via distro fan-out does not filter either).
         scope.launch(Dispatchers.IO) {
@@ -2845,7 +2845,7 @@ class ChatRepository(
                 if (reaction != LxmfFields.Reaction.None) {
                     return takeGroupReaction(msgId, chat, srcHex, reaction, timestamp, fields, standing, signature)
                 }
-                val attachments = fields.getFileAttachments()
+                val attachments = fields.getAttachments()
                 val post = DeliveryPolicy.groupPost(standing.isSelf(srcHex), signature, content.isNotBlank() || attachments.isNotEmpty())
                 when (post) {
                     DeliveryPolicy.GroupPost.UNPROVEN_OWN -> {
@@ -3376,11 +3376,12 @@ class ChatRepository(
     // ---- Attachments ----
 
     /**
-     * Extract file attachments from LXMF fields, save each to disk,
+     * Extract the attachments from LXMF fields (0x05, and the 0x06 image and
+     * 0x07 audio that MeshChat and Sideband send: [LxmfFields.getAttachments]), save each to disk,
      * and insert [AttachmentEntity] records in the database.
      */
     private suspend fun saveInboundAttachments(msgId: String, fields: LxmfFields) {
-        val attachments = fields.getFileAttachments()
+        val attachments = fields.getAttachments()
         if (attachments.isEmpty()) return
 
         for ((filename, data) in attachments) {

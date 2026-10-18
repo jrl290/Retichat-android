@@ -213,6 +213,34 @@ class LxmfFields private constructor(
         }
     }
 
+    /**
+     * Every attachment a message carries, as (filename, data) pairs: the file
+     * attachments (0x05, [getFileAttachments]), then the image (0x06,
+     * `[image_type, data]`, how MeshChat and Sideband send a picture) and the
+     * audio (0x07, `[audio_mode, data]`), as the web reads them (Retichat-js
+     * lxmf.js attachmentsFromFields). Until 2026-10-17 only 0x05 was read, and
+     * a picture from MeshChat arrived as its text alone (Retichat-ios #8).
+     * The image is named by [imageName], the audio by [audioName]; an entry
+     * not of that shape is skipped, as a 0x05 pair is.
+     */
+    fun getAttachments(): List<Pair<String, ByteArray>> {
+        val out = getFileAttachments().toMutableList()
+        (entries[FIELD_IMAGE] as? List<*>)?.takeIf { it.size >= 2 }?.let { image ->
+            val data = image[1] as? ByteArray ?: return@let
+            val type = when (val t = image[0]) {
+                is String -> t
+                is ByteArray -> String(t, StandardCharsets.UTF_8)
+                else -> null
+            }
+            out += imageName(type) to data
+        }
+        (entries[FIELD_AUDIO] as? List<*>)?.takeIf { it.size >= 2 }?.let { audio ->
+            val data = audio[1] as? ByteArray ?: return@let
+            out += audioName(audio[0]) to data
+        }
+        return out
+    }
+
     /** What a receive path makes of a message's fields map ([receive]). */
     sealed class Received {
         /**
@@ -245,6 +273,39 @@ class LxmfFields private constructor(
         const val FIELD_RESULTS          = 0x0A
         const val FIELD_GROUP            = 0x0B
         const val FIELD_TICKET           = 0x0C
+
+        /** The image types a bubble shows inline, as a name's extension. */
+        private val INLINE_IMAGE_TYPES = setOf("jpg", "jpeg", "png", "gif", "webp")
+
+        /**
+         * A FIELD_IMAGE's filename from the sender's type ("webp", "png",
+         * "image/jpeg", any case): "image.<type>" for a type a bubble shows
+         * inline, else "image", offered as a file. The type is the sender's
+         * string, so it never makes a name (or a MIME type) by itself.
+         */
+        fun imageName(type: String?): String {
+            val ext = type?.trim()?.lowercase()?.removePrefix("image/")
+            return if (ext in INLINE_IMAGE_TYPES) "image.$ext" else "image"
+        }
+
+        /**
+         * A FIELD_AUDIO's filename from its mode (LXMF/LXMF.py AM_*): Opus in
+         * OGG (0x10-0x19) "audio.ogg", Codec2 (0x01-0x09) "audio.c2", anything
+         * else "audio.bin". Offered as a file.
+         */
+        fun audioName(mode: Any?): String {
+            val m = when (mode) {
+                is Long -> mode
+                is Int -> mode.toLong()
+                else -> -1L
+            }
+            return when (m) {
+                in 0x10L..0x19L -> "audio.ogg"
+                in 0x01L..0x09L -> "audio.c2"
+                else -> "audio.bin"
+            }
+        }
+
         /**
          * LXMF's custom pair (LXMF/LXMF.py FIELD_CUSTOM_TYPE / FIELD_CUSTOM_DATA):
          * a format identifier and its payload. The distro identity transfer
