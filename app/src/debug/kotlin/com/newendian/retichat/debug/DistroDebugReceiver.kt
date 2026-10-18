@@ -4,6 +4,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.util.Log
+import com.newendian.retichat.IdentityShareFormat
 import com.newendian.retichat.RetichatApp
 import com.newendian.retichat.data.db.entity.ChannelEntity
 import com.newendian.retichat.service.DistroCodec
@@ -28,6 +29,7 @@ import kotlinx.coroutines.launch
  *   ... --es op generate | forget | register | pull | status | restart | wake
  *   ... --es op channel_join | channel_leave | channel_post | channel_open | channel_notify | channel_list
  *       (see the channel ops below)
+ *   ... --es op contact_key | group_create | group_post (see below)
  *
  * Results are logged under the "DistroDebug" tag.
  */
@@ -134,6 +136,46 @@ class DistroDebugReceiver : BroadcastReceiver() {
                 val chatId = repo.getOrCreateDirectChat(dest)
                 repo.sendMessage(chatId, text)
                 Log.i(TAG, "send -> queued '$text' to ${to.take(8)} in $chatId")
+            }
+            // A contact with its key, as from a contact link (`lxma://<hash>:<key>`): a group's invites carry every
+            // member's key, read from the contact rows.
+            //   --es op contact_key --es link lxma://<32 hex>:<128 hex>
+            "contact_key" -> CoroutineScope(Dispatchers.IO).launch {
+                val peer = IdentityShareFormat.parse(intent.getStringExtra("link") ?: "")
+                val hash = peer?.destinationHashHex?.let { DistroCodec.hexToBytes(it) }
+                val key = peer?.publicKeyHex?.let { DistroCodec.hexToBytes(it) }
+                if (hash?.size != 16 || key?.size != 64) {
+                    Log.w(TAG, "contact_key -> REFUSED reason=not lxma://<32 hex>:<128 hex>")
+                    return@launch
+                }
+                (app as RetichatApp).repository.addContact(hash, key)
+                Log.i(TAG, "contact_key -> added ${peer.destinationHashHex.take(8)}")
+            }
+            // Create a group as the New Group screen does (ChatRepository.createGroupChat): its invites go out
+            // at once, each a Group envelope with its own propagated fallback.
+            //   --es op group_create --es name <name> --es members <32 hex>,<32 hex>
+            "group_create" -> CoroutineScope(Dispatchers.IO).launch {
+                val name = intent.getStringExtra("name") ?: "Group"
+                val members = (intent.getStringExtra("members") ?: "").split(",")
+                    .map { DistroCodec.hexToBytes(it.trim().lowercase()) }
+                if (members.isEmpty() || members.any { it == null || it.size != 16 }) {
+                    Log.w(TAG, "group_create -> REFUSED reason=a member address is not 32 hex")
+                    return@launch
+                }
+                val created = (app as RetichatApp).repository.createGroupChat(name, members.filterNotNull())
+                Log.i(TAG, "group_create -> $created name=$name")
+            }
+            // Post into a group chat as the composer does (no spaces in the text: adb passes it through the shell):
+            //   --es op group_post --es chat <group_... chat id> --es text <text>
+            "group_post" -> CoroutineScope(Dispatchers.IO).launch {
+                val chat = intent.getStringExtra("chat") ?: ""
+                val text = OutgoingText.of(intent.getStringExtra("text") ?: "")
+                if (!chat.startsWith("group_") || text.isEmpty()) {
+                    Log.w(TAG, "group_post -> REFUSED chat=$chat reason=not a group chat id, or a blank text")
+                    return@launch
+                }
+                val refused = (app as RetichatApp).repository.sendMessage(chat, text)
+                Log.i(TAG, "group_post -> ${refused ?: "sent"} chat=$chat")
             }
             // Send this phone's distro identity to another device (LXMF field 0x0D):
             //   --es op transfer --es to <32 hex>
