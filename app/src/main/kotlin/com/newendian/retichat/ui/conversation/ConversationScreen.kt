@@ -1185,7 +1185,13 @@ private fun MessageRow(
                     Spacer(Modifier.height(4.dp))
                 }
 
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                // The footer on the sender's side: at the right in a sent
+                // bubble, at the left in a received one, as on iOS and the web
+                // (James, 2026-10-17).
+                Row(
+                    modifier = Modifier.align(alignment),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     Text(
                         text = formatMessageTime(msg.timestamp, zone),
                         style = MaterialTheme.typography.bodySmall,
