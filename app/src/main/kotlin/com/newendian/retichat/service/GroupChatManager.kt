@@ -12,7 +12,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Network-level group chat protocol operations.
@@ -50,20 +49,11 @@ class GroupChatManager(
         const val STATUS        = "status"
     }
 
-    private val trackedHandles = ConcurrentHashMap<String, Long>()
-    private val fallbackStarted = ConcurrentHashMap.newKeySet<Long>()
-
     /**
-     * DIRECT handles whose propagated clone has not been made yet, and those
-     * of them whose send ended meanwhile. The router can report 0x10 and
-     * FAILED in one pass, so the FAILED can arrive before the fallback has
-     * cloned the message; releasing the handle then left nothing to clone and
-     * the member got no copy. Such a handle is released by the fallback once
-     * it has cloned it. Guarded by [cloneLock].
+     * The envelopes' DIRECT sends in flight: when each one's propagated copy
+     * starts (as a DM's does) and when its handle is released.
      */
-    private val cloning = mutableSetOf<Long>()
-    private val releaseAfterClone = mutableSetOf<Long>()
-    private val cloneLock = Any()
+    private val fallbacks = GroupPropagationFallbacks()
 
     // ---- Invite ---------------------------------------------------------
 
@@ -363,28 +353,8 @@ class GroupChatManager(
     }
 
     fun onMessageState(hash: ByteArray, state: Int): Boolean {
-        val hashHex = hash.toHex()
-        val handle = trackedHandles[hashHex] ?: return false
-        if (state == RetichatBridge.MessageState.PROP_FALLBACK_REQUESTED) {
-            if (fallbackStarted.add(handle)) {
-                synchronized(cloneLock) { cloning.add(handle) }
-                scope.launch(Dispatchers.IO) { startPropagationFallback(handle) }
-            }
-            return true
-        }
-        if (state == RetichatBridge.MessageState.SENT ||
-            state == RetichatBridge.MessageState.DELIVERED ||
-            state == RetichatBridge.MessageState.REJECTED ||
-            state == RetichatBridge.MessageState.CANCELLED ||
-            state == RetichatBridge.MessageState.FAILED
-        ) {
-            trackedHandles.remove(hashHex)
-            fallbackStarted.remove(handle)
-            val releaseNow = synchronized(cloneLock) {
-                if (handle in cloning) { releaseAfterClone.add(handle); false } else true
-            }
-            if (releaseNow) RetichatBridge.messageDestroy(handle)
-        }
+        val actions = fallbacks.onState(hash.toHex(), state) ?: return false
+        act(actions)
         return true
     }
 
@@ -393,7 +363,17 @@ class GroupChatManager(
             RetichatBridge.messageDestroy(handle)
             return
         }
-        trackedHandles[hash.toHex()] = handle
+        act(fallbacks.track(hash.toHex(), handle))
+    }
+
+    /**
+     * The router reports 0x10 and FAILED holding its lock and the message's,
+     * so the copy is cloned and sent from IO: a message call made on that
+     * thread would wait on those locks forever (ChatRepository.onMessageState).
+     */
+    private fun act(actions: GroupPropagationFallbacks.Actions) {
+        actions.copyFrom?.let { handle -> scope.launch(Dispatchers.IO) { startPropagationFallback(handle) } }
+        actions.release?.let { handle -> RetichatBridge.messageDestroy(handle) }
     }
 
     private fun startPropagationFallback(directHandle: Long) {
@@ -402,11 +382,7 @@ class GroupChatManager(
         } finally {
             // Cloned (or given up): a send that ended meanwhile left its
             // handle for this to release.
-            val release = synchronized(cloneLock) {
-                cloning.remove(directHandle)
-                releaseAfterClone.remove(directHandle)
-            }
-            if (release) RetichatBridge.messageDestroy(directHandle)
+            if (fallbacks.cloned(directHandle)) RetichatBridge.messageDestroy(directHandle)
         }
     }
 

@@ -6,8 +6,8 @@ import java.io.File
 
 /**
  * GroupChatManager's propagated fallback needs the native library to run, so
- * its ordering rule is checked in the source (as ConnectionStateManagerTest
- * does for its own).
+ * its wiring is checked in the source (as ConnectionStateManagerTest does for
+ * its own); the decisions are GroupPropagationFallbacksTest's.
  */
 class GroupFallbackContractTest {
     private val source = File("src/main/kotlin/com/newendian/retichat/service/GroupChatManager.kt").readText()
@@ -20,16 +20,23 @@ class GroupFallbackContractTest {
     }
 
     @Test
-    fun aSendThatEndsBeforeItsCloneLeavesTheHandleForTheFallback() {
+    fun everyReportAndEverySendGoesThroughTheFallbacks() {
+        assertTrue(body("onMessageState").contains("val actions = fallbacks.onState(hash.toHex(), state) ?: return false"))
+        assertTrue("reports from before the send was followed are replayed",
+            body("track").contains("act(fallbacks.track(hash.toHex(), handle))"))
+        val act = body("act")
+        assertTrue("the copy is cloned off the router's thread",
+            act.contains("scope.launch(Dispatchers.IO) { startPropagationFallback(handle) }"))
+        assertTrue(act.contains("actions.release?.let { handle -> RetichatBridge.messageDestroy(handle) }"))
+    }
+
+    @Test
+    fun aSendThatEndsBeforeItsCloneIsReleasedOnlyAfterTheClone() {
         // 0x10 and FAILED can come in one router pass: releasing the DIRECT
         // handle on FAILED before the fallback cloned it lost the copy.
-        val state = body("onMessageState")
-        assertTrue(state.contains("synchronized(cloneLock) { cloning.add(handle) }"))
-        assertTrue(state.contains("if (handle in cloning) { releaseAfterClone.add(handle); false } else true"))
-        assertTrue(state.contains("if (releaseNow) RetichatBridge.messageDestroy(handle)"))
         val fallback = body("startPropagationFallback")
         val clone = fallback.indexOf("sendPropagatedClone(directHandle)")
-        val release = fallback.indexOf("if (release) RetichatBridge.messageDestroy(directHandle)")
+        val release = fallback.indexOf("if (fallbacks.cloned(directHandle)) RetichatBridge.messageDestroy(directHandle)")
         assertTrue("released only after the clone was made", clone >= 0 && release > clone)
         assertTrue(fallback.contains("} finally {"))
         assertTrue(body("sendPropagatedClone").contains("RetichatBridge.messageClonePropagated(directHandle)"))

@@ -110,7 +110,10 @@ internal class PropagationFallbacks(private val capacity: Int = 256) {
         early.clear()
     }
 
-    /** For tests: whether [hashHex] is still followed. */
+    /**
+     * Whether [hashHex] is still followed: its DIRECT send has not ended.
+     * GroupPropagationFallbacks releases a Group envelope's handle by it.
+     */
     @Synchronized
     internal fun isTracked(hashHex: String): Boolean = hashHex in tracked
 
