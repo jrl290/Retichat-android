@@ -1092,8 +1092,11 @@ class RfedChannelClient(
         // RFed-spec Link.md "/channel/publish — the one behavior change": a
         // request, so rfed's answer, not a link proof, says the post is stored.
         // Until 2026-10-18 the post went as a DATA packet to rfed.channel and
-        // showed as sent before rfed had checked its stamp.
-        val answer = RfedLink.request(app, rfedNode, "/channel/publish", finalPayload)
+        // showed as sent before rfed had checked its stamp. The request's data
+        // is a msgpack value, so the post goes as a bin: bare, its bytes are
+        // read as msgpack and re-encoded (Reticulum-rust link.rs keeps only a
+        // bin's bytes), and rfed gets a changed post.
+        val answer = RfedLink.request(app, rfedNode, "/channel/publish", msgpackBin(finalPayload))
         val refusal = publishRefusal(answer)
         if (refusal != null) {
             Log.w(TAG, "Send failed: rfed answered $refusal")

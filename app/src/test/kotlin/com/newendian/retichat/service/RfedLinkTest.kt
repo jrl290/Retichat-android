@@ -30,6 +30,18 @@ class RfedLinkTest {
     }
 
     @Test
+    fun aPublishSendsItsPayloadAsAMsgpackBin() {
+        // A request's data is a msgpack value: Reticulum-rust hands a bin's
+        // bytes to rfed and re-encodes anything else (link.rs). Until
+        // 2026-10-18 the post went bare, so its bytes were read as msgpack and
+        // rewritten: a channel hash starting 0x9a is a 10-element array, its
+        // 0xd2 (int32) came back as 0xce (uint32), and rfed fanned the post
+        // out to a channel nobody holds (staging, iOS, 2026-10-18 16:11).
+        val send = src("service/RfedChannelClient.kt")
+        assertTrue(send.contains("RfedLink.request(app, rfedNode, \"/channel/publish\", msgpackBin(finalPayload))"))
+    }
+
+    @Test
     fun theLinkIsSetUpBeforeItIsOpenedAndRebindsOnEveryActiveEdge() {
         val link = src("service/RfedLink.kt")
         val ensure = link.substringAfter("suspend fun ensure(").substringBefore("    /**")
