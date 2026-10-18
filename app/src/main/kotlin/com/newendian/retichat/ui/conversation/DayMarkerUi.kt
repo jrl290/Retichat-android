@@ -82,7 +82,7 @@ fun rememberDayMarkerText(): DayMarkerText {
     DisposableEffect(context) {
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) {
-                day = DeviceDay.now()
+                day = DeviceDay.now(DeviceDay.zoneAfter(intent.action, intent.getStringExtra(Intent.EXTRA_TIMEZONE)))
             }
         }
         val filter = IntentFilter().apply {
@@ -110,12 +110,21 @@ fun rememberDayMarkerText(): DayMarkerText {
 }
 
 /** Today and the time zone, as the device has them now. Equal values do not recompose. */
-private data class DeviceDay(val today: LocalDate, val zone: ZoneId) {
+internal data class DeviceDay(val today: LocalDate, val zone: ZoneId) {
     companion object {
-        fun now(): DeviceDay {
-            val zone = ZoneId.systemDefault()
-            return DeviceDay(LocalDate.now(zone), zone)
-        }
+        fun now(zone: ZoneId = ZoneId.systemDefault()): DeviceDay = DeviceDay(LocalDate.now(zone), zone)
+
+        /**
+         * The zone after the broadcast [action]: a time zone change names the
+         * new zone ([Intent.EXTRA_TIMEZONE], [timezoneExtra]), while the
+         * process's default zone is reset by a call of its own that can come
+         * after the broadcast, so until 2026-10-18 the markers could keep the
+         * old zone until the screen came back to the front (L83).
+         */
+        fun zoneAfter(action: String?, timezoneExtra: String?): ZoneId =
+            timezoneExtra?.takeIf { action == Intent.ACTION_TIMEZONE_CHANGED }
+                ?.let { runCatching { ZoneId.of(it) }.getOrNull() }
+                ?: ZoneId.systemDefault()
     }
 }
 
