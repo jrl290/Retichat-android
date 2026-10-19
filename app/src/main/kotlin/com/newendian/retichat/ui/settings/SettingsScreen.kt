@@ -135,14 +135,15 @@ fun SettingsScreen(
                 DefaultTcpCard()
             }
 
+            // AutoInterface: Reticulum devices on the same network (always
+            // shown, second: James, 2026-10-19)
+            item {
+                LocalNetworkCard()
+            }
+
             // Bluetooth to any RTNode in range (always shown)
             item {
                 RTNodeBluetoothCard()
-            }
-
-            // AutoInterface: Reticulum devices on the same network (always shown)
-            item {
-                LocalNetworkCard()
             }
 
             items(interfaces, key = { it.id }) { iface ->

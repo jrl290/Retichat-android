@@ -683,8 +683,6 @@ private fun ChannelConversationContent(
     val canPullMore = canPullMoreMap[channelPullKey] != false
     val isPulling = channelPullKey in pullInFlight
     val lifecycleOwner = LocalLifecycleOwner.current
-    val latestChannel by rememberUpdatedState(channel)
-    val latestIsPulling by rememberUpdatedState(isPulling)
     var lastAutoPullGeneration by remember(channelId) { mutableStateOf<Int?>(null) }
 
     var draft by remember { mutableStateOf("") }
@@ -709,16 +707,26 @@ private fun ChannelConversationContent(
         }
     }
 
-    LaunchedEffect(channel?.id) {
+    // Every return to the foreground runs the screen's entry again, as though
+    // the channel were opened from the chat list (James, 2026-10-19): the
+    // stream is armed, "Load earlier" shows again, and the pull goes as soon
+    // as the rfed link is up, now or at its next ACTIVE edge. Until then a
+    // resume pulled at once, link up or not, and a pull that failed on a link
+    // still coming back waited for the next link.
+    var entries by remember(channelId) { mutableStateOf(0) }
+
+    LaunchedEffect(channel?.id, entries) {
         val ch = channel ?: return@LaunchedEffect
         app.rfedChannelClient.markChannelOpenedForStreaming(ch.id)
         app.rfedChannelClient.resetCanPullMore(ch.id)
     }
 
-    // Auto-pull once per rfed node link establishment while the channel screen
-    // is open. Initial open also flows through this effect because the current
-    // generation is observed immediately when the screen starts collecting it.
-    LaunchedEffect(channel?.id, rfedLinkGeneration) {
+    // Auto-pull once per entry and once per rfed node link establishment while
+    // the channel screen is open. Initial open also flows through this effect
+    // because the current generation is observed immediately when the screen
+    // starts collecting it. The pull runs on the screen's scope, so a key
+    // change (a resume, a new link) never cancels one half-way.
+    LaunchedEffect(channel?.id, rfedLinkGeneration, entries) {
         val ch = channel ?: return@LaunchedEffect
         if (ConnectionStateManager.rfedNodeLinkStatus() != RetichatBridge.AppLinkStatus.ACTIVE) {
             return@LaunchedEffect
@@ -727,21 +735,21 @@ private fun ChannelConversationContent(
         if (lastAutoPullGeneration == generation) return@LaunchedEffect
         if (isPulling) return@LaunchedEffect
         lastAutoPullGeneration = generation
-        runCatching { app.rfedChannelClient.pullDeferred(ch) }
+        scope.launch { runCatching { app.rfedChannelClient.pullDeferred(ch) } }
     }
 
     DisposableEffect(lifecycleOwner, channelId) {
+        // Adding the observer delivers the current state's ON_RESUME at once:
+        // that one is this entry, which the effects above already run.
+        var entered = false
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) {
-                val ch = latestChannel ?: return@LifecycleEventObserver
-                lastAutoPullGeneration = rfedLinkGeneration
-                app.rfedChannelClient.resetCanPullMore(ch.id)
-                if (!latestIsPulling) {
-                    scope.launch {
-                        runCatching { app.rfedChannelClient.pullDeferred(ch) }
-                    }
-                }
+            if (event != Lifecycle.Event.ON_RESUME) return@LifecycleEventObserver
+            if (!entered) {
+                entered = true
+                return@LifecycleEventObserver
             }
+            lastAutoPullGeneration = null
+            entries++
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
