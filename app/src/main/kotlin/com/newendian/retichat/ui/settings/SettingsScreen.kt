@@ -49,6 +49,7 @@ import com.newendian.retichat.data.db.entity.InterfaceConfigEntity
 import com.newendian.retichat.service.ConnectionStateManager
 import com.newendian.retichat.service.DefaultEndpointManager
 import com.newendian.retichat.service.DisplayNameSettings
+import com.newendian.retichat.service.LocalNetwork
 import com.newendian.retichat.service.RTNodeBluetooth
 import com.newendian.retichat.service.RTNodeBluetoothStatus
 import com.newendian.retichat.service.StackRuntime
@@ -137,6 +138,11 @@ fun SettingsScreen(
             // Bluetooth to any RTNode in range (always shown)
             item {
                 RTNodeBluetoothCard()
+            }
+
+            // AutoInterface: Reticulum devices on the same network (always shown)
+            item {
+                LocalNetworkCard()
             }
 
             items(interfaces, key = { it.id }) { iface ->
@@ -858,6 +864,148 @@ private fun RTNodeBluetoothCard() {
                         onClick = { askForPermission() },
                         contentPadding = PaddingValues(0.dp),
                     ) { Text("Allow Bluetooth") }
+                }
+            }
+        }
+    }
+}
+
+// ---- Local network (AutoInterface) card ----
+
+/**
+ * On/off for the built-in AutoInterface (James, 2026-10-19): finds other
+ * Reticulum devices on the same Wi-Fi or Ethernet network and talks to them
+ * directly. Can't be removed, off by default. Turning it on asks for the local
+ * network permission where Android has one (LocalNetwork.needsPermission:
+ * Android 17 with targetSdk 37; below that Android grants it with INTERNET).
+ * Granted (or not needed), the switch turns on and the running stack restarts
+ * with the interface in its config (StackRuntime.applyAutoInterfaceSetting);
+ * off restarts it without. Denied, it stays off and says why, offering
+ * Retichat's system settings when Android won't ask again. The last line is
+ * the live status: how many devices it has found.
+ */
+@Composable
+private fun LocalNetworkCard() {
+    val context = LocalContext.current
+    val app = context.applicationContext as com.newendian.retichat.RetichatApp
+    var enabled by remember { mutableStateOf(UserPreferences.isAutoInterfaceEnabled(context)) }
+    // Saveable: the permission dialog and the system settings are other
+    // activities, and this one can be recreated while they are in front.
+    var refusal by rememberSaveable { mutableStateOf<String?>(null) }
+    var blocked by rememberSaveable { mutableStateOf(false) }
+    var awaitingSystemSettings by rememberSaveable { mutableStateOf(false) }
+    val state by app.serviceState.collectAsState()
+
+    fun setEnabled(on: Boolean) {
+        UserPreferences.setAutoInterfaceEnabled(context, on)
+        enabled = on
+        app.applicationScope.launch { StackRuntime.applyAutoInterfaceSetting(app) }
+    }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            refusal = null
+            blocked = false
+            setEnabled(true)
+            return@rememberLauncherForActivityResult
+        }
+        val rationale = context.findActivity()?.let {
+            ActivityCompat.shouldShowRequestPermissionRationale(it, LocalNetwork.PERMISSION)
+        } ?: false
+        blocked = !rationale
+        refusal = if (rationale) {
+            "Off: Retichat needs the local network permission to find Reticulum " +
+                "devices on this network. Turn this on again to be asked again."
+        } else {
+            "Off: Retichat does not have the local network permission. If Android " +
+                "does not ask for it when you turn this on, allow it in Retichat's system settings."
+        }
+    }
+
+    // Back from the system settings: a grant made there turns it on.
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        if (awaitingSystemSettings && !LocalNetwork.needsPermission(context)) {
+            refusal = null
+            blocked = false
+            if (!enabled) setEnabled(true)
+        }
+        awaitingSystemSettings = false
+    }
+
+    val peers = state.autoInterfacePeers
+    val statusText = refusal ?: when {
+        !enabled -> "Off"
+        LocalNetwork.needsPermission(context) -> "Local network permission not granted"
+        !state.isInitialized -> "Starting…"
+        peers == 0 -> "Looking for Reticulum devices on this network"
+        peers == 1 -> "1 device found on this network"
+        else -> "$peers devices found on this network"
+    }
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (enabled)
+                MaterialTheme.colorScheme.surfaceContainerHigh
+            else
+                MaterialTheme.colorScheme.surfaceContainerLow,
+        ),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Switch(
+                checked = enabled,
+                onCheckedChange = { newValue ->
+                    when {
+                        !newValue -> {
+                            refusal = null
+                            setEnabled(false)
+                        }
+                        !LocalNetwork.needsPermission(context) -> {
+                            refusal = null
+                            setEnabled(true)
+                        }
+                        // Stays off until the request comes back granted.
+                        else -> permissionLauncher.launch(LocalNetwork.PERMISSION)
+                    }
+                },
+            )
+            Spacer(Modifier.width(12.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Local network",
+                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                )
+                Text(
+                    text = "AutoInterface",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Text(
+                    text = statusText,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                )
+                if (blocked) {
+                    TextButton(
+                        onClick = {
+                            awaitingSystemSettings = context.openAppSystemSettings()
+                            if (!awaitingSystemSettings) {
+                                refusal = "Off: Retichat's system settings did not open. Allow " +
+                                    "local network access for Retichat in Android's Settings, under Apps."
+                            }
+                        },
+                        contentPadding = PaddingValues(0.dp),
+                    ) { Text("Open settings") }
                 }
             }
         }

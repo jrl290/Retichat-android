@@ -28,6 +28,7 @@ object UserPreferences {
     const val PREF_KEY_ANNOUNCE_DISPLAY_NAME = "announce_display_name"
     const val PREF_KEY_DEFAULT_TCP = "default_tcp_enabled"
     const val PREF_KEY_RTNODE_BLUETOOTH = "rtnode_bluetooth_enabled"
+    const val PREF_KEY_AUTO_INTERFACE = "auto_interface_enabled"
     const val PREF_KEY_DROP_ANNOUNCES = "drop_announces"
 
     // ── New keys (iOS parity) ──────────────────────────────────────────
@@ -133,6 +134,22 @@ object UserPreferences {
 
     fun setRtnodeBluetoothEnabled(context: Context, enabled: Boolean) {
         prefs(context).edit().putBoolean(PREF_KEY_RTNODE_BLUETOOTH, enabled).apply()
+    }
+
+    /**
+     * When true, the stack runs an AutoInterface: it finds other Reticulum
+     * devices on the same Wi-Fi or Ethernet network by IPv6 multicast and
+     * talks to them directly, with no server (James, 2026-10-19). A built-in
+     * interface that can't be removed, off by default. Settings writes true
+     * only once the local network permission is granted (where Android asks
+     * for one, LocalNetwork.needsPermission) and restarts the stack, which
+     * writes it into the config (StackRuntime.applyAutoInterfaceSetting).
+     */
+    fun isAutoInterfaceEnabled(context: Context): Boolean =
+        prefs(context).getBoolean(PREF_KEY_AUTO_INTERFACE, false)
+
+    fun setAutoInterfaceEnabled(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(PREF_KEY_AUTO_INTERFACE, enabled).apply()
     }
 
     fun setDefaultTcpEnabled(context: Context, enabled: Boolean) {

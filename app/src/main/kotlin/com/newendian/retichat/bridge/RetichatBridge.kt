@@ -132,12 +132,13 @@ interface PropagationLinkCallback {
 /**
  * How many Reticulum interfaces are online: [RetichatBridge.onlineInterfaceCountRegister].
  * Told once at the register and again at every interface up- and down-edge;
- * an AutoInterface's peers are not counted. Fires on a Rust thread (or the
+ * an AutoInterface's peers are not counted in [count] but told apart as
+ * [autoPeers] (the Local network card). Fires on a Rust thread (or the
  * caller's, for the first) and must not block.
  */
 @Keep
 fun interface OnlineInterfaceCountCallback {
-    fun onOnlineInterfaceCount(count: Int)
+    fun onOnlineInterfaceCount(count: Int, autoPeers: Int)
 }
 
 /**

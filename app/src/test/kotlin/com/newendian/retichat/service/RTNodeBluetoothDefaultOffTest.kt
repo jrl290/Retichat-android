@@ -16,7 +16,7 @@ import org.junit.Test
 class RTNodeBluetoothDefaultOffTest {
 
     /** SharedPreferences in a map, as a fresh install has them: empty. */
-    private class MemoryPrefs : SharedPreferences {
+    internal class MemoryPrefs : SharedPreferences {
         val values = HashMap<String, Any?>()
 
         override fun getAll(): MutableMap<String, *> = HashMap(values)
@@ -58,7 +58,7 @@ class RTNodeBluetoothDefaultOffTest {
     }
 
     /** A Context whose only use is handing out [prefs]. */
-    private class PrefsContext(private val prefs: SharedPreferences) : ContextWrapper(null) {
+    internal class PrefsContext(private val prefs: SharedPreferences) : ContextWrapper(null) {
         val names = mutableListOf<String?>()
         override fun getSharedPreferences(name: String?, mode: Int): SharedPreferences {
             names += name

@@ -5,15 +5,21 @@ import org.json.JSONObject
 import java.io.File
 
 /**
- * Generate a Reticulum config file from the enabled Room interface entities.
+ * Generate a Reticulum config file from the enabled Room interface entities,
+ * plus the built-in AutoInterface when [autoInterface] is on (Settings' Local
+ * network switch, UserPreferences.isAutoInterfaceEnabled).
  *
  * Lifted out of the now-deleted `ReticulumService` so [StackRuntime] (and
  * any future debug tooling) can render the config without owning a Service
  * instance.
  */
+/** The config section name of the built-in AutoInterface. */
+internal const val AUTO_INTERFACE_NAME = "Local network"
+
 internal fun writeReticulumConfig(
     configDir: File,
     interfaces: List<InterfaceConfigEntity>,
+    autoInterface: Boolean = false,
 ) {
     val sb = StringBuilder()
 
@@ -46,6 +52,17 @@ internal fun writeReticulumConfig(
         } catch (_: Exception) {
             // skip malformed configJson
         }
+        sb.appendLine()
+    }
+
+    if (autoInterface) {
+        // Reticulum's defaults (group "reticulum", link-local scope, ports
+        // 29716/42671), so it finds Sideband, MeshChat, rnsd and the other
+        // apps on the network. Transport names it AutoInterface[$AUTO_INTERFACE_NAME]
+        // and each device found AutoInterfacePeer[if/addr].
+        sb.appendLine("  [[$AUTO_INTERFACE_NAME]]")
+        sb.appendLine("    type = AutoInterface")
+        sb.appendLine("    enabled = true")
         sb.appendLine()
     }
 

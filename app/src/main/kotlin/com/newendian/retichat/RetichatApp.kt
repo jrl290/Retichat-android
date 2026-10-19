@@ -37,6 +37,8 @@ data class ServiceState(
     val identityHashHex: String = "",
     val interfaceCount: Int = 0,
     val error: String? = null,
+    /** Other Reticulum devices the AutoInterface found on the local network. */
+    val autoInterfacePeers: Int = 0,
 )
 
 class RetichatApp : Application() {
@@ -229,8 +231,8 @@ class RetichatApp : Application() {
         _serviceState.value = ServiceState(isInitialized, identityHashHex, interfaceCount, error)
     }
 
-    /** The interfaces online now (RetichatBridge.onlineInterfaceCountRegister), the rest kept. */
-    fun updateInterfaceCount(count: Int) {
-        _serviceState.update { it.copy(interfaceCount = count) }
+    /** The interfaces and AutoInterface peers online now (RetichatBridge.onlineInterfaceCountRegister), the rest kept. */
+    fun updateInterfaceCount(count: Int, autoPeers: Int) {
+        _serviceState.update { it.copy(interfaceCount = count, autoInterfacePeers = autoPeers) }
     }
 }

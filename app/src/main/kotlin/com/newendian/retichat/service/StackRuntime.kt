@@ -232,7 +232,13 @@ object StackRuntime {
             )
             interfaces = DefaultEndpointManager.fallbackInterfaceConfigs(endpoints)
         }
-        writeReticulumConfig(configDir, interfaces)
+        // The built-in AutoInterface (Settings' Local network switch, off by
+        // default). Wi-Fi passes it the multicast it finds peers by only
+        // while the lock is held, so the lock is taken before the stack
+        // starts and kept until it stops.
+        val autoInterface = UserPreferences.isAutoInterfaceEnabled(app)
+        if (autoInterface) LocalNetwork.acquire(app)
+        writeReticulumConfig(configDir, interfaces, autoInterface)
 
         if (!RetichatBridge.init(configDir.absolutePath)) {
             val err = RetichatBridge.lastError() ?: "unknown"
@@ -241,6 +247,7 @@ object StackRuntime {
             } else {
                 app.updateServiceState(error = "Init failed: $err")
                 Log.e(TAG, "Init failed: $err")
+                LocalNetwork.release()
                 return false
             }
         }
@@ -422,7 +429,7 @@ object StackRuntime {
         // up- and down-edge (L83, 2026-10-18). It was the enabled rows counted
         // here once, so it said 0 with RTNode Bluetooth up and kept a dropped
         // backbone.
-        if (!RetichatBridge.onlineInterfaceCountRegister { app.updateInterfaceCount(it) }) {
+        if (!RetichatBridge.onlineInterfaceCountRegister { count, peers -> app.updateInterfaceCount(count, peers) }) {
             Log.e(TAG, "onlineInterfaceCountRegister failed: ${RetichatBridge.lastError()}")
         }
 
@@ -502,6 +509,7 @@ object StackRuntime {
         destHandle = 0L
         selfDestHash = ByteArray(0)
         runCatching { RetichatBridge.shutdown() }
+        LocalNetwork.release()
         app.updateServiceState()
     }
 
@@ -520,6 +528,24 @@ object StackRuntime {
         val app = context.applicationContext as RetichatApp
         initLock.withLock { shutdownNow(app) }
         return startIfNeeded(app)
+    }
+
+    /**
+     * Settings' Local network switch changed. The AutoInterface is an entry in
+     * the config the stack reads at start, so a running stack is restarted to
+     * add or drop it, as Settings' Restart does; a stack not up yet reads the
+     * preference at its bootstrap. The preference is read by that bootstrap,
+     * under initLock, so quick on/off taps end in the last tap's state.
+     */
+    suspend fun applyAutoInterfaceSetting(context: Context) {
+        val app = context.applicationContext as RetichatApp
+        withContext(Dispatchers.IO) {
+            if (initLock.withLock { isReady }) {
+                restart(app)
+            } else {
+                Log.i(TAG, "Local network switch changed; the stack is not up: its next bootstrap reads it")
+            }
+        }
     }
 
     /**

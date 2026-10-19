@@ -11,6 +11,12 @@
         android:name="android.permission.BLUETOOTH_SCAN"
         android:usesPermissionFlags="neverForLocation" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <!-- The built-in AutoInterface (service/LocalNetwork.kt): Wi-Fi delivers the
+         multicast it finds peers by only while the app holds a multicast lock,
+         and from targetSdk 37 on Android 17 the local network is a runtime
+         permission, asked for when Settings' Local network switch is turned on. -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
     <uses-feature
         android:name="android.hardware.bluetooth_le"
         android:required="false" />

@@ -12,7 +12,8 @@ use std::sync::{Arc, Mutex, Once};
 
 use reticulum_rust::transport::Transport;
 
-type Sink = Arc<dyn Fn(usize) + Send + Sync>;
+/// Told (interfaces counted, AutoInterface peers online).
+type Sink = Arc<dyn Fn(usize, usize) + Send + Sync>;
 
 /// The sink, and the lock each read-and-tell holds.
 static SINK: Mutex<Option<Sink>> = Mutex::new(None);
@@ -25,11 +26,18 @@ pub fn counted(online: &[String]) -> usize {
     online.iter().filter(|name| !name.starts_with("AutoInterfacePeer[")).count()
 }
 
+/// The AutoInterface's peers online: other Reticulum devices it found on the
+/// local network (Settings' "Local network" card, 2026-10-19).
+pub fn auto_peers(online: &[String]) -> usize {
+    online.iter().filter(|name| name.starts_with("AutoInterfacePeer[")).count()
+}
+
 /// Read the count and hand it to the sink, if there is one, under its lock.
 fn tell() {
     if let Ok(slot) = SINK.lock() {
         if let Some(sink) = slot.as_ref() {
-            sink(counted(&Transport::online_interface_names()));
+            let online = Transport::online_interface_names();
+            sink(counted(&online), auto_peers(&online));
         }
     }
 }
@@ -59,7 +67,7 @@ pub fn clear() {
 
 #[cfg(test)]
 mod tests {
-    use super::counted;
+    use super::{auto_peers, counted};
 
     #[test]
     fn an_auto_interfaces_peers_are_not_counted_as_interfaces() {
@@ -76,5 +84,8 @@ mod tests {
         // The backbone, the AutoInterface and the RTNode Bluetooth link.
         assert_eq!(counted(&online), 3);
         assert_eq!(counted(&[]), 0);
+        // The two peers the AutoInterface found.
+        assert_eq!(auto_peers(&online), 2);
+        assert_eq!(auto_peers(&[]), 0);
     }
 }

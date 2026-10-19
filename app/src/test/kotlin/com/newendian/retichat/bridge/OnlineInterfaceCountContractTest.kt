@@ -26,15 +26,15 @@ class OnlineInterfaceCountContractTest {
         for (name in listOf("nativeOnlineInterfaceCountRegister", "nativeOnlineInterfaceCountUnregister")) {
             assertTrue(name, rust.contains("fn Java_com_newendian_retichat_bridge_RetichatBridge_$name("))
         }
-        assertTrue(bridge.contains("fun onOnlineInterfaceCount(count: Int)"))
-        assertTrue(rust.contains("\"onOnlineInterfaceCount\", \"(I)V\""))
+        assertTrue(bridge.contains("fun onOnlineInterfaceCount(count: Int, autoPeers: Int)"))
+        assertTrue(rust.contains("\"onOnlineInterfaceCount\", \"(II)V\""))
     }
 
     @Test
     fun theStackShowsTheOnlineCountFromStartToStop() {
         assertFalse("the enabled rows are not the count", stack.contains("interfaceCount = interfaces.size"))
         val ready = stack.indexOf("identityHashHex = hashHex,")
-        val register = stack.indexOf("RetichatBridge.onlineInterfaceCountRegister { app.updateInterfaceCount(it) }")
+        val register = stack.indexOf("RetichatBridge.onlineInterfaceCountRegister { count, peers -> app.updateInterfaceCount(count, peers) }")
         assertTrue("registered after the state that would overwrite the count", ready in 0 until register)
         val stop = stack.substring(stack.indexOf("private fun shutdownNow("))
         val unregister = stop.indexOf("RetichatBridge.onlineInterfaceCountUnregister()")

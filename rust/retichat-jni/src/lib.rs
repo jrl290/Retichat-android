@@ -3313,9 +3313,10 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeI
 
 /// `RetichatBridge.nativeOnlineInterfaceCountRegister(callback: OnlineInterfaceCountCallback): Int`
 ///
-/// Tell `callback.onOnlineInterfaceCount(count)` how many interfaces are online:
-/// once now, and again at every up- and down-edge (interface_count.rs). Settings
-/// shows it (L83). One callback at a time; a later register replaces it.
+/// Tell `callback.onOnlineInterfaceCount(count, autoPeers)` how many interfaces
+/// are online and how many AutoInterface peers: once now, and again at every up-
+/// and down-edge (interface_count.rs). Settings shows both (L83; the Local
+/// network card). One callback at a time; a later register replaces it.
 #[no_mangle]
 pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeOnlineInterfaceCountRegister(
     env: JNIEnv,
@@ -3330,15 +3331,18 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeO
         Ok(r) => r,
         Err(e) => { rns::set_error(format!("Failed to create global ref: {e}")); return -1; }
     };
-    interface_count::set(Arc::new(move |count: usize| {
+    interface_count::set(Arc::new(move |count: usize, auto_peers: usize| {
         let mut env = match jvm.attach_current_thread() {
             Ok(env) => env,
             Err(_) => return,
         };
         let _ = env.call_method(
             callback.as_obj(),
-            "onOnlineInterfaceCount", "(I)V",
-            &[JValue::Int(count.min(i32::MAX as usize) as i32)],
+            "onOnlineInterfaceCount", "(II)V",
+            &[
+                JValue::Int(count.min(i32::MAX as usize) as i32),
+                JValue::Int(auto_peers.min(i32::MAX as usize) as i32),
+            ],
         );
         if env.exception_check().unwrap_or(false) {
             let _ = env.exception_describe();
