@@ -9,6 +9,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.Person
 import com.newendian.retichat.MainActivity
+import com.newendian.retichat.RetichatApp
 import com.newendian.retichat.R
 
 /**
@@ -68,6 +69,12 @@ object MessageNotificationHelper {
      * nothing and stacks nothing, as on iOS. Every message, Group post, Group
      * invite, reaction and channel post comes through here, so this is the one
      * check. Until 2026-10-17 nothing read the switch and a muted chat notified.
+     *
+     * Nor does the chat on screen ([chatOnScreen]): its conversation open and
+     * the app in the foreground. Until 2026-10-19 the open-chat check sat in
+     * each DM and Group caller and ignored the foreground (an open DM behind
+     * the home screen stayed silent), and a channel never marked itself open,
+     * so its own posts notified over it (James, 2026-10-19).
      */
     fun notify(
         context: Context,
@@ -78,6 +85,10 @@ object MessageNotificationHelper {
     ) {
         if (UserPreferences.isChatMuted(context, chatId)) {
             Log.i(TAG, "notify: chat $chatId is muted — skipping")
+            return
+        }
+        if (chatOnScreen(RetichatApp.isInForeground, RetichatApp.activeChatId, chatId)) {
+            Log.i(TAG, "notify: chat $chatId is on screen — skipping")
             return
         }
         Log.i(TAG, "notify: sender=$senderName, content='${content.take(30)}', chatId=$chatId")
@@ -173,6 +184,15 @@ object MessageNotificationHelper {
         nm.cancelAll()
     }
 }
+
+/**
+ * Whether [chatId] is on screen: it is the conversation open in the app
+ * ([openChatId], [RetichatApp.activeChatId]) and the app is in the
+ * [foreground]. Ids compare without case: a channel's is its hash in hex.
+ * Pure, so the rule is unit-tested.
+ */
+fun chatOnScreen(foreground: Boolean, openChatId: String?, chatId: String): Boolean =
+    foreground && openChatId != null && openChatId.equals(chatId, ignoreCase = true)
 
 /**
  * The messages a chat's notification stacks, each with its own sender

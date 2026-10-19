@@ -7,7 +7,6 @@ import com.newendian.retichat.GroupMemberStatuses
 import com.newendian.retichat.MemberStatus
 import com.newendian.retichat.PhotoLocationNotRemoved
 import com.newendian.retichat.PhotoMetadata
-import com.newendian.retichat.RetichatApp
 import com.newendian.retichat.bridge.GroupEntry
 import com.newendian.retichat.bridge.JniGroupNative
 import com.newendian.retichat.bridge.LxmfFields
@@ -833,7 +832,7 @@ class ChatRepository(
      * here. [conversationTitle] names a Group.
      */
     private suspend fun notifyReaction(target: MessageEntity, reactor: String, emoji: String, chatId: String, conversationTitle: String? = null) {
-        if (emoji.isEmpty() || !target.isOutbound || RetichatApp.activeChatId == chatId) return
+        if (emoji.isEmpty() || !target.isOutbound) return
         MessageNotificationHelper.notify(
             appContext, resolvedName(reactor), Reactions.notificationText(emoji, target.content), chatId,
             conversationTitle = conversationTitle,
@@ -2890,14 +2889,12 @@ class ChatRepository(
                         }
                         saveInboundAttachments(msgId, fields)
 
-                        if (RetichatApp.activeChatId != chat.id) {
-                            val notifText = if (content.isNotBlank()) content
-                                            else "📎 ${attachments.size} attachment(s)"
-                            MessageNotificationHelper.notify(
-                                appContext, resolvedName(author), notifText, chat.id,
-                                conversationTitle = chat.name,
-                            )
-                        }
+                        val notifText = if (content.isNotBlank()) content
+                                        else "📎 ${attachments.size} attachment(s)"
+                        MessageNotificationHelper.notify(
+                            appContext, resolvedName(author), notifText, chat.id,
+                            conversationTitle = chat.name,
+                        )
                     }
                 }
                 post.kept
@@ -3059,14 +3056,12 @@ class ChatRepository(
                 systemKind = SystemText.MEMBER,
             )
         )
-        if (RetichatApp.activeChatId != chatId) {
-            MessageNotificationHelper.notify(
-                appContext,
-                "Group invite",
-                "${resolvedName(srcHex)} invited you to \"$name\"",
-                chatId,
-            )
-        }
+        MessageNotificationHelper.notify(
+            appContext,
+            "Group invite",
+            "${resolvedName(srcHex)} invited you to \"$name\"",
+            chatId,
+        )
         return true
     }
 
@@ -3247,12 +3242,10 @@ class ChatRepository(
         // Save file attachments to disk + DB
         saveInboundAttachments(msgId, fields)
 
-        // Show notification unless the user is viewing this chat
-        if (RetichatApp.activeChatId != chatId) {
-            val senderName = resolvedName(srcHex)
-            Log.i(TAG, "Posting notification: sender=$senderName")
-            MessageNotificationHelper.notify(appContext, senderName, content, chatId)
-        }
+        // Show a notification (none while this chat is on screen: the helper's check)
+        val senderName = resolvedName(srcHex)
+        Log.i(TAG, "Posting notification: sender=$senderName")
+        MessageNotificationHelper.notify(appContext, senderName, content, chatId)
     }
 
     /** Leave a group: the user's leave to its members, and for good ([quitGroup]). */

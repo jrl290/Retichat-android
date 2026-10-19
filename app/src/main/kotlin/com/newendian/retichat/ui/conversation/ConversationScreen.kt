@@ -156,7 +156,7 @@ private fun DmConversationContent(
         // groups (handled inside the VM).
         viewModel?.onConversationVisible()
         onDispose {
-            RetichatApp.activeChatId = null
+            if (RetichatApp.activeChatId == chatId) RetichatApp.activeChatId = null
             viewModel?.onConversationHidden()
         }
     }
@@ -689,6 +689,13 @@ private fun ChannelConversationContent(
     var showInfo by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
     val dayMarkers = rememberDayMarkerText()
+
+    // The channel open here is the chat on screen, as an open DM is: its posts
+    // notify nothing while the app is in the foreground (MessageNotificationHelper.notify).
+    DisposableEffect(channelId) {
+        RetichatApp.activeChatId = channelId
+        onDispose { if (RetichatApp.activeChatId == channelId) RetichatApp.activeChatId = null }
+    }
 
     // A sibling device's leave (RFed SPEC §17.12 rule 6) removes the channel while it is
     // open here: the screen closes, as the web closes it, and asks nothing. The user's

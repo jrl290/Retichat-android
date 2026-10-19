@@ -101,7 +101,9 @@ class ReactionsWiringTest {
         val notify = body("private suspend fun notifyReaction(")
         inOrder(
             notify,
-            "if (emoji.isEmpty() || !target.isOutbound || RetichatApp.activeChatId == chatId) return",
+            // Outside the chat on screen: MessageNotificationHelper.notify's check
+            // since 2026-10-19 (ChatOnScreenNotificationTest).
+            "if (emoji.isEmpty() || !target.isOutbound) return",
             "MessageNotificationHelper.notify(",
             "resolvedName(reactor), Reactions.notificationText(emoji, target.content), chatId,",
             "conversationTitle = conversationTitle,",
