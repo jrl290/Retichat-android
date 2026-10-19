@@ -132,12 +132,14 @@ class PullPageTest {
             assertTrue("$path: $decl has no handler", line.contains("logEscapedExceptions(TAG)"))
         }
         // rfed.link's ACTIVE edge: both stream opens (and the pull after the
-        // propagation one), each guarded, a cancellation passed on.
+        // propagation one) and the channel pull, each guarded, a cancellation
+        // passed on.
         val bind = between(src("service/RfedLink.kt"), "private suspend fun bind(", "    /**")
         assertTrue(bind.contains("PropagationStream.onLinkActive(app, node)"))
         assertTrue(bind.contains("sendChannelStreamConfigForNode(node)"))
-        assertEquals(2, Regex("""catch \(e: CancellationException\) \{\s*throw e""").findAll(bind).count())
-        assertEquals(2, Regex("""catch \(e: Exception\) \{""").findAll(bind).count())
+        assertTrue(bind.contains("pullDeferredForNode(node)"))
+        assertEquals(3, Regex("""catch \(e: CancellationException\) \{\s*throw e""").findAll(bind).count())
+        assertEquals(3, Regex("""catch \(e: Exception\) \{""").findAll(bind).count())
         assertTrue(src("service/PropagationStream.kt").contains("suspend fun onLinkActive(app: RetichatApp, nodeHex: String) {\n        val current = session ?: return\n        if (current.nodeHex != nodeHex.lowercase()) return\n        sendOpen(app, current)"))
     }
 }

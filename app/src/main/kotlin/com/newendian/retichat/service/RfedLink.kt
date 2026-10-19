@@ -73,11 +73,8 @@ object RfedLink {
         val dest = destHash(node) ?: return null
         val identityHandle = StackRuntime.identityHandle
         if (identityHandle == 0L) return null
-        val fresh = synchronized(setUp) {
-            if (setUp[node] == identityHandle) false else { setUp[node] = identityHandle; true }
-        }
-        if (fresh) {
-            val ok = RetichatBridge.appLinkSetOutboundSetup(
+        val setup = setUpOnce(setUp, node, identityHandle) {
+            RetichatBridge.appLinkSetOutboundSetup(
                 identityHandle,
                 dest,
                 listOf(PUSH_DELIVERY, PUSH_LXMF, PUSH_NOTIFY),
@@ -85,11 +82,17 @@ object RfedLink {
                     override fun onRequest(path: String, data: ByteArray): Boolean = onPush(app, path, data)
                 },
             )
-            if (!ok) {
-                Log.w(TAG, "rfed.link setup refused for ${node.take(8)}: ${RetichatBridge.lastError()}")
-                synchronized(setUp) { setUp.remove(node) }
-                return null
-            }
+        }
+        if (setup is Setup.Failed) {
+            // Opened without its setup, the link would not identify (rfed
+            // refuses the pulls) and would have no /delivery handler (rfed
+            // cannot push on it): it is not opened, and the next request tries
+            // the setup again.
+            val why = setup.error?.toString() ?: RetichatBridge.lastError()
+            Log.e(TAG, "rfed.link setup failed for ${node.take(8)}, link not opened: $why", setup.error)
+            return null
+        }
+        if (setup == Setup.Fresh) {
             ConnectionStateManager.setAppLinkStatusHandler(dest) { status ->
                 val listeners = synchronized(statusListeners) { statusListeners[node]?.values?.toList().orEmpty() }
                 listeners.forEach { runCatching { it(status) } }
@@ -101,6 +104,40 @@ object RfedLink {
             ConnectionStateManager.primeAppLink(dest, "rfed", "link")
         }
         return dest
+    }
+
+    /** What [setUpOnce] did. */
+    internal sealed interface Setup {
+        /** Set up before, with this identity. */
+        data object Held : Setup
+
+        /** Set up now. */
+        data object Fresh : Setup
+
+        /** Refused ([error] null) or threw: not marked, so the next try runs [setUpOnce]'s setup again. */
+        data class Failed(val error: Throwable?) : Setup
+    }
+
+    /**
+     * Run [setup] for [node] once per [identityHandle], marked in [marks]
+     * first so a concurrent ensure does not run it twice. A false return or
+     * a throw undoes the mark: on 10-19 a stale native library threw
+     * UnsatisfiedLinkError, the node stayed marked, and every later ensure
+     * opened the link without its setup.
+     */
+    internal fun setUpOnce(marks: MutableMap<String, Long>, node: String, identityHandle: Long, setup: () -> Boolean): Setup {
+        val fresh = synchronized(marks) {
+            if (marks[node] == identityHandle) false else { marks[node] = identityHandle; true }
+        }
+        if (!fresh) return Setup.Held
+        val error = try {
+            if (setup()) return Setup.Fresh
+            null
+        } catch (e: Throwable) {
+            e
+        }
+        synchronized(marks) { if (marks[node] == identityHandle) marks.remove(node) }
+        return Setup.Failed(error)
     }
 
     /**
@@ -133,6 +170,16 @@ object RfedLink {
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "propagation stream open on rfed.link failed", e)
+        }
+        // What the node deferred while the link was down, collected now
+        // instead of on a wake or rfed's re-send (~30 min late on 10-19).
+        // Last: a page can take the request's 5 s.
+        try {
+            app.rfedChannelClient.pullDeferredForNode(node)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "channel pull on rfed.link ACTIVE failed", e)
         }
     }
 
