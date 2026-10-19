@@ -22,6 +22,8 @@ object MessageNotificationHelper {
     private const val GROUP_KEY = "com.newendian.retichat.MESSAGES"
     private const val SUMMARY_NOTIF_ID = 0
     const val EXTRA_CHAT_ID = "extra_chat_id"
+    /** True when [EXTRA_CHAT_ID] is a channel's: its tap opens the channel screen (Routes.forNotification). */
+    const val EXTRA_CHANNEL = "extra_channel"
     private const val TAG = "MsgNotifHelper"
 
     /**
@@ -63,7 +65,8 @@ object MessageNotificationHelper {
      * using MessagingStyle, and a summary groups all chats together.
      *
      * [senderName] is the resolved name of this message's sender (NameBook).
-     * [conversationTitle] names a group or channel; a DM has none.
+     * [conversationTitle] names a group or channel; a DM has none. [channel]
+     * says [chatId] is a channel's, so a tap opens the channel's screen.
      *
      * A chat muted in its info sheet ([UserPreferences.isChatMuted]) posts
      * nothing and stacks nothing, as on iOS. Every message, Group post, Group
@@ -82,6 +85,7 @@ object MessageNotificationHelper {
         content: String,
         chatId: String,
         conversationTitle: String? = null,
+        channel: Boolean = false,
     ) {
         if (UserPreferences.isChatMuted(context, chatId)) {
             Log.i(TAG, "notify: chat $chatId is muted — skipping")
@@ -118,6 +122,7 @@ object MessageNotificationHelper {
         val launchIntent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
             putExtra(EXTRA_CHAT_ID, chatId)
+            putExtra(EXTRA_CHANNEL, channel)
         }
         val pendingIntent = PendingIntent.getActivity(
             context, notifId, launchIntent,

@@ -1398,6 +1398,7 @@ class RfedChannelClient(
                     content = content,
                     chatId = channelHashHex,
                     conversationTitle = "#${channel.channelName}",
+                    channel = true,
                 )
             }
             true

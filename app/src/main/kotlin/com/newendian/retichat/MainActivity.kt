@@ -75,10 +75,12 @@ class MainActivity : ComponentActivity() {
         // Handle notification tap
         val chatId = intent?.getStringExtra(MessageNotificationHelper.EXTRA_CHAT_ID)
         if (!chatId.isNullOrBlank()) {
-            Log.i(TAG, "Navigating to chatId=$chatId from notification")
+            val channel = intent.getBooleanExtra(MessageNotificationHelper.EXTRA_CHANNEL, false)
+            Log.i(TAG, "Navigating to ${if (channel) "channel" else "chatId"}=$chatId from notification")
             MessageNotificationHelper.clearChat(chatId)
-            navigateToChat(chatId)
-            intent?.removeExtra(MessageNotificationHelper.EXTRA_CHAT_ID)
+            navigateToChat(chatId, channel)
+            intent.removeExtra(MessageNotificationHelper.EXTRA_CHAT_ID)
+            intent.removeExtra(MessageNotificationHelper.EXTRA_CHANNEL)
             return
         }
 
@@ -98,14 +100,14 @@ class MainActivity : ComponentActivity() {
                 // Adds the peer as a contact without touching a known one's
                 // names or key.
                 val destChatId = app.repository.getOrCreateDirectChat(destBytes)
-                navigateToChat(destChatId)
+                navigateToChat(destChatId, channel = false)
             }
         }
     }
 
-    private fun navigateToChat(chatId: String) {
+    private fun navigateToChat(chatId: String, channel: Boolean) {
         window.decorView.post {
-            navController?.navigate(Routes.conversation(chatId)) {
+            navController?.navigate(Routes.forNotification(chatId, channel)) {
                 popUpTo(Routes.CHAT_LIST) { inclusive = false }
                 launchSingleTop = true
             }

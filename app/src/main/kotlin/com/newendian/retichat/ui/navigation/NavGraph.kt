@@ -48,6 +48,13 @@ object Routes {
 
     fun conversation(chatId: String) = "conversation/$chatId"
     fun channel(channelId: String) = "channel/$channelId"
+
+    /**
+     * The screen a tapped notification opens: a channel's own, or the DM's or
+     * Group's. Until 2026-10-19 every tap opened [conversation], and a channel
+     * post's opened a blank chat with no title (James, 2026-10-19).
+     */
+    fun forNotification(chatId: String, channel: Boolean) = if (channel) channel(chatId) else conversation(chatId)
 }
 
 /**
