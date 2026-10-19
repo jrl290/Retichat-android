@@ -97,7 +97,7 @@ class RfedLinkTest {
         // rfed answers an error as a msgpack integer (RFed-rust
         // destinations.rs channel.pull, lxmf_propagation::encode_error): 0xF0
         // is uint8 0xcc 0xf0. Until 10-19 it was logged as "malformed response (2 bytes)".
-        fun refusal(vararg b: Int) = RfedChannelClient.pullRefusal(ByteArray(b.size) { b[it].toByte() })
+        fun refusal(vararg b: Int) = RfedLink.pullRefusal(ByteArray(b.size) { b[it].toByte() })
         assertEquals("link not identified (0xF0)", refusal(0xcc, 0xf0))
         assertEquals("no access (0xF1)", refusal(0xcc, 0xf1))
         assertEquals("invalid key (0xF3)", refusal(0xcc, 0xf3))
@@ -114,9 +114,20 @@ class RfedLinkTest {
         assertNull(refusal())
 
         val pull = src("service/RfedChannelClient.kt").substringAfter("suspend fun pullDeferred(").substringBefore("    // ──")
-        val named = pull.indexOf("pullRefusal(resp)")
+        val named = pull.indexOf("RfedLink.pullRefusal(resp)")
         assertTrue(named >= 0 && named < pull.indexOf("decodePullResponse(resp)"))
         assertTrue(pull.contains("\"PULL: rfed refused the pull: \$refusal\""))
+    }
+
+    @Test
+    fun aDistroPullRefusalIsNamed() {
+        // /distro/pull answers an unidentified link the same way (RFed-rust
+        // destinations.rs delivery pull): until 10-19 the pull ended on
+        // "malformed response (2 bytes)".
+        val pull = src("service/RfedDistroClient.kt").substringAfter("suspend fun pullOutcome(").substringBefore("    /**")
+        val named = pull.indexOf("RfedLink.pullRefusal(resp)")
+        assertTrue(named >= 0 && named < pull.indexOf("DistroCodec.decodePullResponse(resp)"))
+        assertTrue(pull.contains("\"rfed refused the pull: \$refusal\""))
     }
 
     @Test

@@ -148,32 +148,6 @@ class RfedChannelClient(
         internal fun channelsOnNode(channels: List<ChannelEntity>, nodeIdentityHashHex: String): List<ChannelEntity> =
             channelsForWakePull(channels.filter { it.rfedNodeIdentityHashHex.equals(nodeIdentityHashHex, ignoreCase = true) })
 
-        /**
-         * rfed's refusal of a `/channel/pull`, named: an error is a msgpack
-         * integer (RFed-rust lxmf_propagation::encode_error), 0xF0 as uint8
-         * `cc f0`, with the LXMF reference codes (LXMF/LXMPeer.py). Null for
-         * anything else, a page among them.
-         */
-        internal fun pullRefusal(resp: ByteArray): String? {
-            val code = when {
-                resp.size == 2 && resp[0] == 0xcc.toByte() -> resp[1].toInt() and 0xff
-                resp.size == 1 && resp[0] >= 0 -> resp[0].toInt()
-                else -> return null
-            }
-            val name = when (code) {
-                0xf0 -> "link not identified"
-                0xf1 -> "no access"
-                0xf3 -> "invalid key"
-                0xf4 -> "invalid request data"
-                0xf5 -> "invalid stamp"
-                0xf6 -> "throttled"
-                0xfd -> "not found"
-                0xfe -> "timed out"
-                else -> "an unknown error"
-            }
-            return "$name (0x%02X)".format(code)
-        }
-
         /** Pages one ACTIVE edge pulls per channel at most ([pullDeferredForNode]). */
         private const val ACTIVE_EDGE_PULL_PAGES = 8
 
@@ -1255,7 +1229,7 @@ class RfedChannelClient(
                 }
                 Log.i(TAG, "PULL response: ${resp.size} bytes")
 
-                pullRefusal(resp)?.let { refusal ->
+                RfedLink.pullRefusal(resp)?.let { refusal ->
                     Log.w(TAG, "PULL: rfed refused the pull: $refusal")
                     _canPullMore.value = _canPullMore.value + (channelKey to null)
                     return@withContext 0 to false

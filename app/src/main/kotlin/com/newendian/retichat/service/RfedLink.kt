@@ -149,6 +149,32 @@ object RfedLink {
         return ConnectionStateManager.appLinkSend(dest, "rfed", "link", path, payload)
     }
 
+    /**
+     * rfed's refusal of a pull (`/channel/pull`, `/distro/pull`), named: an
+     * error is a msgpack integer (RFed-rust lxmf_propagation::encode_error),
+     * 0xF0 as uint8 `cc f0`, with the LXMF reference codes (LXMF/LXMPeer.py).
+     * Null for anything else, a page among them.
+     */
+    internal fun pullRefusal(resp: ByteArray): String? {
+        val code = when {
+            resp.size == 2 && resp[0] == 0xcc.toByte() -> resp[1].toInt() and 0xff
+            resp.size == 1 && resp[0] >= 0 -> resp[0].toInt()
+            else -> return null
+        }
+        val name = when (code) {
+            0xf0 -> "link not identified"
+            0xf1 -> "no access"
+            0xf3 -> "invalid key"
+            0xf4 -> "invalid request data"
+            0xf5 -> "invalid stamp"
+            0xf6 -> "throttled"
+            0xfd -> "not found"
+            0xfe -> "timed out"
+            else -> "an unknown error"
+        }
+        return "$name (0x%02X)".format(code)
+    }
+
     /** The stack stopped: the next stack sets every link up again with its own identity. */
     fun reset() {
         synchronized(setUp) { setUp.clear() }

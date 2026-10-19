@@ -231,6 +231,10 @@ object RfedDistroClient {
                     unfinished = DistroPullRounds.noAnswer(stoppedSince = StackRuntime.stops != stops)
                     return@drain null
                 }
+                RfedLink.pullRefusal(resp)?.let { refusal ->
+                    unfinished = "rfed refused the pull: $refusal"
+                    return@drain null
+                }
                 val (pairs, more) = DistroCodec.decodePullResponse(resp) ?: run {
                     unfinished = "malformed response (${resp.size} bytes)"
                     return@drain null
