@@ -135,8 +135,17 @@ dependencies {
 
 tasks.register<Exec>("buildRustNdk") {
     workingDir = file("${rootDir}/rust/retichat-jni")
+    // Android Studio started from the Dock does not get the shell's PATH, so
+    // cargo is looked up in rustup's usual place first, and cargo-ndk is told
+    // where the SDK (and its ndk/ folder) is.
+    val cargoBin = File(System.getProperty("user.home"), ".cargo/bin")
+    val cargo = File(cargoBin, "cargo").takeIf { it.canExecute() }?.path ?: "cargo"
+    environment("PATH", "${cargoBin.path}${File.pathSeparator}${System.getenv("PATH") ?: ""}")
+    if (System.getenv("ANDROID_HOME").isNullOrEmpty() && System.getenv("ANDROID_NDK_HOME").isNullOrEmpty()) {
+        environment("ANDROID_HOME", android.sdkDirectory.path)
+    }
     commandLine(
-        "cargo", "ndk",
+        cargo, "ndk",
         "-t", "arm64-v8a",
         "-t", "armeabi-v7a",
         "-o", "${projectDir}/src/main/jniLibs",
@@ -144,7 +153,11 @@ tasks.register<Exec>("buildRustNdk") {
     )
 }
 
+// Every build rebuilds the Rust library first (cargo only recompiles what
+// changed, a few seconds when nothing did). Until 2026-10-19 this was off, and
+// jniLibs/ is not in git, so a build packaged whatever library that machine
+// had last built: James's 10-19 build from main shipped one older than its
+// Kotlin (UnsatisfiedLinkError in RfedLink.ensure, rfed.link never identified).
 tasks.named("preBuild") {
-    // Uncomment to auto-build Rust on every Gradle build:
-    // dependsOn("buildRustNdk")
+    dependsOn("buildRustNdk")
 }
