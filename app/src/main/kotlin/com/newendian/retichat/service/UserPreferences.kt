@@ -124,9 +124,10 @@ object UserPreferences {
      * When true, the app links over Bluetooth to any RTNode in range, with
      * no other configuration (RTNodeBluetooth). Off by default: a user who
      * never turns it on in Settings is never asked for the Bluetooth
-     * (Nearby devices) permission and nothing scans. Settings writes true
-     * only once the permission is granted, and applies the change at once
-     * (StackRuntime.applyRtnodeBluetoothSetting); bootstrap reads it at
+     * (Nearby devices) permission and nothing scans. The Settings switch
+     * turns on only once the permission is granted; Apply writes it and
+     * brings the running stack in line (StackRuntime.applyRtnodeBluetoothSetting,
+     * or the restart Apply makes for other changes); bootstrap reads it at
      * stack start.
      */
     fun isRtnodeBluetoothEnabled(context: Context): Boolean =
@@ -140,10 +141,10 @@ object UserPreferences {
      * When true, the stack runs an AutoInterface: it finds other Reticulum
      * devices on the same Wi-Fi or Ethernet network by IPv6 multicast and
      * talks to them directly, with no server (James, 2026-10-19). A built-in
-     * interface that can't be removed, off by default. Settings writes true
-     * only once the local network permission is granted (where Android asks
-     * for one, LocalNetwork.needsPermission) and restarts the stack, which
-     * writes it into the config (StackRuntime.applyAutoInterfaceSetting).
+     * interface that can't be removed, off by default. The Settings switch
+     * turns on only once the local network permission is granted (where
+     * Android asks for one, LocalNetwork.needsPermission); Apply writes it and
+     * restarts the stack, whose bootstrap writes it into the config.
      */
     fun isAutoInterfaceEnabled(context: Context): Boolean =
         prefs(context).getBoolean(PREF_KEY_AUTO_INTERFACE, false)

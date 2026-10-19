@@ -216,18 +216,13 @@ fun RetichatNavHost(navController: NavHostController) {
         }
 
         composable(Routes.SETTINGS) { entry ->
-            val context = LocalContext.current
             val vm: SettingsViewModel = viewModel(
                 factory = SettingsViewModel.Factory(
                     dao = app.database.interfaceConfigDao(),
                     serviceState = app.serviceState,
-                    onRestart = {
-                        // Tear down and re-bootstrap now so freshly-saved
-                        // interface and RFed settings take effect.
-                        app.applicationScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                            com.newendian.retichat.service.StackRuntime.restart(context)
-                        }
-                    },
+                    store = com.newendian.retichat.ui.settings.AppSettingsStore(app),
+                    // Apply's save and restart outlive the page.
+                    applyScope = app.applicationScope,
                 ),
             )
             SettingsScreen(

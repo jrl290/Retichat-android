@@ -14,6 +14,8 @@ import java.io.File
  * Off by default (James, 2026-09-29): a user who never turns it on sees no
  * Bluetooth (Nearby devices) permission prompt and nothing scans. The
  * permission is asked for only when the user turns the Settings switch on.
+ * Since 2026-10-19 the switch changes the Settings page's value, and the
+ * page's Apply saves it and starts or stops Bluetooth (SettingsStore).
  */
 class RTNodeBluetoothContractTest {
 
@@ -21,6 +23,10 @@ class RTNodeBluetoothContractTest {
     private val radio = File("src/main/kotlin/com/newendian/retichat/service/RTNodeBluetooth.kt").readText()
     private val prefs = File("src/main/kotlin/com/newendian/retichat/service/UserPreferences.kt").readText()
     private val settings = File("src/main/kotlin/com/newendian/retichat/ui/settings/SettingsScreen.kt").readText()
+    private val store = File("src/main/kotlin/com/newendian/retichat/ui/settings/SettingsStore.kt").readText()
+    private val viewModel = File("src/main/kotlin/com/newendian/retichat/ui/settings/SettingsViewModel.kt").readText()
+    private val navGraph = File("src/main/kotlin/com/newendian/retichat/ui/navigation/NavGraph.kt").readText()
+    private val app = File("src/main/kotlin/com/newendian/retichat/RetichatApp.kt").readText()
     private val activity = File("src/main/kotlin/com/newendian/retichat/MainActivity.kt").readText()
     private val manifest = File("src/main/AndroidManifest.xml").readText()
 
@@ -54,7 +60,7 @@ class RTNodeBluetoothContractTest {
 
     /** The Settings card, a top-level composable. */
     private val card: String by lazy {
-        val start = settings.indexOf("private fun RTNodeBluetoothCard()")
+        val start = settings.indexOf("private fun RTNodeBluetoothCard(")
         assertTrue("RTNodeBluetoothCard not found", start >= 0)
         settings.substring(start, settings.indexOf("\n}\n", start))
     }
@@ -126,8 +132,8 @@ class RTNodeBluetoothContractTest {
         assertInOrder(card, "enabled && !permitted", "onClick = { askForPermission() }", "Text(\"Allow Bluetooth\")")
     }
 
-    /** Only StackRuntime starts and stops it: bootstrap and shutdown, and the
-     *  Settings switch through applyRtnodeBluetoothSetting. */
+    /** Only StackRuntime starts and stops it: bootstrap and shutdown, and
+     *  Settings' Apply through applyRtnodeBluetoothSetting. */
     @Test
     fun onlyStackRuntimeStartsAndStopsBluetooth() {
         val starters = mainSources.filterValues { it.contains("RTNodeBluetooth.start(") }.keys
@@ -174,26 +180,34 @@ class RTNodeBluetoothContractTest {
         )
         // The request's answer: on only if granted.
         assertInOrder(answer, "permitted = RTNodeBluetooth.hasPermissions(context)", "if (permitted) {", "turnOn()")
-        // The preference is written true in one place, which then applies it.
-        assertEquals(1, Regex("setRtnodeBluetoothEnabled\\(context, true\\)").findAll(settings).count())
-        assertInOrder(card, "fun turnOn() {", "setRtnodeBluetoothEnabled(context, true)", "applySetting()")
-        assertInOrder(card, "fun turnOff() {", "setRtnodeBluetoothEnabled(context, false)", "applySetting()")
+        // The switch changes the page's value; Apply alone writes the
+        // preference, as the page holds it.
+        assertInOrder(card, "fun turnOn() {", "onEnabledChange(true)")
+        assertInOrder(card, "fun turnOff() {", "onEnabledChange(false)")
+        val writers = mainSources.filterValues { it.contains("setRtnodeBluetoothEnabled(") }.keys
+        assertEquals(setOf("UserPreferences.kt", "SettingsStore.kt"), writers)
+        assertTrue(store.contains("if (plan.rtnodeBluetooth) UserPreferences.setRtnodeBluetoothEnabled(app, draft.rtnodeBluetooth)"))
     }
 
-    /** A grant, or turning it off, takes effect at once on the running
-     *  stack, not at the next Restart, and never on the main thread: the
-     *  card hands it to the app's scope and StackRuntime moves it to IO. */
+    /** Applied alone, the switch takes effect on the running stack with no
+     *  restart; with a change that needs one, the restart's bootstrap reads
+     *  it. Never on the main thread: Apply runs on the app's IO scope and
+     *  StackRuntime moves it to IO too. The card itself starts nothing. */
     @Test
-    fun theSwitchTakesEffectAtOnceOffTheMainThread() {
+    fun applyTakesEffectOnTheRunningStackOffTheMainThread() {
         assertInOrder(
-            card,
-            "fun applySetting() {",
-            "app.applicationScope.launch { StackRuntime.applyRtnodeBluetoothSetting(app) }",
+            store,
+            "override suspend fun applyToStack(plan: ApplyPlan) {",
+            "if (plan.restart) {", "StackRuntime.restart(app)",
+            "} else if (plan.rtnodeBluetooth) {", "StackRuntime.applyRtnodeBluetoothSetting(app)",
         )
+        assertTrue(navGraph.contains("applyScope = app.applicationScope,"))
+        assertTrue(viewModel.contains("applyScope.launch {"))
+        assertTrue(app.contains("val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO"))
         val apply = body(stackRuntime, "applyRtnodeBluetoothSetting")
         assertInOrder(apply, "withContext(Dispatchers.IO) {", "initLock.withLock {", "RTNodeBluetooth.stop()")
         assertInOrder(apply, "withContext(Dispatchers.IO) {", "initLock.withLock {", "RTNodeBluetooth.start(")
-        assertFalse("no Restart needed", card.contains("Restart") || card.contains("restart"))
+        assertFalse("the card starts nothing", card.contains("StackRuntime") || card.contains("estart"))
     }
 
     /** Asking changes nothing: the switch stays off, no preference is
@@ -204,7 +218,7 @@ class RTNodeBluetoothContractTest {
     fun askingForThePermissionTurnsNothingOn() {
         val ask = localBody(card, "askForPermission")
         for (effect in listOf(
-            "turnOn(", "turnOff(", "applySetting(", "setRtnodeBluetoothEnabled(",
+            "turnOn(", "turnOff(", "onEnabledChange(", "setRtnodeBluetoothEnabled(",
             "enabled = ", "StackRuntime", "RTNodeBluetooth.start(",
         )) {
             assertFalse("askForPermission: no $effect", ask.contains(effect))
@@ -250,22 +264,22 @@ class RTNodeBluetoothContractTest {
             "runCatching \\{ RTNodeBluetooth\\.start\\(app, configDir\\.absolutePath\\) \\}\\s*" +
                 "\\.onFailure \\{ Log\\.e\\(TAG, \"RTNodeBluetooth\\.start failed\", it\\) \\}"
         ).findAll(stackRuntime).count()
-        assertEquals("bootstrap and the Settings switch", 2, starts)
+        assertEquals("bootstrap and Settings' Apply", 2, starts)
         assertEquals("each in runCatching, logged", starts, caught)
         val stop = Regex(
             "runCatching \\{ RTNodeBluetooth\\.stop\\(\\) \\}\\s*" +
                 "\\.onFailure \\{ Log\\.e\\(TAG, \"RTNodeBluetooth\\.stop failed\", it\\) \\}"
         )
         val stops = Regex("RTNodeBluetooth\\.stop\\(").findAll(stackRuntime).count()
-        assertEquals("shutdown and the Settings switch", 2, stops)
+        assertEquals("shutdown and Settings' Apply", 2, stops)
         assertEquals("each in runCatching, logged", stops, stop.findAll(stackRuntime).count())
         assertTrue(stop.containsMatchIn(body(stackRuntime, "shutdownNow")))
         assertTrue(stop.containsMatchIn(body(stackRuntime, "applyRtnodeBluetoothSetting")))
     }
 
-    /** The switch applies the preference under initLock, read there, so it
-     *  cannot interleave with a bootstrap, shutdown or restart or with
-     *  another tap. On starts it only on a ready stack, from the same
+    /** Apply brings Bluetooth in line under initLock, the preference read
+     *  there, so it cannot interleave with a bootstrap, shutdown or restart
+     *  or with another Apply. On starts it only on a ready stack, from the same
      *  directory bootstrap uses. */
     @Test
     fun theSwitchIsAppliedUnderTheStackLock() {

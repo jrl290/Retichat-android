@@ -514,8 +514,11 @@ object StackRuntime {
     }
 
     /**
-     * Settings "Restart": tear the stack down and bring it straight back up so
-     * new interface / RFed settings take effect. Holders keep their references
+     * Settings' Apply, when a change is one the stack reads only at bootstrap
+     * (the RFed node, Default TCP, Local network, the custom interfaces): tear
+     * the stack down and bring it straight back up so it takes effect. Until
+     * 2026-10-19 a Restart button did this, and the Local network switch on
+     * its own. Holders keep their references
      * (the app on screen still owns one), so the count is untouched. The only
      * stop in the process's life (D7).
      *
@@ -531,30 +534,12 @@ object StackRuntime {
     }
 
     /**
-     * Settings' Local network switch changed. The AutoInterface is an entry in
-     * the config the stack reads at start, so a running stack is restarted to
-     * add or drop it, as Settings' Restart does; a stack not up yet reads the
-     * preference at its bootstrap. The preference is read by that bootstrap,
-     * under initLock, so quick on/off taps end in the last tap's state.
-     */
-    suspend fun applyAutoInterfaceSetting(context: Context) {
-        val app = context.applicationContext as RetichatApp
-        withContext(Dispatchers.IO) {
-            if (initLock.withLock { isReady }) {
-                restart(app)
-            } else {
-                Log.i(TAG, "Local network switch changed; the stack is not up: its next bootstrap reads it")
-            }
-        }
-    }
-
-    /**
-     * Settings' Nearby RTNode switch changed: bring Bluetooth in line with
-     * the preference now, with no Restart. Always off the main thread: start
+     * Settings' Apply changed only the Nearby RTNode switch: bring Bluetooth
+     * in line with the preference now, with no restart. Always off the main thread: start
      * reads and writes the Bluetooth identity and starts the engine over JNI,
      * and stop blocks until the engine lets go of its interfaces.
      *
-     * On (Settings writes it only once the permissions are granted) starts
+     * On (the switch turns on only once the permissions are granted) starts
      * it exactly as bootstrap does, and only on a ready stack: isReady is set
      * after bootstrap has published the delivery destination and registered
      * ConnectionStateManager, so the RTNode interface's up-edge still finds
@@ -566,8 +551,8 @@ object StackRuntime {
      * the grant. Off stops it.
      *
      * Serialised with bootstrap, shutdown and restart by initLock, and the
-     * preference is read under the lock, so quick on/off taps end in the
-     * last tap's state.
+     * preference is read under the lock, so two quick Applies end in the
+     * last one's state.
      */
     suspend fun applyRtnodeBluetoothSetting(context: Context) {
         val app = context.applicationContext as RetichatApp

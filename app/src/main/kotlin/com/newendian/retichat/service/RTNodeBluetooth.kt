@@ -68,8 +68,8 @@ sealed class RTNodeBluetoothStatus {
  * Off by default (UserPreferences.isRtnodeBluetoothEnabled): nothing asks
  * for the permissions or scans until the user turns the Settings switch on.
  * Then started by StackRuntime's bootstrap after the delivery destination is
- * published, or at once on the running stack when the switch is turned on
- * (StackRuntime.applyRtnodeBluetoothSetting); stopped when it is turned off
+ * published, or on the running stack when Settings applies the switch on
+ * (StackRuntime.applyRtnodeBluetoothSetting); stopped when it is applied off
  * and by shutdownNow before the stack shuts down.
  */
 @SuppressLint("MissingPermission") // every path starts from start(), which checks the permissions
@@ -128,7 +128,8 @@ object RTNodeBluetooth {
      * Only called with the Settings switch on, which is where the
      * permissions are asked for. Without them (revoked since) it stays down
      * and says so; the Settings card offers to ask again, and a grant there
-     * starts it through StackRuntime.applyRtnodeBluetoothSetting.
+     * turns the switch on for Apply to start it
+     * (StackRuntime.applyRtnodeBluetoothSetting).
      */
     @Synchronized
     fun start(context: Context, storageDir: String) {

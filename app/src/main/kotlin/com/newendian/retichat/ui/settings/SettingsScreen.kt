@@ -6,6 +6,7 @@ import android.content.ContextWrapper
 import android.content.Intent
 import android.net.Uri
 import android.util.Log
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.app.ActivityCompat
@@ -32,12 +33,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.input.ImeAction
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -52,10 +50,16 @@ import com.newendian.retichat.service.DisplayNameSettings
 import com.newendian.retichat.service.LocalNetwork
 import com.newendian.retichat.service.RTNodeBluetooth
 import com.newendian.retichat.service.RTNodeBluetoothStatus
-import com.newendian.retichat.service.StackRuntime
 import com.newendian.retichat.service.UserPreferences
 import org.json.JSONObject
 
+/**
+ * Changes on this page wait for Apply, as on iOS (James, 2026-10-19:
+ * "Settings are adjusted but not applied until the user presses the Apply
+ * button"): the cards edit the view model's draft, Apply saves it and
+ * restarts the stack when a change needs it (there is no Restart button),
+ * and leaving with the draft changed asks to revert first.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
@@ -63,24 +67,45 @@ fun SettingsScreen(
     viewModel: SettingsViewModel,
     onOpenIdentity: () -> Unit = {},
 ) {
-    val interfaces by viewModel.interfaces.collectAsState()
     val state by viewModel.serviceState.collectAsState()
+    val saved by viewModel.saved.collectAsState()
+    val draft by viewModel.draft.collectAsState()
+    val applying by viewModel.applying.collectAsState()
+    val changed = hasChanges(saved, draft)
 
     var showAddDialog by remember { mutableStateOf(false) }
     var editingInterface by remember { mutableStateOf<InterfaceConfigEntity?>(null) }
+    var showRevertDialog by remember { mutableStateOf(false) }
+
+    // The back arrow and Android's back both ask first when there are changes.
+    fun leave() {
+        if (changed) showRevertDialog = true else onBack()
+    }
+    BackHandler(enabled = changed) { showRevertDialog = true }
 
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text("Settings") },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    IconButton(onClick = { leave() }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+                actions = {
+                    TextButton(
+                        onClick = { viewModel.apply() },
+                        enabled = changed && draft?.valid == true && !applying,
+                    ) {
+                        Text("Apply")
                     }
                 },
             )
         },
     ) { padding ->
+        val values = draft
+        val applied = saved
+        if (values == null || applied == null) return@Scaffold
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
@@ -88,7 +113,7 @@ fun SettingsScreen(
         ) {
             // ---- Section: Service Status ----
             item {
-                ServiceStatusCard(state = state, onRestart = { viewModel.restartService() })
+                ServiceStatusCard(state = state)
             }
 
             // ---- Section: Identity (device + distro addresses), as on retichat.com ----
@@ -98,17 +123,28 @@ fun SettingsScreen(
 
             // ---- Section: Display names (announce, message, channel; DISPLAY_NAMES.md §6) ----
             item {
-                ProfileCard()
+                ProfileCard(
+                    name = values::name,
+                    onNameChange = { kind, name -> viewModel.edit { it.withName(kind, name) } },
+                )
             }
 
             // ---- Section: Privacy ----
             item {
-                PrivacyCard()
+                PrivacyCard(
+                    filterStrangers = values.filterStrangers,
+                    onFilterStrangersChange = { on -> viewModel.edit { it.copy(filterStrangers = on) } },
+                )
             }
 
             // ---- Section: RFed node + LXMF Propagation ----
             item {
-                RfedConfigCard()
+                RfedConfigCard(
+                    nodeHash = values.rfedNodeHash,
+                    lxmfPropOverride = values.lxmfPropOverride,
+                    onNodeHashChange = { hash -> viewModel.edit { it.copy(rfedNodeHash = hash) } },
+                    onLxmfPropOverrideChange = { hash -> viewModel.edit { it.copy(lxmfPropOverride = hash) } },
+                )
             }
 
             // ---- Section: Interfaces ----
@@ -132,26 +168,37 @@ fun SettingsScreen(
 
             // Default TCP endpoint (always shown)
             item {
-                DefaultTcpCard()
+                DefaultTcpCard(
+                    enabled = values.defaultTcp,
+                    onEnabledChange = { on -> viewModel.edit { it.copy(defaultTcp = on) } },
+                )
             }
 
             // AutoInterface: Reticulum devices on the same network (always
             // shown, second: James, 2026-10-19)
             item {
-                LocalNetworkCard()
+                LocalNetworkCard(
+                    enabled = values.localNetwork,
+                    applied = applied.localNetwork,
+                    onEnabledChange = { on -> viewModel.edit { it.copy(localNetwork = on) } },
+                )
             }
 
             // Bluetooth to any RTNode in range (always shown)
             item {
-                RTNodeBluetoothCard()
+                RTNodeBluetoothCard(
+                    enabled = values.rtnodeBluetooth,
+                    applied = applied.rtnodeBluetooth,
+                    onEnabledChange = { on -> viewModel.edit { it.copy(rtnodeBluetooth = on) } },
+                )
             }
 
-            items(interfaces, key = { it.id }) { iface ->
+            items(values.interfaces, key = { it.id }) { iface ->
                 InterfaceRow(
                     iface = iface,
-                    onToggle = { viewModel.toggleEnabled(iface.id, it) },
+                    onToggle = { on -> viewModel.edit { it.withInterfaceEnabled(iface.id, on) } },
                     onEdit = { editingInterface = iface },
-                    onDelete = { viewModel.deleteInterface(iface.id) },
+                    onDelete = { viewModel.edit { it.withoutInterface(iface.id) } },
                 )
             }
 
@@ -183,7 +230,7 @@ fun SettingsScreen(
             existing = null,
             onDismiss = { showAddDialog = false },
             onSave = { entity ->
-                viewModel.saveInterface(entity)
+                viewModel.edit { it.withInterfaceAdded(entity) }
                 showAddDialog = false
             },
         )
@@ -195,8 +242,34 @@ fun SettingsScreen(
             existing = existing,
             onDismiss = { editingInterface = null },
             onSave = { entity ->
-                viewModel.saveInterface(entity)
+                viewModel.edit { it.withInterfaceSaved(entity) }
                 editingInterface = null
+            },
+        )
+    }
+
+    // ---- Leaving with changes (iOS's "Unsaved Changes" alert) ----
+    if (showRevertDialog) {
+        AlertDialog(
+            onDismissRequest = { showRevertDialog = false },
+            title = { Text("Unsaved Changes") },
+            text = { Text("Revert to your original settings and go back?") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showRevertDialog = false
+                        viewModel.revert()
+                        onBack()
+                    },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                ) {
+                    Text("Revert")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRevertDialog = false }) {
+                    Text("Cancel")
+                }
             },
         )
     }
@@ -429,7 +502,10 @@ private fun InterfaceEditorDialog(
 // ---- Display names card (LXMF-rust/DISPLAY_NAMES.md §6) ----
 
 @Composable
-private fun ProfileCard() {
+private fun ProfileCard(
+    name: (DisplayNameSettings.Kind) -> String,
+    onNameChange: (DisplayNameSettings.Kind, String) -> Unit,
+) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -445,76 +521,57 @@ private fun ProfileCard() {
             )
             Spacer(Modifier.height(12.dp))
             DisplayNameField(
-                kind = DisplayNameSettings.Kind.ANNOUNCE,
                 label = "Announce Display Name",
                 hint = "Public. Sent in your announces to the whole network, including other " +
                     "Reticulum apps. Leave empty to stay anonymous.",
+                value = name(DisplayNameSettings.Kind.ANNOUNCE),
+                onValueChange = { onNameChange(DisplayNameSettings.Kind.ANNOUNCE, it) },
             )
             Spacer(Modifier.height(12.dp))
             DisplayNameField(
-                kind = DisplayNameSettings.Kind.MESSAGE,
                 label = "Message Display Name",
                 hint = "Sent inside your messages, only to the people you message.",
+                value = name(DisplayNameSettings.Kind.MESSAGE),
+                onValueChange = { onNameChange(DisplayNameSettings.Kind.MESSAGE, it) },
             )
             Spacer(Modifier.height(12.dp))
             DisplayNameField(
-                kind = DisplayNameSettings.Kind.CHANNEL,
                 label = "Channel Display Name",
                 hint = "Shown on your channel posts. Anyone who can read a channel can see it. " +
                     "Leave empty to post without a name.",
+                value = name(DisplayNameSettings.Kind.CHANNEL),
+                onValueChange = { onNameChange(DisplayNameSettings.Kind.CHANNEL, it) },
             )
         }
     }
 }
 
 /**
- * One of the three names. Typing edits only the field; the name is saved
- * (cleaned by the Rust cleaner, then applied to the running router at once)
- * when the user commits it: the keyboard's Done, leaving the field, or leaving
- * the screen. The field then shows the cleaned name, exactly what goes out.
+ * One of the three names. Typing edits the page's copy; Apply saves it,
+ * cleaned by the Rust cleaner and applied to the running router at once
+ * (DisplayNameSettings), and the field then shows the cleaned name, exactly
+ * what goes out.
  */
 @Composable
-private fun DisplayNameField(kind: DisplayNameSettings.Kind, label: String, hint: String) {
-    val context = LocalContext.current
-    val app = context.applicationContext as com.newendian.retichat.RetichatApp
-    var text by remember { mutableStateOf(DisplayNameSettings.stored(context, kind)) }
-    val latestText by rememberUpdatedState(text)
+private fun DisplayNameField(
+    label: String,
+    hint: String,
+    value: String,
+    onValueChange: (String) -> Unit,
+) {
     val focusManager = LocalFocusManager.current
-
-    fun commit(value: String) {
-        app.applicationScope.launch {
-            val saved = DisplayNameSettings.save(context, kind, value)
-            withContext(kotlinx.coroutines.Dispatchers.Main) {
-                // Show what goes out, unless the user typed on meanwhile.
-                if (text == value) text = saved
-            }
-        }
-    }
-
-    // Leaving the screen with the keyboard still up commits too.
-    DisposableEffect(kind) {
-        onDispose {
-            if (latestText != DisplayNameSettings.stored(context, kind)) commit(latestText)
-        }
-    }
 
     Text(
         label,
         style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
-    var hadFocus by remember { mutableStateOf(false) }
     OutlinedTextField(
-        value = text,
-        onValueChange = { text = it },
+        value = value,
+        onValueChange = onValueChange,
         placeholder = { Text("Not set") },
         singleLine = true,
-        modifier = Modifier
-            .fillMaxWidth()
-            .onFocusChanged { state ->
-                if (hadFocus && !state.isFocused) commit(text)
-                hadFocus = state.isFocused
-            },
+        modifier = Modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.medium,
         keyboardOptions = KeyboardOptions(
             capitalization = KeyboardCapitalization.Words,
@@ -531,12 +588,7 @@ private fun DisplayNameField(kind: DisplayNameSettings.Kind, label: String, hint
 }
 
 @Composable
-private fun PrivacyCard() {
-    val context = LocalContext.current
-    var filterStrangers by remember {
-        mutableStateOf(UserPreferences.isFilterStrangersEnabled(context))
-    }
-
+private fun PrivacyCard(filterStrangers: Boolean, onFilterStrangersChange: (Boolean) -> Unit) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -567,12 +619,7 @@ private fun PrivacyCard() {
                 }
                 Switch(
                     checked = filterStrangers,
-                    onCheckedChange = {
-                        filterStrangers = it
-						(context.applicationContext as? com.newendian.retichat.RetichatApp)
-							?.repository
-							?.setCoreFilterStrangers(it)
-                    },
+                    onCheckedChange = onFilterStrangersChange,
                 )
             }
         }
@@ -622,11 +669,7 @@ private fun PushDeliveryInfoCard() {
 // ---- Default TCP card ----
 
 @Composable
-private fun DefaultTcpCard() {
-    val context = LocalContext.current
-    var enabled by remember {
-        mutableStateOf(UserPreferences.isDefaultTcpEnabled(context))
-    }
+private fun DefaultTcpCard(enabled: Boolean, onEnabledChange: (Boolean) -> Unit) {
     val endpoints = remember { DefaultEndpointManager.fallbackEndpoints() }
     val endpointText = remember(endpoints) {
         endpoints.joinToString("\n") { "${it.first}:${it.second}" }
@@ -651,10 +694,7 @@ private fun DefaultTcpCard() {
         ) {
             Switch(
                 checked = enabled,
-                onCheckedChange = { newValue ->
-                    enabled = newValue
-                    UserPreferences.setDefaultTcpEnabled(context, newValue)
-                },
+                onCheckedChange = onEnabledChange,
             )
             Spacer(Modifier.width(12.dp))
 
@@ -689,20 +729,16 @@ private fun DefaultTcpCard() {
  * On/off for the Bluetooth link to any RTNode in range (RTNodeBluetooth);
  * there is nothing to set up. Off by default, and turning it on is the only
  * place the app asks for the Bluetooth (Nearby devices) permission. Granted,
- * the switch turns on and Bluetooth starts on the running stack straight
- * away, with no Restart (StackRuntime.applyRtnodeBluetoothSetting). Denied,
- * it stays off and says why; when Android may not show the request again,
- * the card offers Retichat's system settings, and a grant made there turns
- * it on when the user comes back. Turning it off stops it at once, also with
- * no Restart. The last line is the live status.
+ * the switch turns on, and Apply starts Bluetooth on the running stack with
+ * no restart (StackRuntime.applyRtnodeBluetoothSetting). Denied, it stays
+ * off and says why; when Android may not show the request again, the card
+ * offers Retichat's system settings, and a grant made there turns it on when
+ * the user comes back. Off, Apply stops it. [enabled] is the page's value,
+ * [applied] the saved one; the last line is the live status.
  */
 @Composable
-private fun RTNodeBluetoothCard() {
+private fun RTNodeBluetoothCard(enabled: Boolean, applied: Boolean, onEnabledChange: (Boolean) -> Unit) {
     val context = LocalContext.current
-    val app = context.applicationContext as com.newendian.retichat.RetichatApp
-    var enabled by remember {
-        mutableStateOf(UserPreferences.isRtnodeBluetoothEnabled(context))
-    }
     // Saveable: the permission dialog and the system settings are other
     // activities, and this one can be recreated while they are in front.
     var permitted by rememberSaveable { mutableStateOf(RTNodeBluetooth.hasPermissions(context)) }
@@ -719,27 +755,15 @@ private fun RTNodeBluetoothCard() {
     var awaitingSystemSettings by rememberSaveable { mutableStateOf(false) }
     val status by RTNodeBluetooth.status.collectAsState()
 
-    // Start or stop it on the running stack now. StackRuntime does it off
-    // the main thread (start reads and writes the Bluetooth identity and
-    // starts the engine over JNI; stop blocks until the engine lets go), on
-    // the app's scope so it outlives this screen.
-    fun applySetting() {
-        app.applicationScope.launch { StackRuntime.applyRtnodeBluetoothSetting(app) }
-    }
-
     // Only ever called with the permissions granted.
     fun turnOn() {
         refusal = null
         blocked = false
-        UserPreferences.setRtnodeBluetoothEnabled(context, true)
-        enabled = true
-        applySetting()
+        onEnabledChange(true)
     }
 
     fun turnOff() {
-        UserPreferences.setRtnodeBluetoothEnabled(context, false)
-        enabled = false
-        applySetting()
+        onEnabledChange(false)
     }
 
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -789,6 +813,8 @@ private fun RTNodeBluetoothCard() {
 
     val statusText = refusal ?: if (!enabled) "Off" else if (!permitted) {
         "Bluetooth permission not granted"
+    } else if (!applied) {
+        "On after Apply"
     } else when (val s = status) {
         RTNodeBluetoothStatus.Off -> "Not running"
         RTNodeBluetoothStatus.Searching -> "Looking for an RTNode in range"
@@ -879,17 +905,16 @@ private fun RTNodeBluetoothCard() {
  * directly. Can't be removed, off by default. Turning it on asks for the local
  * network permission where Android has one (LocalNetwork.needsPermission:
  * Android 17 with targetSdk 37; below that Android grants it with INTERNET).
- * Granted (or not needed), the switch turns on and the running stack restarts
- * with the interface in its config (StackRuntime.applyAutoInterfaceSetting);
- * off restarts it without. Denied, it stays off and says why, offering
- * Retichat's system settings when Android won't ask again. The last line is
- * the live status: how many devices it has found.
+ * Granted (or not needed), the switch turns on, and Apply restarts the stack
+ * with the interface in its config; off, Apply restarts it without. Denied,
+ * it stays off and says why, offering Retichat's system settings when Android
+ * won't ask again. [enabled] is the page's value, [applied] the saved one;
+ * the last line is the live status: how many devices it has found.
  */
 @Composable
-private fun LocalNetworkCard() {
+private fun LocalNetworkCard(enabled: Boolean, applied: Boolean, onEnabledChange: (Boolean) -> Unit) {
     val context = LocalContext.current
     val app = context.applicationContext as com.newendian.retichat.RetichatApp
-    var enabled by remember { mutableStateOf(UserPreferences.isAutoInterfaceEnabled(context)) }
     // Saveable: the permission dialog and the system settings are other
     // activities, and this one can be recreated while they are in front.
     var refusal by rememberSaveable { mutableStateOf<String?>(null) }
@@ -898,9 +923,7 @@ private fun LocalNetworkCard() {
     val state by app.serviceState.collectAsState()
 
     fun setEnabled(on: Boolean) {
-        UserPreferences.setAutoInterfaceEnabled(context, on)
-        enabled = on
-        app.applicationScope.launch { StackRuntime.applyAutoInterfaceSetting(app) }
+        onEnabledChange(on)
     }
 
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -939,6 +962,7 @@ private fun LocalNetworkCard() {
     val statusText = refusal ?: when {
         !enabled -> "Off"
         LocalNetwork.needsPermission(context) -> "Local network permission not granted"
+        !applied -> "On after Apply"
         !state.isInitialized -> "Starting…"
         peers == 0 -> "Looking for Reticulum devices on this network"
         peers == 1 -> "1 device found on this network"
@@ -1115,7 +1139,7 @@ private fun DropAnnouncesCard() {
 // ---- Service status card ----
 
 @Composable
-private fun ServiceStatusCard(state: ServiceState, onRestart: () -> Unit) {
+private fun ServiceStatusCard(state: ServiceState) {
     val statusColor = when {
         state.error != null -> MaterialTheme.colorScheme.error
         state.isInitialized -> MaterialTheme.colorScheme.primary
@@ -1149,10 +1173,6 @@ private fun ServiceStatusCard(state: ServiceState, onRestart: () -> Unit) {
                         color = statusColor,
                         fontWeight = FontWeight.SemiBold,
                     )
-                }
-                Spacer(Modifier.weight(1f))
-                FilledTonalButton(onClick = onRestart) {
-                    Text("Restart")
                 }
             }
 
@@ -1192,17 +1212,15 @@ private fun ServiceStatusCard(state: ServiceState, onRestart: () -> Unit) {
 
 // ---- RFed config card ----
 
+/** [nodeHash] and [lxmfPropOverride] are the page's values; Apply saves them and restarts the stack. */
 @Composable
-private fun RfedConfigCard() {
-    val context = LocalContext.current
-    // The node in use is always shown: the configured one, or the default.
-    var nodeHash by remember {
-        mutableStateOf(UserPreferences.getEffectiveRfedNodeIdentityHash(context))
-    }
-    val isDefaultNode = nodeHash == UserPreferences.DEFAULT_RFED_NODE_IDENTITY_HASH
-    var lxmfPropOverride by remember {
-        mutableStateOf(UserPreferences.getRfedLxmfPropOverride(context))
-    }
+private fun RfedConfigCard(
+    nodeHash: String,
+    lxmfPropOverride: String,
+    onNodeHashChange: (String) -> Unit,
+    onLxmfPropOverrideChange: (String) -> Unit,
+) {
+    val isDefaultNode = rfedNodeOrDefault(nodeHash) == UserPreferences.DEFAULT_RFED_NODE_IDENTITY_HASH
 
     DisposableEffect(Unit) {
         ConnectionStateManager.retainRfedNodeStatusMonitor()
@@ -1211,8 +1229,6 @@ private fun RfedConfigCard() {
         ConnectionStateManager.openRfedNodeLink()
         onDispose { ConnectionStateManager.releaseRfedNodeStatusMonitor() }
     }
-
-    fun isHex32(s: String) = s.length == 32 && s.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }
 
     Card(
         modifier = Modifier
@@ -1251,7 +1267,7 @@ private fun RfedConfigCard() {
             )
             OutlinedTextField(
                 value = nodeHash,
-                onValueChange = { nodeHash = it.trim().lowercase() },
+                onValueChange = { onNodeHashChange(it.trim().lowercase()) },
                 placeholder = { Text(UserPreferences.DEFAULT_RFED_NODE_IDENTITY_HASH) },
                 supportingText = {
                     Text(if (isDefaultNode) "Default RFed node" else "Custom RFed node")
@@ -1275,7 +1291,7 @@ private fun RfedConfigCard() {
             )
             OutlinedTextField(
                 value = lxmfPropOverride,
-                onValueChange = { lxmfPropOverride = it.trim().lowercase() },
+                onValueChange = { onLxmfPropOverrideChange(it.trim().lowercase()) },
                 placeholder = { Text("32-char hex (optional)") },
                 singleLine = true,
                 isError = lxmfPropOverride.isNotEmpty() && !isHex32(lxmfPropOverride),
@@ -1291,40 +1307,19 @@ private fun RfedConfigCard() {
             Text(
                 "The RFed Node's public identity hash. Notify, channel, delivery, distro " +
                     "and LXMF propagation hashes are derived automatically. Leave the propagation " +
-                    "field empty to use the derived address, or enter a different one to override it. " +
-                    "Changes take effect on next service restart.",
+                    "field empty to use the derived address, or enter a different one to override it.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
             )
 
-            Spacer(Modifier.height(12.dp))
-            Row(modifier = Modifier.align(Alignment.End), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             if (!isDefaultNode) {
-                TextButton(onClick = { nodeHash = UserPreferences.DEFAULT_RFED_NODE_IDENTITY_HASH }) {
+                Spacer(Modifier.height(12.dp))
+                TextButton(
+                    onClick = { onNodeHashChange(UserPreferences.DEFAULT_RFED_NODE_IDENTITY_HASH) },
+                    modifier = Modifier.align(Alignment.End),
+                ) {
                     Text("Use default")
                 }
-            }
-            Button(
-                onClick = {
-                    if (nodeHash.isEmpty() || isHex32(nodeHash)) {
-                        // Storing the default explicitly or as blank is the same node;
-                        // keep blank so a future default change still applies.
-                        UserPreferences.setRfedNodeIdentityHash(
-                            context,
-                            if (nodeHash.isEmpty() || nodeHash == UserPreferences.DEFAULT_RFED_NODE_IDENTITY_HASH) "" else nodeHash,
-                        )
-                        if (nodeHash.isEmpty()) nodeHash = UserPreferences.DEFAULT_RFED_NODE_IDENTITY_HASH
-                        ConnectionStateManager.openRfedNodeLink()
-                    }
-                    if (lxmfPropOverride.isEmpty() || isHex32(lxmfPropOverride)) {
-                        UserPreferences.setRfedLxmfPropOverride(context, lxmfPropOverride)
-                    }
-                },
-                enabled = (nodeHash.isEmpty() || isHex32(nodeHash)) &&
-                    (lxmfPropOverride.isEmpty() || isHex32(lxmfPropOverride)),
-            ) {
-                Text("Apply")
-            }
             }
         }
     }
