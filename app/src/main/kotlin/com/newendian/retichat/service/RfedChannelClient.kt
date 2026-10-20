@@ -30,6 +30,8 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -67,6 +69,26 @@ class RfedChannelClient(
         val recovered = channelDao.failStaleOutboundSendingMessages()
         if (recovered > 0) {
             Log.w(TAG, "Recovered $recovered stale outbound channel message(s) stuck in SENDING")
+        }
+    }
+
+    /**
+     * RFed-spec/Channel.md "Own posts" decides at arrival, against the distro
+     * the device holds then. A post from the distro that arrived while this
+     * device did not hold it (before a transfer or an import) was stored as
+     * another poster's, under the distro's hash, and stayed so (James,
+     * 2026-10-20: "iOS doesn't recognize that a Channel message sent from
+     * Distro on one device belongs to the same Distro on another device").
+     * Once the device holds the distro, at start-up or at a later adopt,
+     * every post from it is the user's own, as one arriving now is stored.
+     */
+    private val distroClaim: Job = scope.launch {
+        DistroManager.state.map { it?.deliveryHashHex }.distinctUntilChanged().collect { hex ->
+            if (hex == null) return@collect
+            val claimed = channelDao.claimOwnPosts(hex)
+            if (claimed > 0) {
+                Log.i(TAG, "$claimed post(s) from distro ${hex.take(8)} stored before this device held it — now the user's own")
+            }
         }
     }
 

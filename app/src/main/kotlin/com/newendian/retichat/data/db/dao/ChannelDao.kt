@@ -56,6 +56,14 @@ interface ChannelDao {
     @Upsert
     suspend fun upsertMessage(message: ChannelMessageEntity)
 
+    /**
+     * Posts from [sourceHashHex] stored as another poster's become the user's
+     * own, SENT: the distro this device now holds sent them before it held it
+     * (RfedChannelClient's distroClaim). Returns how many changed.
+     */
+    @Query("UPDATE channel_messages SET isOutbound = 1, sendState = 1 WHERE lower(sourceHashHex) = lower(:sourceHashHex) AND isOutbound = 0")
+    suspend fun claimOwnPosts(sourceHashHex: String): Int
+
     /** Update the [ChannelMessageEntity.sendState] for a single outbound row. */
     @Query("UPDATE channel_messages SET sendState = :state WHERE id = :id")
     suspend fun updateMessageSendState(id: String, state: Int)
