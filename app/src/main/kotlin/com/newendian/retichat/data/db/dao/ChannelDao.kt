@@ -3,6 +3,7 @@ package com.newendian.retichat.data.db.dao
 import androidx.room.Dao
 import androidx.room.Delete
 import androidx.room.Query
+import androidx.room.Transaction
 import androidx.room.Upsert
 import com.newendian.retichat.data.db.NameSql
 import com.newendian.retichat.data.db.NameStateSql
@@ -95,6 +96,18 @@ interface ChannelDao {
      *  placeholder row once the canonical id is known). */
     @Query("DELETE FROM channel_messages WHERE id = :id")
     suspend fun deleteMessageById(id: String)
+
+    /**
+     * The placeholder of a post this device sent becomes [post]: removed, and
+     * [post] stored, in one transaction, so a list on screen never shows both
+     * (James, 2026-10-20: "two bubbles for the same message appear, then one
+     * is removed"). Room can't change a primary key in place.
+     */
+    @Transaction
+    suspend fun replaceMessage(placeholderId: String, post: ChannelMessageEntity) {
+        if (placeholderId != post.id) deleteMessageById(placeholderId)
+        upsertMessage(post)
+    }
 
     @Query("DELETE FROM channel_messages WHERE channelId = :channelId")
     suspend fun deleteMessagesForChannel(channelId: String)

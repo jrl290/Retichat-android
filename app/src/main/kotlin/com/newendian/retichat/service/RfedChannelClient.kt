@@ -38,6 +38,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Pub-sub channel messaging via the RFed federation server.
@@ -284,6 +285,17 @@ class RfedChannelClient(
     private val stampCostRefreshedThisSession = mutableSetOf<String>()
     /** Hashes of failed-decrypt blobs we've already logged (suppress repeats). */
     private val failedBlobKeys = mutableSetOf<Int>()
+    /**
+     * Posts this device has sent whose answer from rfed hasn't come: the
+     * post's id, as its echo has it (canonicalMessageId), to its placeholder
+     * row's id. rfed sends a post to the channel's readers, this device among
+     * them, before it answers, and the echo can come first: it then becomes
+     * the post's row (replaceMessage), not a second row beside the
+     * placeholder until the answer removed one (James, 2026-10-20: "two
+     * bubbles for the same message appear, then one is removed"). Sends and
+     * echoes run on different threads; each entry is taken once (remove).
+     */
+    private val postsAwaitingAnswer = ConcurrentHashMap<String, String>()
     /** RFed node identity hashes whose channel.stream link we have already wired. */
     private val trackedChannelStreamNodes = mutableSetOf<String>()
     /** Runtime-only channel ids whose conversation screen opened in this process. */
@@ -1125,19 +1137,29 @@ class RfedChannelClient(
         // is a msgpack value, so the post goes as a bin: bare, its bytes are
         // read as msgpack and re-encoded (Reticulum-rust link.rs keeps only a
         // bin's bytes), and rfed gets a changed post.
+        // The post's id as its echo will have it (canonicalMessageId).
+        val canonicalId = canonicalMessageId(postingHex, tsMs)
+        postsAwaitingAnswer[canonicalId] = optimisticId
         val answer = RfedLink.request(app, rfedNode, "/channel/publish", msgpackBin(finalPayload))
         val refusal = publishRefusal(answer)
         if (refusal != null) {
-            Log.w(TAG, "Send failed: rfed answered $refusal")
-            return@withContext false
+            // An echo that came first took the entry: it came from RFed, so
+            // RFed has the post, whatever the answer says.
+            if (postsAwaitingAnswer.remove(canonicalId) != null) {
+                Log.w(TAG, "Send failed: rfed answered $refusal")
+                return@withContext false
+            }
+            Log.i(TAG, "SEND: rfed answered $refusal, but the post's echo came: sent")
         }
         Log.i(TAG, "SEND ok: channel='${channel.channelName}' id=${channel.id} rfedNode=${rfedNode.take(8)} payload=${finalPayload.size}B stamp=${(channel.stampCost ?: 0)} name=${postName.state}")
         recordPostName(channel.id, postingHex, postName)
 
-        // Upgrade optimistic row → canonical id (same as echo will use)
-        val canonicalId = canonicalMessageId(postingHex, tsMs)
-        // Drop optimistic row, insert canonical (Room can't change PK directly)
-        channelDao.upsertMessage(
+        // The placeholder row becomes the post, SENT, in one transaction
+        // (Room can't change a primary key in place): the list never shows
+        // both. Taken from the map after, so an echo meanwhile does the same
+        // and one after finds the row.
+        channelDao.replaceMessage(
+            optimisticId,
             ChannelMessageEntity(
                 id = canonicalId,
                 channelId = channel.id,
@@ -1150,12 +1172,7 @@ class RfedChannelClient(
                 sendState = ChannelMessageEntity.SEND_STATE_SENT,
             )
         )
-        // Clean up the optimistic placeholder so the bubble renders the
-        // canonical row only (and we don't end up with duplicate-looking rows
-        // — one stuck in SENDING, one freshly SENT).
-        if (optimisticId != canonicalId) {
-            channelDao.deleteMessageById(optimisticId)
-        }
+        postsAwaitingAnswer.remove(canonicalId)
         channelDao.bumpLastMessageTime(channel.id, tsMs)
         true
     }
@@ -1360,6 +1377,28 @@ class RfedChannelClient(
 
             val sourceHashHex = result.sourceHash.toHex()
             val msgId = canonicalMessageId(sourceHashHex, result.timestampMs)
+            // The echo of a post this device is sending, back before rfed's
+            // answer: it becomes that post's row, SENT (it came from RFed, so
+            // RFed has it), rather than a second row beside the placeholder.
+            postsAwaitingAnswer.remove(msgId)?.let { placeholderId ->
+                Log.i(TAG, "Channel post echo before rfed's answer: #${channel.channelName} id=${msgId.take(16)}")
+                channelDao.replaceMessage(
+                    placeholderId,
+                    ChannelMessageEntity(
+                        id = msgId,
+                        channelId = channelHashHex,
+                        sourceHashHex = sourceHashHex,
+                        title = title,
+                        content = content,
+                        timestamp = result.timestampMs,
+                        isOutbound = true,
+                        signatureValidated = true,
+                        sendState = ChannelMessageEntity.SEND_STATE_SENT,
+                    )
+                )
+                channelDao.bumpLastMessageTime(channelHashHex, result.timestampMs)
+                return@withContext true
+            }
             if (channelDao.messageExists(channelHashHex, msgId) > 0) return@withContext true
 
             // RFed-spec/Channel.md "Own posts": a post is the user's own when
