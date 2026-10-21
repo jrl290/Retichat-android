@@ -670,7 +670,9 @@ private fun PushDeliveryInfoCard() {
 
 @Composable
 private fun DefaultTcpCard(enabled: Boolean, onEnabledChange: (Boolean) -> Unit) {
-    val endpoints = remember { DefaultEndpointManager.fallbackEndpoints() }
+    // The three the running stack uses, picked at its start; none when the
+    // user's own interfaces are in use.
+    val endpoints by DefaultEndpointManager.inUse.collectAsState()
     val endpointText = remember(endpoints) {
         endpoints.joinToString("\n") { "${it.first}:${it.second}" }
     }
@@ -708,11 +710,13 @@ private fun DefaultTcpCard(enabled: Boolean, onEnabledChange: (Boolean) -> Unit)
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.primary,
                 )
-                Text(
-                    text = endpointText,
-                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                )
+                if (endpointText.isNotEmpty()) {
+                    Text(
+                        text = endpointText,
+                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                    )
+                }
                 Text(
                     text = "Used only when no other interfaces are configured.",
                     style = MaterialTheme.typography.bodySmall,

@@ -217,21 +217,24 @@ object StackRuntime {
         val configDir = File(app.filesDir, "reticulum").also { it.mkdirs() }
 
         // Read enabled interfaces; if none are configured, inject the same
-        // three invisible fallback backbones that iOS uses. They are probed
-        // once per start, so with D7 once per process: a set padded while
-        // offline, or a backbone that dies later, stays until a Settings
-        // restart or process death.
+        // three invisible fallback backbones that iOS uses: the first three
+        // to answer a test of all of them at once (DefaultEndpointManager).
+        // They are picked once per start, so with D7 once per process: a set
+        // padded while offline, or a backbone that dies later, stays until a
+        // Settings restart or process death.
         var interfaces = app.database.interfaceConfigDao().enabledInterfaces()
         val useDefault = interfaces.isEmpty() && UserPreferences.isDefaultTcpEnabled(app)
+        val defaultBackbones =
+            if (useDefault) DefaultEndpointManager.selectFallbackEndpoints(app) else emptyList()
         if (useDefault) {
-            val endpoints = DefaultEndpointManager.selectFallbackEndpoints()
             Log.i(
                 TAG,
                 "No interfaces configured — default backbones " +
-                    endpoints.joinToString { "${it.first}:${it.second}" },
+                    defaultBackbones.joinToString { "${it.first}:${it.second}" },
             )
-            interfaces = DefaultEndpointManager.fallbackInterfaceConfigs(endpoints)
+            interfaces = DefaultEndpointManager.fallbackInterfaceConfigs(defaultBackbones)
         }
+        DefaultEndpointManager.setInUse(defaultBackbones)
         // The built-in AutoInterface (Settings' Local network switch, off by
         // default). Wi-Fi passes it the multicast it finds peers by only
         // while the lock is held, so the lock is taken before the stack

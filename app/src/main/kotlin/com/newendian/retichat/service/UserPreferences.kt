@@ -30,6 +30,8 @@ object UserPreferences {
     const val PREF_KEY_RTNODE_BLUETOOTH = "rtnode_bluetooth_enabled"
     const val PREF_KEY_AUTO_INTERFACE = "auto_interface_enabled"
     const val PREF_KEY_DROP_ANNOUNCES = "drop_announces"
+    /** Default backbones that failed their start-up test, and when (DefaultEndpointManager). */
+    const val PREF_KEY_BACKBONE_SKIP_LIST = "default_backbone_skip_list"
 
     // ── New keys (iOS parity) ──────────────────────────────────────────
     /** DISPLAY_NAMES.md §1: on channel posts only. Never falls back to another name. */
@@ -155,6 +157,14 @@ object UserPreferences {
 
     fun setDefaultTcpEnabled(context: Context, enabled: Boolean) {
         prefs(context).edit().putBoolean(PREF_KEY_DEFAULT_TCP, enabled).apply()
+    }
+
+    /** DefaultEndpointManager's skip list, in its encoding ("" when empty). */
+    fun backboneSkipList(context: Context): String =
+        prefs(context).getString(PREF_KEY_BACKBONE_SKIP_LIST, "").orEmpty()
+
+    fun setBackboneSkipList(context: Context, text: String) {
+        prefs(context).edit().putString(PREF_KEY_BACKBONE_SKIP_LIST, text).apply()
     }
 
     // ── Drop announces ────────────────────────────────────────────────
