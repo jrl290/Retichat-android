@@ -361,6 +361,12 @@ class LxmfFields private constructor(
          * ([directGroupEntries]).
          */
         val DISTRO_MARKERS = setOf(DISTRO_TRANSFER_TYPE, DISTRO_SENT_TYPE, DISTRO_CHANNEL_TYPE, DISTRO_GROUP_TYPE)
+        /**
+         * Every Distro control message's `fields[0xFB]` starts so: the four
+         * [DISTRO_MARKERS] and any kind a later build adds
+         * (DeliveryPolicy.distroControlType).
+         */
+        const val DISTRO_TYPE_PREFIX     = "rfed.distro."
 
         private val HEX32 = Regex("^[0-9a-fA-F]{32}$")
         private val HEX64 = Regex("^[0-9a-fA-F]{64}$")
