@@ -50,20 +50,22 @@ sealed class RTNodeBluetoothStatus {
 /**
  * Bluetooth link to any RTNode in range, with no configuration: the Prns
  * native protocol, from the dialer's (GATT central's) side. Mirrors iOS
- * `RTNodeBluetoothCoordinator`.
+ * `RTNodeBluetoothCoordinator`. The protocol is the work of The Prns Authors
+ * (Prns, https://github.com/KenAKAFrosty/Prns, MIT OR Apache-2.0); see
+ * THIRD_PARTY_NOTICES.md.
  *
  * The app is only ever the central. It advertises nothing and runs no GATT
  * server, so no phone can connect to it; it dials RTNodes only (their
  * advertisement carries the Prns peripheral-only flag).
  *
- * The protocol lives in Reticulum-rust (`interfaces::prns_ble`, the
- * `nativePrnsBle*` JNI): which advertisement to dial, the handshake,
- * fragments, and one Reticulum interface per RTNode. This object is the
- * radio: it scans when the engine asks, reports each advertisement, connects
- * when the engine hands back a link, sets the GATT link up (MTU, service
- * discovery, both subscriptions, one operation at a time), performs the
- * writes it is asked for and reports every event. It keeps no timers and
- * never re-dials on its own: the engine decides.
+ * The protocol lives in Reticulum-rust's prns-ble package, reached through
+ * `interfaces::prns_ble` and the `nativePrnsBle*` JNI: which advertisement to
+ * dial, the handshake, fragments, and one Reticulum interface per RTNode.
+ * This object is the radio: it scans when the engine asks, reports each
+ * advertisement, connects when the engine hands back a link, sets the GATT
+ * link up (MTU, service discovery, both subscriptions, one operation at a
+ * time), performs the writes it is asked for and reports every event. It
+ * keeps no timers and never re-dials on its own: the engine decides.
  *
  * Off by default (UserPreferences.isRtnodeBluetoothEnabled): nothing asks
  * for the permissions or scans until the user turns the Settings switch on.
@@ -77,7 +79,7 @@ object RTNodeBluetooth {
 
     private const val TAG = "RTNodeBLE"
 
-    // Reticulum-rust interfaces/prns_ble/wire.rs
+    // Reticulum-rust prns-ble/src/wire.rs
     private val SERVICE: UUID = UUID.fromString("37145b00-442d-4a94-917f-8f42c5da28e3")
     private val CONTROL: UUID = UUID.fromString("37145b00-442d-4a94-917f-8f42c5da28e7")
     private val DATA: UUID = UUID.fromString("37145b00-442d-4a94-917f-8f42c5da28e8")
