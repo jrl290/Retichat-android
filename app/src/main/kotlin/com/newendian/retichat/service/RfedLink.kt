@@ -63,6 +63,10 @@ object RfedLink {
         RfedChannelClient.rfedDestHash(nodeHex.lowercase(), "rfed", listOf("link"))
             ?.let { FcmTokenRegistrar.hexToBytes(it) }
 
+    /** Whether [nodeHex]'s rfed.link is ACTIVE now. */
+    fun isActive(nodeHex: String): Boolean =
+        destHash(nodeHex)?.let { ConnectionStateManager.appLinkStatus(it) } == RetichatBridge.AppLinkStatus.ACTIVE
+
     /**
      * Set up the link to [nodeHex] (once per node and identity) and start
      * opening it. Returns its destination hash, or null with no identity or
@@ -183,6 +187,9 @@ object RfedLink {
 
     /** A fresh link: bind it for channel and LXMF pushes (Link.md "The client re-binds on every link"). */
     private suspend fun bind(app: RetichatApp, node: String) {
+        // The posts queued or held for a link go on its every ACTIVE edge;
+        // launched, they wait for none of the binding below.
+        app.rfedChannelClient.onRfedLinkActive()
         try {
             app.rfedChannelClient.sendChannelStreamConfigForNode(node)
         } catch (e: CancellationException) {

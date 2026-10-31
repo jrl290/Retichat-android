@@ -17,10 +17,11 @@ import java.io.File
  * showed both.
  *
  * Now (James, 2026-10-30) a post is packed once and every attempt sends those
- * bytes, only the stamp computed again; it is sent again only after rfed
- * answered with a refusal; and a post rfed did not answer keeps its entry
- * awaiting the answer, so its echo, if rfed has it, makes the failed row the
- * post, SENT.
+ * bytes, only the stamp computed again; it is sent again at once only after
+ * rfed answered with a refusal; and a post rfed did not answer keeps its entry
+ * awaiting the answer, so its echo, if rfed has it, makes the held row the
+ * post, SENT. Held, it goes again as it was packed when its rfed.link is up
+ * (2026-10-31, ChannelPostHeldTest).
  *
  * RfedChannelClient is Android: its source is what is pinned.
  */
@@ -64,7 +65,7 @@ class ChannelPostSameBytesTest {
         val post = body("post")
         inOrder(
             post,
-            "val packed = packPost(channel, content, postingHandle, postName)",
+            "val packed = held?.packed ?: packPost(channel, content, postingHandle, postName)",
             "trySend(liveChannel, packed,",
             "trySend(liveChannel, packed,",
         )
@@ -87,7 +88,7 @@ class ChannelPostSameBytesTest {
         )
         // A post that cannot be packed is failed at once: no attempt.
         inOrder(
-            between(post, "val packed = packPost(", "trySend("),
+            between(post, "val packed = held?.packed ?: packPost(", "trySend("),
             "?: run {",
             "ChannelMessageEntity.SEND_STATE_FAILED",
             "return false",
@@ -95,19 +96,25 @@ class ChannelPostSameBytesTest {
     }
 
     @Test
-    fun aPostIsSentAgainOnlyAfterRfedAnsweredWithARefusal() {
+    fun aPostIsSentAgainAtOnceOnlyAfterRfedAnsweredWithARefusal() {
         val post = body("post")
         inOrder(
             post,
-            "val first = trySend(liveChannel, packed,",
-            "if (first == SendOutcome.SENT) return true",
-            // No answer, or nothing sent: failed, never sent again.
-            "if (first != SendOutcome.REFUSED) {",
+            "when (trySend(liveChannel, packed, content, optimisticId, postingHex, postName)) {",
+            "SendOutcome.SENT -> return releaseAfterSent()",
+            // No answer: held as it was packed, for its rfed.link's return (ChannelPostHeldTest).
+            "SendOutcome.UNANSWERED -> return holdPost(optimisticId, liveChannel, packed, postingHex, postName)",
+            // Nothing sent: failed.
+            "SendOutcome.NOT_SENT -> {",
             "ChannelMessageEntity.SEND_STATE_FAILED",
             "return false",
             // A refusal: the stamp cost refreshed, and the same packed post sent once more.
+            "SendOutcome.REFUSED -> Unit",
             "refreshStampCost(liveChannel)",
-            "trySend(liveChannel, packed,",
+            "when (trySend(liveChannel, packed, content, optimisticId, postingHex, postName)) {",
+            "SendOutcome.SENT -> releaseAfterSent()",
+            "SendOutcome.UNANSWERED -> holdPost(optimisticId, liveChannel, packed, postingHex, postName)",
+            "ChannelMessageEntity.SEND_STATE_FAILED",
         )
         // Unanswered when rfed's answer did not come; refused only when it came.
         val attempt = body("trySend")
@@ -138,7 +145,7 @@ class ChannelPostSameBytesTest {
             "but the post's echo came: sent",
             "} else {",
         )
-        // post() leaves the entry alone, and fails the placeholder in place, its id kept:
+        // post() leaves the entry alone, and holds the placeholder in place, its id kept:
         // the echo finds it by that id.
         val post = body("post")
         assertFalse(post.contains("postsAwaitingAnswer"))

@@ -295,10 +295,20 @@ class RfedChannelClient(
      * bubbles for the same message appear, then one is removed"). Sends and
      * echoes run on different threads; each entry is taken once (remove).
      * A post rfed did not answer keeps its entry (2026-10-30): rfed may have
-     * it, and its echo then makes the failed row the post, SENT. If rfed never
-     * got it, the entry stays until the process ends.
+     * it, and its echo then makes the held row ([holdPost]) the post, SENT.
+     * If rfed never got it, the entry stays until the process ends.
      */
     private val postsAwaitingAnswer = ConcurrentHashMap<String, String>()
+    /**
+     * Posts rfed did not answer, held for their rfed.link's return
+     * ([holdPost]), by placeholder id, each as it was packed: the release
+     * sends these same bytes ([post]), which every reader dedupes if rfed had
+     * the post (iOS's packedPosts). Taken out when the release takes the post
+     * or its echo makes it SENT. In memory only: a post still held when the
+     * process ends is packed again, with a new timestamp, when the next
+     * process releases it.
+     */
+    private val heldPosts = ConcurrentHashMap<String, HeldPost>()
     /** RFed node identity hashes whose channel.stream link we have already wired. */
     private val trackedChannelStreamNodes = mutableSetOf<String>()
     /** Runtime-only channel ids whose conversation screen opened in this process. */
@@ -825,8 +835,9 @@ class RfedChannelClient(
     // ── Send ───────────────────────────────────────────────────────────
 
     /**
-     * Send a content message to a channel. Suspends until either the
-     * packet is shipped or the post has failed ([post]). The local
+     * Send a content message to a channel. Suspends until the packet is
+     * shipped, the post is held for its rfed.link's return ([holdPost]) or it
+     * has failed ([post]). The local
      * `ChannelMessageEntity` is upserted IMMEDIATELY (optimistic) and its
      * id is upgraded to `senderHex|tsMs` once the FFI returns the LXMF
      * timestamp it baked into the signed body.
@@ -884,24 +895,43 @@ class RfedChannelClient(
     }
 
     /**
-     * Send the posts [queuePost] queued, oldest first, now the start has
-     * finished: at the ready signal ([onStackReady]), at the network's return,
-     * and from the wait a queued post started. One release at a time, each
+     * An rfed.link came up (RfedLink's ACTIVE edge): the posts queued or held
+     * for it go now, as iOS's "channel-queue" binder sends them.
+     */
+    fun onRfedLinkActive() {
+        scope.launch(Dispatchers.IO) { releaseQueuedPosts() }
+    }
+
+    /**
+     * Send the queued posts, oldest first: those [queuePost] queued at
+     * start-up and those [holdPost] held after no answer. At the ready signal
+     * ([onStackReady]), at the network's return, from the wait a queued post
+     * started, on every ACTIVE edge of an rfed.link ([onRfedLinkActive]) and
+     * after a post rfed took ([releaseAfterSent]). One release at a time, each
      * reading the queue afresh ([SerialFlush], as the DM queue), and each post
-     * taken from the queue once ([post]). Ordering (DESIGN_PRINCIPLES §5), not
-     * a retry.
+     * taken from the queue once ([post]). A post whose rfed.link is not up
+     * waits for that link's edge, its opening started here, rather than 5 s
+     * for it in the request. Ordering (DESIGN_PRINCIPLES §5), not a retry: no
+     * timer, each release follows a signal.
      */
     private suspend fun releaseQueuedPosts() {
         staleRecovery.join()
         queuedRelease.run(
             pending = { if (!started() || !NetworkMonitor.isOnline.value) emptyList() else channelDao.queuedOutboundMessages() },
         ) { rows ->
-            Log.i(TAG, "SEND: ${rows.size} post(s) queued at start-up released")
+            Log.i(TAG, "SEND: releasing ${rows.size} queued post(s)")
             for (row in rows) {
                 val channel = channelDao.findById(row.channelId)
                 if (channel == null) {
                     Log.w(TAG, "SEND: queued ${row.id} has no channel ${row.channelId} — failed")
+                    heldPosts.remove(row.id)
                     channelDao.updateMessageSendState(row.id, ChannelMessageEntity.SEND_STATE_FAILED)
+                    continue
+                }
+                // A node rfed.link cannot reach fails in [post], as a post typed now.
+                val node = linkNode(channel.rfedNodeIdentityHashHex)
+                if (node != null && !RfedLink.isActive(node)) {
+                    RfedLink.ensure(app, node)
                     continue
                 }
                 sendMutex.withLock { post(channel, row.content, queuedId = row.id) }
@@ -910,9 +940,47 @@ class RfedChannelClient(
     }
 
     /**
+     * Hold a post rfed did not answer (James, 2026-10-31: "Yes, match
+     * iPhone", iOS's queuePost): queued again, the pending clock, and kept as
+     * it was packed ([heldPosts]) for the release its rfed.link's next ACTIVE
+     * edge or another post rfed takes brings, which sends those same bytes.
+     * Opening the link starts here, so its edge comes. Its entry awaiting the
+     * answer stays: an echo that comes first makes it SENT, and then it is not
+     * held. True: the post is kept.
+     */
+    private suspend fun holdPost(
+        optimisticId: String,
+        channel: ChannelEntity,
+        packed: PackedPost,
+        postingHex: String,
+        postName: NameField,
+    ): Boolean {
+        heldPosts[optimisticId] = HeldPost(packed, postingHex, postName)
+        if (channelDao.holdSendingMessage(optimisticId) == 0) {
+            // Its echo came meanwhile: the placeholder is the post, SENT.
+            heldPosts.remove(optimisticId)
+            return true
+        }
+        Log.w(TAG, "SEND held: $optimisticId queued until rfed.link is up, then sent again as the same post")
+        RfedLink.ensure(app, channel.rfedNodeIdentityHashHex)
+        return true
+    }
+
+    /**
+     * A post rfed took: its rfed.link is up, so the posts queued or held go
+     * too (iOS's `.sent`). Launched: [post] runs under [sendMutex], and a
+     * release running now is followed by this one ([SerialFlush]).
+     */
+    private fun releaseAfterSent(): Boolean {
+        scope.launch(Dispatchers.IO) { releaseQueuedPosts() }
+        return true
+    }
+
+    /**
      * Pack, sign and send one post to [channel], under [sendMutex]: a post typed
-     * now ([queuedId] null), stored here, or one [queuePost] stored at start-up,
-     * taken from the queue here, once, and sent in its place.
+     * now ([queuedId] null), stored here, or a queued one, taken from the queue
+     * here, once, and sent in its place: one [queuePost] stored at start-up,
+     * packed here, or one [holdPost] held after no answer, sent as it was packed.
      */
     private suspend fun post(channel: ChannelEntity, content: String, queuedId: String?): Boolean {
         val identityHandle = StackRuntime.identityHandle
@@ -930,12 +998,17 @@ class RfedChannelClient(
         // (`identityHandle`): RFed keys all of them by subscriber hash.
         val (postingHash, postingHandle) =
             DistroManager.sendingIdentity(StackRuntime.selfDestHash, identityHandle)
-        val postingHex = postingHash.toHex()
+        // A post held after no answer goes as it was packed: under the
+        // identity that signed it, with the name decision it carries.
+        val held = queuedId?.let { heldPosts[it] }
+        val postingHex = held?.postingHex ?: postingHash.toHex()
         val optimisticId: String
         if (queuedId != null) {
             // Taken from the queue once (a second release finds it gone), and
-            // filed under the posting identity held now.
+            // filed under the posting identity held now, or the one that
+            // signed a held post.
             if (channelDao.claimQueuedMessage(queuedId, postingHex) == 0) return false
+            heldPosts.remove(queuedId)
             optimisticId = queuedId
         } else {
             optimisticId = "pending|${System.nanoTime()}"
@@ -968,17 +1041,17 @@ class RfedChannelClient(
 
             // DISPLAY_NAMES.md §4.2: whether this post carries the
             // Channel Display Name, decided once for the post (the retry
-            // below sends the same decision).
-            val postName = withContext(Dispatchers.IO) { channelPostName(channel.id, postingHex) }
+            // below, and a held post's release, send the same decision).
+            val postName = held?.postName ?: withContext(Dispatchers.IO) { channelPostName(channel.id, postingHex) }
 
             // Packed and signed once, here (James, 2026-10-30): every attempt
             // sends these same bytes, so the post keeps the one LXMF timestamp
             // its readers dedupe it by. Until then each attempt packed it
             // again, and when rfed's answer came after 5 s, the post rfed had
             // already stored and fanned out went a second time with a new
-            // timestamp: everyone saw it twice. A post that cannot be packed
-            // is failed now, never attempted.
-            val packed = packPost(channel, content, postingHandle, postName) ?: run {
+            // timestamp: everyone saw it twice. A held post was packed before.
+            // A post that cannot be packed is failed now, never attempted.
+            val packed = held?.packed ?: packPost(channel, content, postingHandle, postName) ?: run {
                 Log.w(TAG, "SEND: the post could not be packed — marking optimistic row FAILED")
                 channelDao.updateMessageSendState(
                     optimisticId,
@@ -987,21 +1060,27 @@ class RfedChannelClient(
                 return false
             }
 
-            val first = trySend(liveChannel, packed, content, optimisticId, postingHex, postName)
-            if (first == SendOutcome.SENT) return true
-
-            // Step 2, only after rfed answered with a refusal (a stamp cost
-            // that changed, say): refresh the stampCost and send the same
-            // packed post once more, stamped again. No answer is not a
-            // refusal (James, 2026-10-30): rfed may have the post, so it is
-            // not sent again, and its echo makes the failed row SENT if so.
-            if (first != SendOutcome.REFUSED) {
-                Log.w(TAG, "SEND $first — marking optimistic row FAILED, not sent again")
-                channelDao.updateMessageSendState(
-                    optimisticId,
-                    ChannelMessageEntity.SEND_STATE_FAILED,
-                )
-                return false
+            when (trySend(liveChannel, packed, content, optimisticId, postingHex, postName)) {
+                SendOutcome.SENT -> return releaseAfterSent()
+                // No answer is not a refusal (James, 2026-10-30): rfed may
+                // have the post. It is held, queued, and goes again as it was
+                // packed when its rfed.link is up; its echo, if rfed has it,
+                // makes it SENT first (James, 2026-10-31: "Yes, match iPhone").
+                // Until then it was failed for good: a post made while the
+                // link was down, never sent, kept its red mark.
+                SendOutcome.UNANSWERED -> return holdPost(optimisticId, liveChannel, packed, postingHex, postName)
+                SendOutcome.NOT_SENT -> {
+                    Log.w(TAG, "SEND not sent — marking optimistic row FAILED")
+                    channelDao.updateMessageSendState(
+                        optimisticId,
+                        ChannelMessageEntity.SEND_STATE_FAILED,
+                    )
+                    return false
+                }
+                // Step 2, only after rfed answered with a refusal (a stamp
+                // cost that changed, say): refresh the stampCost and send the
+                // same packed post once more, stamped again.
+                SendOutcome.REFUSED -> Unit
             }
             Log.w(TAG, "SEND refused once — refreshing stampCost and sending the same post again")
             runCatching { refreshStampCost(liveChannel) }
@@ -1012,15 +1091,18 @@ class RfedChannelClient(
                 .onFailure {
                     Log.w(TAG, "stampCost refresh on retry failed: ${it.message}")
                 }
-            if (trySend(liveChannel, packed, content, optimisticId, postingHex, postName) != SendOutcome.SENT) {
-                Log.w(TAG, "SEND failed twice — marking optimistic row FAILED for user retry")
-                channelDao.updateMessageSendState(
-                    optimisticId,
-                    ChannelMessageEntity.SEND_STATE_FAILED,
-                )
-                return false
+            when (trySend(liveChannel, packed, content, optimisticId, postingHex, postName)) {
+                SendOutcome.SENT -> releaseAfterSent()
+                SendOutcome.UNANSWERED -> holdPost(optimisticId, liveChannel, packed, postingHex, postName)
+                else -> {
+                    Log.w(TAG, "SEND failed twice — marking optimistic row FAILED for user retry")
+                    channelDao.updateMessageSendState(
+                        optimisticId,
+                        ChannelMessageEntity.SEND_STATE_FAILED,
+                    )
+                    false
+                }
             }
-            true
         } catch (cancelled: CancellationException) {
             Log.w(TAG, "SEND cancelled — marking optimistic row FAILED", cancelled)
             withContext(NonCancellable) {
@@ -1119,6 +1201,13 @@ class RfedChannelClient(
      * attempt sends these bytes; only the stamp after them is computed again.
      */
     private class PackedPost(val tsMs: Long, val wirePayload: ByteArray)
+
+    /**
+     * A post rfed did not answer, held for its rfed.link's return
+     * ([holdPost]): the post as it was packed, the posting identity that
+     * signed it and the Channel Display Name decision it carries (§4.2).
+     */
+    private class HeldPost(val packed: PackedPost, val postingHex: String, val postName: NameField)
 
     /**
      * Pack and sign [content] for [channel] as [postingHandle], once per post
@@ -1223,10 +1312,10 @@ class RfedChannelClient(
                 // No answer is not a refusal (2026-10-30): rfed's answer can
                 // come after 5 s, when it has stored and fanned out the post
                 // already (production: links took 6-18 s to come up). The
-                // entry stays, so the echo, if it comes, makes the failed
+                // entry stays, so the echo, if it comes, makes the held
                 // placeholder the post, SENT, never a second row.
                 if (postsAwaitingAnswer.containsKey(canonicalId)) {
-                    Log.w(TAG, "Send unanswered: $refusal — not sent again; its echo makes it sent if rfed has it")
+                    Log.w(TAG, "Send unanswered: $refusal — held for rfed.link; its echo makes it sent if rfed has it")
                     return@withContext SendOutcome.UNANSWERED
                 }
                 Log.i(TAG, "SEND: rfed answered $refusal, but the post's echo came: sent")
@@ -1483,6 +1572,8 @@ class RfedChannelClient(
                         sendState = ChannelMessageEntity.SEND_STATE_SENT,
                     )
                 )
+                // Held for rfed.link's return, it is not sent again.
+                heldPosts.remove(placeholderId)
                 channelDao.bumpLastMessageTime(channelHashHex, result.timestampMs)
                 return@withContext true
             }

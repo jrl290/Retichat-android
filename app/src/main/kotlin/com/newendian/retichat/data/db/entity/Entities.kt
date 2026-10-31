@@ -231,8 +231,9 @@ data class ChannelMessageEntity(
      * - 0 = SENDING (in flight; indicator suppressed in UI)
      * - 1 = SENT    (rfed accepted the packet — single check)
      * - 2 = FAILED  (both send attempts failed — red X)
-     * - 3 = QUEUED  (typed while the app was starting; sent when the start
-     *   finishes, as a queued DM is: the DM's pending clock)
+     * - 3 = QUEUED  (typed while the app was starting, or not answered by
+     *   rfed; sent when the start finishes or its rfed.link comes up, as a
+     *   queued DM is: the DM's pending clock)
      */
     val sendState: Int = SEND_STATE_SENT,
 ) {

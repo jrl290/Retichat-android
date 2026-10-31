@@ -105,6 +105,19 @@ class QueuedPostsSqlTest {
         assertEquals("nothing but a queued post is taken", 0, exec(claim, mapOf("id" to "x|3", "postingHex" to posting)))
     }
 
+    @Test
+    fun aChannelPostRfedDidNotAnswerIsHeldOnlyWhileStillSending() {
+        val hold = query(channelDao, "holdSendingMessage")
+        assertEquals(1, exec(hold, mapOf("id" to "pending|2")))
+        assertEquals("queued again, the pending clock", queued, sendState("pending|2"))
+        assertEquals("listed for the release", listOf("pending|1", "pending|2"), select(query(channelDao, "queuedOutboundMessages"), emptyMap()))
+        assertEquals("held once", 0, exec(hold, mapOf("id" to "pending|2")))
+        // Its echo made it the post: a sent row, or a placeholder already replaced, is not held.
+        assertEquals(0, exec(hold, mapOf("id" to "x|3")))
+        assertEquals(1, sendState("x|3"))
+        assertEquals(0, exec(hold, mapOf("id" to "pending|gone")))
+    }
+
     // ---- helpers ----
 
     /** The @Query string right before `fun [name](` in [dao]. */

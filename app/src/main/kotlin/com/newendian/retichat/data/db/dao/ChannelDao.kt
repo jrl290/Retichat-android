@@ -76,12 +76,21 @@ interface ChannelDao {
 
     /**
      * Posts typed while the app was starting (sendState QUEUED, James's UI
-     * rulings 2026-10-11), oldest first: sent when the start finishes. Never
-     * failed by [failStaleOutboundSendingMessages]: they wait for the start as
-     * a queued DM does.
+     * rulings 2026-10-11), and posts rfed did not answer, held for their
+     * rfed.link's return (2026-10-31), oldest first: sent when the start
+     * finishes or the link comes up. Never failed by
+     * [failStaleOutboundSendingMessages]: they wait as a queued DM does.
      */
     @Query("SELECT * FROM channel_messages WHERE isOutbound = 1 AND sendState = 3 ORDER BY timestamp ASC")
     suspend fun queuedOutboundMessages(): List<ChannelMessageEntity>
+
+    /**
+     * Hold the post [id] rfed did not answer: QUEUED again, only while it is
+     * still SENDING (its echo may have made it the post already). Returns 1
+     * when it was held and 0 when it was not.
+     */
+    @Query("UPDATE channel_messages SET sendState = 3 WHERE id = :id AND isOutbound = 1 AND sendState = 0")
+    suspend fun holdSendingMessage(id: String): Int
 
     /**
      * Take the queued post [id] for sending: SENDING, filed under [postingHex],
