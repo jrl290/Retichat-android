@@ -294,6 +294,9 @@ class RfedChannelClient(
      * placeholder until the answer removed one (James, 2026-10-20: "two
      * bubbles for the same message appear, then one is removed"). Sends and
      * echoes run on different threads; each entry is taken once (remove).
+     * A post rfed did not answer keeps its entry (2026-10-30): rfed may have
+     * it, and its echo then makes the failed row the post, SENT. If rfed never
+     * got it, the entry stays until the process ends.
      */
     private val postsAwaitingAnswer = ConcurrentHashMap<String, String>()
     /** RFed node identity hashes whose channel.stream link we have already wired. */
@@ -823,7 +826,7 @@ class RfedChannelClient(
 
     /**
      * Send a content message to a channel. Suspends until either the
-     * packet is shipped or the second retry fails. The local
+     * packet is shipped or the post has failed ([post]). The local
      * `ChannelMessageEntity` is upserted IMMEDIATELY (optimistic) and its
      * id is upgraded to `senderHex|tsMs` once the FFI returns the LXMF
      * timestamp it baked into the signed body.
@@ -968,12 +971,39 @@ class RfedChannelClient(
             // below sends the same decision).
             val postName = withContext(Dispatchers.IO) { channelPostName(channel.id, postingHex) }
 
-            if (trySend(liveChannel, content, optimisticId, postingHex, postingHandle, postName)) {
-                return true
+            // Packed and signed once, here (James, 2026-10-30): every attempt
+            // sends these same bytes, so the post keeps the one LXMF timestamp
+            // its readers dedupe it by. Until then each attempt packed it
+            // again, and when rfed's answer came after 5 s, the post rfed had
+            // already stored and fanned out went a second time with a new
+            // timestamp: everyone saw it twice. A post that cannot be packed
+            // is failed now, never attempted.
+            val packed = packPost(channel, content, postingHandle, postName) ?: run {
+                Log.w(TAG, "SEND: the post could not be packed — marking optimistic row FAILED")
+                channelDao.updateMessageSendState(
+                    optimisticId,
+                    ChannelMessageEntity.SEND_STATE_FAILED,
+                )
+                return false
             }
 
-            // Step 2: refresh + single retry.
-            Log.w(TAG, "SEND failed once — refreshing stampCost and retrying")
+            val first = trySend(liveChannel, packed, content, optimisticId, postingHex, postName)
+            if (first == SendOutcome.SENT) return true
+
+            // Step 2, only after rfed answered with a refusal (a stamp cost
+            // that changed, say): refresh the stampCost and send the same
+            // packed post once more, stamped again. No answer is not a
+            // refusal (James, 2026-10-30): rfed may have the post, so it is
+            // not sent again, and its echo makes the failed row SENT if so.
+            if (first != SendOutcome.REFUSED) {
+                Log.w(TAG, "SEND $first — marking optimistic row FAILED, not sent again")
+                channelDao.updateMessageSendState(
+                    optimisticId,
+                    ChannelMessageEntity.SEND_STATE_FAILED,
+                )
+                return false
+            }
+            Log.w(TAG, "SEND refused once — refreshing stampCost and sending the same post again")
             runCatching { refreshStampCost(liveChannel) }
                 .onSuccess {
                     stampCostRefreshedThisSession.add(liveChannel.id)
@@ -982,7 +1012,7 @@ class RfedChannelClient(
                 .onFailure {
                     Log.w(TAG, "stampCost refresh on retry failed: ${it.message}")
                 }
-            if (!trySend(liveChannel, content, optimisticId, postingHex, postingHandle, postName)) {
+            if (trySend(liveChannel, packed, content, optimisticId, postingHex, postName) != SendOutcome.SENT) {
                 Log.w(TAG, "SEND failed twice — marking optimistic row FAILED for user retry")
                 channelDao.updateMessageSendState(
                     optimisticId,
@@ -1083,22 +1113,34 @@ class RfedChannelClient(
         legacyNameStateAdopted = true
     }
 
-    private suspend fun trySend(
+    /**
+     * One post, packed and signed once ([packPost]): the LXMF timestamp it
+     * carries and the bytes rfed is sent, the channel hash first. Every
+     * attempt sends these bytes; only the stamp after them is computed again.
+     */
+    private class PackedPost(val tsMs: Long, val wirePayload: ByteArray)
+
+    /**
+     * Pack and sign [content] for [channel] as [postingHandle], once per post
+     * ([post]). Null when it could not be packed.
+     */
+    private suspend fun packPost(
         channel: ChannelEntity,
         content: String,
-        optimisticId: String,
-        postingHex: String,
         postingHandle: Long,
         postName: NameField,
-    ): Boolean = withContext(Dispatchers.IO) {
+    ): PackedPost? = withContext(Dispatchers.IO) {
         val packed = RetichatBridge.channelLxmPack(
             channel.channelName, postingHandle, content.toByteArray(), ByteArray(0), postName,
         ) ?: run {
             Log.w(TAG, "LXMF pack failed: ${RetichatBridge.lastError()}")
-            return@withContext false
+            return@withContext null
         }
         // Layout from JNI: [ts_ms_be(8) | channel_id_hash(16) | EC_encrypted_tail]
-        if (packed.size < 24) return@withContext false
+        if (packed.size < 24) {
+            Log.w(TAG, "LXMF pack too short: ${packed.size} bytes")
+            return@withContext null
+        }
         val tsMs = readLongBE(packed, 0)
         val wirePayload = packed.copyOfRange(8, packed.size)
 
@@ -1114,9 +1156,41 @@ class RfedChannelClient(
             val canonical = RetichatBridge.channelHash16(channel.channelName)
             System.arraycopy(canonical, 0, wirePayload, 0, 16)
         }
+        PackedPost(tsMs, wirePayload)
+    }
 
-        val rfedNode = linkNode(channel.rfedNodeIdentityHashHex)
-            ?: return@withContext false
+    /** What one attempt at a post came to ([trySend]). [post] sends it again only after [REFUSED]. */
+    private enum class SendOutcome {
+        /** rfed has the post: it answered that it stored it, or the post's echo came. */
+        SENT,
+        /** rfed answered with a refusal, or with an answer that could not be read. */
+        REFUSED,
+        /** No answer from rfed within 5 s: it may have the post all the same. */
+        UNANSWERED,
+        /** Nothing sent: no rfed.link to the channel's node, or no stamp. */
+        NOT_SENT,
+    }
+
+    /**
+     * One attempt at [packed]: its bytes, stamped at [channel]'s stamp cost
+     * now (the stamp is all that may differ between attempts), sent to rfed
+     * as `/channel/publish`.
+     */
+    private suspend fun trySend(
+        channel: ChannelEntity,
+        packed: PackedPost,
+        content: String,
+        optimisticId: String,
+        postingHex: String,
+        postName: NameField,
+    ): SendOutcome = withContext(Dispatchers.IO) {
+        val tsMs = packed.tsMs
+        val wirePayload = packed.wirePayload
+
+        val rfedNode = linkNode(channel.rfedNodeIdentityHashHex) ?: run {
+            Log.w(TAG, "SEND not sent: no rfed.link to node ${channel.rfedNodeIdentityHashHex.take(8)}")
+            return@withContext SendOutcome.NOT_SENT
+        }
 
         val finalPayload = run {
             val cost = channel.stampCost ?: 0
@@ -1124,7 +1198,7 @@ class RfedChannelClient(
             else {
                 val stamp = RetichatBridge.channelComputeStamp(wirePayload, cost) ?: run {
                     Log.w(TAG, "STAMP compute failed cost=$cost: ${RetichatBridge.lastError()}")
-                    return@withContext false
+                    return@withContext SendOutcome.NOT_SENT
                 }
                 wirePayload + stamp
             }
@@ -1145,11 +1219,24 @@ class RfedChannelClient(
         if (refusal != null) {
             // An echo that came first took the entry: it came from RFed, so
             // RFed has the post, whatever the answer says.
-            if (postsAwaitingAnswer.remove(canonicalId) != null) {
-                Log.w(TAG, "Send failed: rfed answered $refusal")
-                return@withContext false
+            if (answer == null) {
+                // No answer is not a refusal (2026-10-30): rfed's answer can
+                // come after 5 s, when it has stored and fanned out the post
+                // already (production: links took 6-18 s to come up). The
+                // entry stays, so the echo, if it comes, makes the failed
+                // placeholder the post, SENT, never a second row.
+                if (postsAwaitingAnswer.containsKey(canonicalId)) {
+                    Log.w(TAG, "Send unanswered: $refusal — not sent again; its echo makes it sent if rfed has it")
+                    return@withContext SendOutcome.UNANSWERED
+                }
+                Log.i(TAG, "SEND: rfed answered $refusal, but the post's echo came: sent")
+            } else {
+                if (postsAwaitingAnswer.remove(canonicalId) != null) {
+                    Log.w(TAG, "Send failed: rfed answered $refusal")
+                    return@withContext SendOutcome.REFUSED
+                }
+                Log.i(TAG, "SEND: rfed answered $refusal, but the post's echo came: sent")
             }
-            Log.i(TAG, "SEND: rfed answered $refusal, but the post's echo came: sent")
         }
         Log.i(TAG, "SEND ok: channel='${channel.channelName}' id=${channel.id} rfedNode=${rfedNode.take(8)} payload=${finalPayload.size}B stamp=${(channel.stampCost ?: 0)} name=${postName.state}")
         recordPostName(channel.id, postingHex, postName)
@@ -1174,7 +1261,7 @@ class RfedChannelClient(
         )
         postsAwaitingAnswer.remove(canonicalId)
         channelDao.bumpLastMessageTime(channel.id, tsMs)
-        true
+        SendOutcome.SENT
     }
 
     // ── Subscribe (server) ─────────────────────────────────────────────

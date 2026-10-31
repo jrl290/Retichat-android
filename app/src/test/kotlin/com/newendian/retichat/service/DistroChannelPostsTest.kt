@@ -60,13 +60,17 @@ class DistroChannelPostsTest {
     fun aPostIsPackedWithThePostingIdentityAndRecordedUnderItsHash() {
         val send = body("suspend fun sendMessage(", "private suspend fun channelPostName(")
         assertTrue(send.contains("DistroManager.sendingIdentity(StackRuntime.selfDestHash, identityHandle)"))
+        // Packed once per post (2026-10-30), as the posting identity.
+        assertTrue(send.contains("packPost(channel, content, postingHandle, postName)"))
+        val pack = body("private suspend fun packPost(", "private suspend fun trySend(")
+        assertTrue(pack.contains("channel.channelName, postingHandle,"))
         val trySend = body("private suspend fun trySend(", "// ── Subscribe (server)")
-        assertTrue(trySend.contains("channel.channelName, postingHandle,"))
         assertTrue(trySend.contains("canonicalMessageId(postingHex, tsMs)"))
         assertTrue(trySend.contains("sourceHashHex = postingHex"))
         assertTrue(trySend.contains("recordPostName(channel.id, postingHex, postName)"))
         // The device's own hash is no longer what a post is filed under.
         assertFalse(send.contains("selfDestHash.toHex()"))
+        assertFalse(pack.contains("selfDestHash"))
         assertFalse(trySend.contains("selfDestHash"))
     }
 

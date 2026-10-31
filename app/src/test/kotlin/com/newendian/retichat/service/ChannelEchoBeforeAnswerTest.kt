@@ -51,7 +51,7 @@ class ChannelEchoBeforeAnswerTest {
             "if (refusal != null) {",
             // Still waiting: no echo, so the refusal stands.
             "if (postsAwaitingAnswer.remove(canonicalId) != null) {",
-            "return@withContext false",
+            "return@withContext SendOutcome.REFUSED",
             "recordPostName(channel.id, postingHex, postName)",
             "channelDao.replaceMessage(",
             "optimisticId,",
