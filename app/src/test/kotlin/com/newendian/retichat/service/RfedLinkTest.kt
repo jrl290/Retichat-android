@@ -27,7 +27,7 @@ class RfedLinkTest {
         // [false, nil], or a reason cut short
         assertEquals("a refusal", RfedChannelClient.publishRefusal(byteArrayOf(0x92.toByte(), 0xc2.toByte(), 0xc0.toByte())))
         assertEquals("a refusal", RfedChannelClient.publishRefusal(byteArrayOf(0x92.toByte(), 0xc2.toByte(), 0xa5.toByte(), 0x73)))
-        assertEquals("nothing within 5 s", RfedChannelClient.publishRefusal(null))
+        assertEquals("no answer", RfedChannelClient.publishRefusal(null))
         assertEquals("an unreadable answer c3", RfedChannelClient.publishRefusal(byteArrayOf(0xc3.toByte())))
     }
 

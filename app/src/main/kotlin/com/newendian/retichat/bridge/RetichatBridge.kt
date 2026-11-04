@@ -1040,6 +1040,17 @@ object RetichatBridge {
         const val RECOVERED      = 5
     }
 
+    /**
+     * [appLinkRouteSpeed]: whether the route to a destination is fast or slow,
+     * by the round trip the latest link to it measured as it came up (the
+     * link's own ping; app-links `SLOW_ROUTE_RTT_SECS`, 1 s).
+     */
+    object RouteSpeed {
+        const val UNKNOWN = 0
+        const val FAST    = 1
+        const val SLOW    = 2
+    }
+
     /** Result codes for [appLinkRequestAsync] callbacks. */
     object AppLinkRequestStatus {
         const val RESPONSE = 0
@@ -1089,6 +1100,9 @@ object RetichatBridge {
     /** Current [AppLinkStatus] for `destHash`, or -1 on parameter error. */
     fun appLinkStatus(routerHandle: Long, destHash: ByteArray): Int =
         nativeAppLinkStatus(routerHandle, destHash)
+
+    /** [RouteSpeed] of the route to `destHash`. */
+    fun appLinkRouteSpeed(destHash: ByteArray): Int = nativeAppLinkRouteSpeed(destHash)
 
     /** Explicit deterministic re-open trigger for an existing app link. */
     fun appLinkReopen(routerHandle: Long, destHash: ByteArray): Boolean =
@@ -1189,6 +1203,7 @@ object RetichatBridge {
     ): Int
     private external fun nativeAppLinkClose(router: Long, destHash: ByteArray): Int
     private external fun nativeAppLinkStatus(router: Long, destHash: ByteArray): Int
+    private external fun nativeAppLinkRouteSpeed(destHash: ByteArray): Int
     private external fun nativeAppLinkReopen(router: Long, destHash: ByteArray): Int
     private external fun nativeAppLinkRegisterReconnect(router: Long, aspect: String): Int
     private external fun nativeAppLinkNetworkChanged(router: Long): Int

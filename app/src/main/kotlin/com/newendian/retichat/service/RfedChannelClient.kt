@@ -102,7 +102,7 @@ class RfedChannelClient(
          * reason; no answer, or one that isn't either, says so.
          */
         internal fun publishRefusal(answer: ByteArray?): String? {
-            if (answer == null) return "nothing within 5 s"
+            if (answer == null) return "no answer"
             if (answer.size >= 2 && answer[0] == 0x92.toByte() && answer[1] == 0xc3.toByte()) return null
             if (answer.size >= 2 && answer[0] == 0x92.toByte() && answer[1] == 0xc2.toByte()) {
                 val tag = if (answer.size > 2) answer[2].toInt() and 0xff else -1
@@ -1259,7 +1259,7 @@ class RfedChannelClient(
         SENT,
         /** rfed answered with a refusal, or with an answer that could not be read. */
         REFUSED,
-        /** No answer from rfed within 5 s: it may have the post all the same. */
+        /** No answer from rfed: it may have the post all the same. */
         UNANSWERED,
         /** Nothing sent: no rfed.link to the channel's node, or no stamp. */
         NOT_SENT,
@@ -1381,7 +1381,7 @@ class RfedChannelClient(
         // On rfed.link; AppLinks owns path readiness and the 5 s budget.
         // // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1
         val resp = RfedLink.request(app, rfedNode, "/channel/subscribe", payload)
-            ?: throw IllegalStateException("rfed.link /channel/subscribe failed or no response within 5 s")
+            ?: throw IllegalStateException("rfed.link /channel/subscribe failed or no answer")
 
         parseSubscribeResponse(resp)
     }
@@ -1443,7 +1443,7 @@ class RfedChannelClient(
                 // (the pull authenticates by link identity, Link.md "Identify").
                 // // NEVER REMOVE EVER — see DESIGN_PRINCIPLES.md §1
                 val resp = RfedLink.request(app, rfedNode, "/channel/pull", msgpackBin(channelHashBytes)) ?: run {
-                    Log.w(TAG, "PULL: rfed.link /channel/pull failed or no response within 5 s")
+                    Log.w(TAG, "PULL: rfed.link /channel/pull failed or no answer")
                     _canPullMore.value = _canPullMore.value + (channelKey to null)
                     return@withContext 0 to false
                 }

@@ -84,7 +84,14 @@ object ConnectionStateManager {
     private val appLinkStatusHandlers = mutableMapOf<String, (Int) -> Unit>()
     private val appLinkActiveWaiters = mutableMapOf<String, MutableList<CompletableDeferred<Boolean>>>()
     private val essentialReadyHandlers = mutableMapOf<String, () -> Unit>()
+    // A slow route's requests ([slowRouteSend]): each node's turn, and the
+    // waiters woken by any status event of that node's link.
+    private val slowRouteTurns = mutableMapOf<String, Mutex>()
+    private val appLinkStatusWakers = mutableMapOf<String, MutableList<CompletableDeferred<Unit>>>()
     private var registered = false
+
+    /** Times each node's link went down, counted as the event arrives (not under stateMutex). */
+    private val appLinkDowns = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     private val essentialRequestMutex = Mutex()
     private val rfedMonitorLock = Any()
@@ -139,17 +146,23 @@ object ConnectionStateManager {
                 object : AppLinkStatusCallback {
                     override fun onStatus(destHash: ByteArray, status: Int) {
                         val key = destHash.toHex()
+                        // Counted here, in event order, so a slow-route
+                        // request waiting its turn sees the link went down.
+                        if (status == RetichatBridge.AppLinkStatus.DISCONNECTED) {
+                            appLinkDowns.merge(key, 1L, Long::plus)
+                        }
                         // Hop onto our own scope so handlers don't run
                         // on the link-actor thread.
                         scope.launch {
-                                val (handler, waiters) = stateMutex.withLock {
+                                val (handler, waiters, wakers) = stateMutex.withLock {
                                     val handler = appLinkStatusHandlers[key]
                                     val waiters = if (status == RetichatBridge.AppLinkStatus.ACTIVE) {
                                         appLinkActiveWaiters.remove(key).orEmpty().toList()
                                     } else {
                                         emptyList()
                                     }
-                                    handler to waiters
+                                    val wakers = appLinkStatusWakers.remove(key).orEmpty().toList()
+                                    Triple(handler, waiters, wakers)
                                 }
                             handler?.invoke(status)
                                 waiters.forEach {
@@ -157,6 +170,7 @@ object ConnectionStateManager {
                                         it.complete(true)
                                     }
                                 }
+                                wakers.forEach { it.complete(Unit) }
                         }
                     }
                 },
@@ -356,8 +370,92 @@ object ConnectionStateManager {
     }
 
     /**
+     * Suspend until the held link to [destHash] is settled by its own
+     * events: true once ACTIVE, false once it is down (DISCONNECTED, NONE).
+     * No deadline of ours ([slowRouteSend]).  Each pass registers its wake
+     * before it reads the status, so an event between the two still wakes it.
+     */
+    private suspend fun awaitAppLinkSettled(destHash: ByteArray): Boolean {
+        val rh = routerHandle
+        if (rh == 0L) return false
+        val key = destHash.toHex()
+        while (true) {
+            val wake = CompletableDeferred<Unit>()
+            stateMutex.withLock {
+                appLinkStatusWakers.getOrPut(key) { mutableListOf() }.add(wake)
+            }
+            try {
+                when (RetichatBridge.appLinkStatus(rh, destHash)) {
+                    RetichatBridge.AppLinkStatus.ACTIVE -> return true
+                    RetichatBridge.AppLinkStatus.PATH_REQUESTED,
+                    RetichatBridge.AppLinkStatus.ESTABLISHING -> wake.await()
+                    else -> return false
+                }
+            } finally {
+                stateMutex.withLock {
+                    appLinkStatusWakers[key]?.removeAll { it === wake }
+                    if (appLinkStatusWakers[key].isNullOrEmpty()) {
+                        appLinkStatusWakers.remove(key)
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * A request to RFed over a slow route.  James, 2026-11-04: "The point of
+     * the ping is to understand whether we're on a fast connection or slow";
+     * a route is slow when its link's round trip was over a second
+     * (`AppLinks::route_speed`), and one not measured yet counts as slow.
+     * Over LoRa, airtime alone can pass 5 s (James, 2026-11-03), so no clock
+     * of ours cuts anything off here: the link comes up or fails by its own
+     * events, and the request ends with its answer, its own failure (scaled
+     * by Reticulum to the link's round trip) or the link closing.
+     * DESIGN_PRINCIPLES.md §1, "LoRa connections".
+     *
+     * Requests take turns, one at a time per node, so a burst can't flood the
+     * route.  One still waiting its turn when the link goes down fails with
+     * it; the next request opens a fresh link.
+     */
+    private suspend fun slowRouteSend(
+        rh: Long,
+        destHash: ByteArray,
+        app: String,
+        aspectsCsv: String,
+        path: String,
+        payload: ByteArray,
+    ): ByteArray? {
+        val key = destHash.toHex()
+        val downsBefore = appLinkDowns[key] ?: 0L
+        val turn = stateMutex.withLock { slowRouteTurns.getOrPut(key) { Mutex() } }
+        return turn.withLock {
+            if ((appLinkDowns[key] ?: 0L) != downsBefore) {
+                Log.i(TAG, "slow route to ${key.take(8)}: link went down while $path waited its turn")
+                return@withLock null
+            }
+            RetichatBridge.appLinkOpenPersistent(rh, destHash, app, aspectsCsv)
+            if (!awaitAppLinkSettled(destHash)) return@withLock null
+            suspendCoroutine { cont ->
+                val ok = RetichatBridge.appLinkRequestAsync(
+                    rh, destHash, path, payload, /* timeoutSecs = none */ 0.0,
+                    object : AppLinkRequestCallback {
+                        override fun onResult(status: Int, bytes: ByteArray?) {
+                            when (status) {
+                                RetichatBridge.AppLinkRequestStatus.RESPONSE -> cont.resume(bytes)
+                                else -> cont.resume(null)
+                            }
+                        }
+                    },
+                )
+                if (!ok) cont.resume(null)
+            }
+        }
+    }
+
+    /**
      * Open (idempotently) an APP_LINK to [destHash] for the given app/aspects
-     * tuple, wait up to 5 s for ACTIVE, then issue the request.
+     * tuple, wait up to 5 s for ACTIVE, then issue the request.  A held link
+     * on a route that isn't known to be fast goes to [slowRouteSend] instead.
      *
      * Persistent stream destinations keep and reuse an APP_LINK handle.
      * One-shot request destinations use APP_LINK only as the readiness gate,
@@ -379,6 +477,11 @@ object ConnectionStateManager {
         if (rh == 0L) return@withContext null
 
         val usePersistentLink = prefersPersistentAppLink(app, aspectsCsv)
+        if (usePersistentLink &&
+            RetichatBridge.appLinkRouteSpeed(destHash) != RetichatBridge.RouteSpeed.FAST
+        ) {
+            return@withContext slowRouteSend(rh, destHash, app, aspectsCsv, path, payload)
+        }
 
         when (requestOpenMode(usePersistentLink, RetichatBridge.appLinkStatus(rh, destHash))) {
             RequestOpenMode.PERSISTENT -> {

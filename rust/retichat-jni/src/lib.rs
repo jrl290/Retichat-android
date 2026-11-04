@@ -2041,6 +2041,21 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeA
     }
 }
 
+/// `RetichatBridge.nativeAppLinkRouteSpeed(destHash): Int`
+///
+/// Whether the route to the destination is fast or slow, by the round trip
+/// the latest link to it measured as it came up: 0 = not measured yet,
+/// 1 = fast, 2 = slow (app-links `AppLinks::route_speed`).
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeAppLinkRouteSpeed(
+    env: JNIEnv,
+    _class: JClass,
+    dest_hash: JByteArray,
+) -> jint {
+    let hash = jbytes_to_vec(&env, &dest_hash);
+    AppLinks::route_speed(&hash) as jint
+}
+
 /// `RetichatBridge.nativeAppLinkReopen(router, destHash): Int`
 ///
 /// Explicit deterministic re-open trigger for an existing app link.
@@ -2410,7 +2425,10 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeA
 /// (which should normally be established with `nativeAppLinkOpenPersistent`
 /// and have reached ACTIVE). Fires `callback.onResult(status, bytes)` exactly
 /// once when the response arrives, the request fails, or the timeout
-/// elapses.
+/// elapses.  A `timeoutSecs` of 0 or less sets no deadline of the caller's:
+/// the request is decided by its own events alone, the answer, its own
+/// RTT-scaled failure or the link closing (a slow route's request,
+/// `ConnectionStateManager.appLinkSend`).
 ///
 /// `status`: 0 = response (bytes set), 1 = timeout, 2 = failed,
 ///           3 = error (callback will NOT fire — check lastError).
@@ -2557,16 +2575,18 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeA
         }
     });
 
-    // Detached timeout watcher.
-    let state_to = cb_state.clone();
-    let fired_to = fired.clone();
-    let to_secs = timeout_secs.max(0.0);
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs_f64(to_secs));
-        if !fired_to.swap(true, Ordering::SeqCst) {
-            fire(&state_to, 1, None);
-        }
-    });
+    // Detached timeout watcher, only for a caller with a deadline.
+    if timeout_secs > 0.0 {
+        let state_to = cb_state.clone();
+        let fired_to = fired.clone();
+        let to_secs = timeout_secs;
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs_f64(to_secs));
+            if !fired_to.swap(true, Ordering::SeqCst) {
+                fire(&state_to, 1, None);
+            }
+        });
+    }
 
     0
 }
