@@ -19,7 +19,11 @@ class ChatListViewModel(
 
     /**
      * Unified list of chats and channels, sorted by most recent
-     * message (or join time when there are none yet).
+     * message (or join time when there are none yet). A channel goes by when
+     * it was last active instead: a post sent from it, or one that came in
+     * while it was open (ChannelEntity.lastActiveAt, James 2026-11-03), so
+     * opening it, or posts that come in while it is not open, leave it in its
+     * place. Its row still shows its newest post's time.
      */
     val items: StateFlow<List<ChatListItem>> = combine(
         repository.chatPreviews(),
@@ -53,9 +57,10 @@ class ChatListViewModel(
                 lastContent = null,
                 lastTimestamp = ch.lastMessageTime.takeIf { it > 0L } ?: ch.joinedAt,
                 unreadCount = 0,
+                orderTimestamp = ch.lastActiveAt.takeIf { it > 0L } ?: ch.joinedAt,
             )
         }
-        mapped.sortedByDescending { it.lastTimestamp ?: 0L }
+        mapped.sortedByDescending { it.orderTimestamp ?: it.lastTimestamp ?: 0L }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     fun archiveChat(chatId: String) {

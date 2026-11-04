@@ -196,6 +196,13 @@ data class InterfaceConfigEntity(
  *
  * [stampCost] is the latest known PoW cost from `/rfed/subscribe`
  * (null = unknown / never refreshed; 0 = disabled).
+ *
+ * [lastMessageTime] is the newest post's time, which the channel's row in the
+ * chat list shows. [lastActiveAt] places the row (James, 2026-11-03): when a
+ * post was last sent from the channel or came in while it was open, one it
+ * loaded on opening included (`ChannelDao.markChannelActive`); 0 until then,
+ * when [joinedAt] places it. Opening a channel, or a post that comes in while
+ * it is not open, leaves it in its place.
  */
 @Entity(tableName = "channels")
 data class ChannelEntity(
@@ -206,6 +213,7 @@ data class ChannelEntity(
     val joinedAt: Long = System.currentTimeMillis(),
     val lastMessageTime: Long = 0L,
     val isArchived: Boolean = false,
+    @ColumnInfo(defaultValue = "0") val lastActiveAt: Long = 0L,
 )
 
 /**

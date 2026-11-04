@@ -21,4 +21,7 @@ data class ChatListItem(
     val lastContent: String?,
     val lastTimestamp: Long?,
     val unreadCount: Int,
+    /** What the list orders the row by, when not [lastTimestamp]: a channel's
+     *  lastActiveAt (James, 2026-11-03). */
+    val orderTimestamp: Long? = null,
 )

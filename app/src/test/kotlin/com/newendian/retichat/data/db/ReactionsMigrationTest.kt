@@ -2,6 +2,7 @@ package com.newendian.retichat.data.db
 
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -111,7 +112,7 @@ class ReactionsMigrationTest {
     @Test
     fun theMigrationIsRegisteredAndEveryEarlierStepIsStillInTheChain() {
         val database = File("src/main/kotlin/com/newendian/retichat/data/db/RetichatDatabase.kt").readText()
-        assertTrue(database.contains("version = ReactionsMigration.TO,"))
+        assertFalse(database.contains("version = ReactionsMigration.TO,"))
         for (step in listOf("MIGRATION_9_10", "MIGRATION_10_11", "MIGRATION_11_12", "MIGRATION_12_13", "MIGRATION_13_14",
                             "MIGRATION_14_15", "MIGRATION_15_16", "MIGRATION_16_17")) {
             assertTrue(step, Regex("addMigrations\\([^)]*$step[^)]*\\)").containsMatchIn(database))

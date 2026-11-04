@@ -34,7 +34,7 @@ import com.newendian.retichat.data.db.entity.*
         GroupHeldEntity::class,
         GroupArrivalEntity::class,
     ],
-    version = ReactionsMigration.TO,
+    version = ChannelActivityMigration.TO,
     exportSchema = false,
 )
 abstract class RetichatDatabase : RoomDatabase() {
@@ -107,6 +107,13 @@ abstract class RetichatDatabase : RoomDatabase() {
             }
         }
 
+        /** Migration 17 → 18: a channel's place in the chat list, James 2026-11-03 ([ChannelActivityMigration]). */
+        private val MIGRATION_17_18 = object : Migration(ChannelActivityMigration.FROM, ChannelActivityMigration.TO) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                ChannelActivityMigration.STATEMENTS.forEach(db::execSQL)
+            }
+        }
+
         fun getInstance(context: Context): RetichatDatabase =
             INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -114,7 +121,7 @@ abstract class RetichatDatabase : RoomDatabase() {
                     RetichatDatabase::class.java,
                     "retichat.db"
                 )
-                    .addMigrations(MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17)
+                    .addMigrations(MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18)
                     .fallbackToDestructiveMigration()
                     .build().also { INSTANCE = it }
             }

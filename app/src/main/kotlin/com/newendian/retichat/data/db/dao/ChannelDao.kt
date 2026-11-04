@@ -40,6 +40,14 @@ interface ChannelDao {
     @Query("UPDATE channels SET lastMessageTime = :ts WHERE id = :id AND lastMessageTime < :ts")
     suspend fun bumpLastMessageTime(id: String, ts: Long)
 
+    /**
+     * The channel was active: a post was sent from it, or one came in while it
+     * was open (one it loaded on opening included). [ChannelEntity.lastActiveAt]
+     * places it in the chat list, so this moves it to the top (James, 2026-11-03).
+     */
+    @Query("UPDATE channels SET lastActiveAt = :at WHERE id = :id AND lastActiveAt < :at")
+    suspend fun markChannelActive(id: String, at: Long)
+
     @Delete
     suspend fun delete(channel: ChannelEntity)
 

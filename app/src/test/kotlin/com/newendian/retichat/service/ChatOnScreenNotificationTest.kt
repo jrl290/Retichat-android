@@ -65,13 +65,20 @@ class ChatOnScreenNotificationTest {
     }
 
     @Test
-    fun onlyTheScreensAndTheHelperReadTheOpenChat() {
+    fun onlyTheScreensTheHelperAndTheChannelListOrderReadTheOpenChat() {
         val readers = main.walk()
             .filter { it.isFile && it.extension == "kt" && it.readText().contains("activeChatId") }
             .map { it.relativeTo(main).path }
             .sorted()
             .toList()
-        assertEquals(listOf("RetichatApp.kt", "service/MessageNotificationHelper.kt", "ui/conversation/ConversationScreen.kt"), readers)
+        assertEquals(listOf("RetichatApp.kt", "service/MessageNotificationHelper.kt", "service/RfedChannelClient.kt",
+            "ui/conversation/ConversationScreen.kt"), readers)
+        // The channel client reads it once, to place the channel in the chat
+        // list (ChannelListOrderTest), not to decide a notification.
+        val channels = src("service/RfedChannelClient.kt")
+        assertEquals(1, Regex("activeChatId").findAll(channels).count())
+        assertTrue(channels.contains("if (RetichatApp.activeChatId.equals(channelHashHex, ignoreCase = true)) {\n" +
+            "                channelDao.markChannelActive(channelHashHex, System.currentTimeMillis())"))
     }
 
     @Test

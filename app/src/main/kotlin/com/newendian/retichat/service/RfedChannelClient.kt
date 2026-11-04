@@ -882,6 +882,8 @@ class RfedChannelClient(
         )
         channelDao.upsertMessage(row)
         channelDao.bumpLastMessageTime(channel.id, row.timestamp)
+        // A post sent from the channel moves it to the top of the chat list (James, 2026-11-03).
+        channelDao.markChannelActive(channel.id, row.timestamp)
         _activity.value = System.currentTimeMillis()
         Log.i(TAG, "SEND: the start has not finished — ${row.id} queued until it has, as a DM is")
     }
@@ -1025,6 +1027,9 @@ class RfedChannelClient(
             )
             channelDao.upsertMessage(optimistic)
             channelDao.bumpLastMessageTime(channel.id, optimistic.timestamp)
+            // A post sent from the channel moves it to the top of the chat list (James,
+            // 2026-11-03); one released from the queue did when it was typed.
+            channelDao.markChannelActive(channel.id, optimistic.timestamp)
         }
         _activity.value = System.currentTimeMillis()
 
@@ -1622,6 +1627,13 @@ class RfedChannelClient(
                 )
             )
             channelDao.bumpLastMessageTime(channelHashHex, result.timestampMs)
+            // A post that came in while the channel was open, one it loaded on
+            // opening included, moves it to the top of the chat list; one that
+            // came in while it was not open leaves it in its place (James,
+            // 2026-11-03).
+            if (RetichatApp.activeChatId.equals(channelHashHex, ignoreCase = true)) {
+                channelDao.markChannelActive(channelHashHex, System.currentTimeMillis())
+            }
             _activity.value = System.currentTimeMillis()
             // One line per post stored, saying whose it was taken for: "own" is a post of the user's device or of the
             // distro this device holds (staging probe: test-harnesses/staging/probe_phone_distro_channels.mjs).
