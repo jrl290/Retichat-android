@@ -14,6 +14,9 @@ internal interface HeldLinkOps {
     fun close(destHash: ByteArray)
     suspend fun setStatusHandler(destHash: ByteArray, handler: (Int) -> Unit)
     suspend fun sendData(destHash: ByteArray, app: String, aspectsCsv: String, payload: ByteArray): Boolean
+
+    /** Run [block], the sends owed at one ACTIVE edge, as one run (RfedLink.holding). */
+    suspend fun inOneRun(block: suspend () -> Unit) = block()
 }
 
 /** [HeldLinkOps] on the live stack, through [ConnectionStateManager]. */
@@ -58,6 +61,8 @@ internal class RfedLinkOps(
         val answer = RfedLink.request(this.app, nodeHex, path, payload)
         return answer != null && answer.size == 1 && answer[0] == 0xc3.toByte()
     }
+
+    override suspend fun inOneRun(block: suspend () -> Unit) = RfedLink.holding(nodeHex, block)
 }
 
 /**
@@ -122,7 +127,7 @@ internal class HeldLinkRegistrations(
     /** An ACTIVE edge: the held link is established. Send what is owed. */
     suspend fun onActive() = mutex.withLock {
         if (owed.isEmpty()) return@withLock
-        for ((key, payload) in owed.entries.toList()) {
+        ops.inOneRun { for ((key, payload) in owed.entries.toList()) {
             if (ops.sendData(destHash, app, aspectsCsv, payload)) {
                 owed.remove(key)
                 delivered.add(key)
@@ -130,7 +135,7 @@ internal class HeldLinkRegistrations(
             } else {
                 log(Log.WARN, "$app.$aspectsCsv: $key not proved; owed until the link is next established")
             }
-        }
+        } }
         if (owed.isEmpty()) ops.close(destHash)
     }
 

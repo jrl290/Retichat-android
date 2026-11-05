@@ -173,6 +173,20 @@ class RfedLinkTest {
         assertTrue(close.contains("ConnectionStateManager.slowRouteIdle(dest)"))
         assertTrue(close.contains("ConnectionStateManager.closeAppLink(dest)"))
 
+        // Staging, 2026-11-05: closed after each request, a run of channel
+        // pulls opened a link per pull over LoRa. A run holds it to its end.
+        assertTrue(close.contains("runs.containsKey(nodeHex.lowercase())"))
+        val holding = link.substringAfter("suspend fun <T> holding(nodeHexes: Collection<String>").substringBefore("    suspend fun")
+        assertTrue(holding.substringAfter("} finally {").contains("closeIfIdle(node, it)"))
+        val client = src("service/RfedChannelClient.kt")
+        assertTrue(client.contains("RfedLink.holding(nodeIdentityHashHex) { for (channel in channels) {"))
+        assertTrue(client.contains("RfedLink.holding(channels.map { it.rfedNodeIdentityHashHex }) { for (channel in channels) {"))
+        assertTrue(client.contains("RfedLink.holding(channelDao.activeChannels().map { it.rfedNodeIdentityHashHex }) { for (row in rows) {"))
+        assertTrue(src("service/RfedDistroClient.kt").contains("RfedLink.holding(node) { DistroPullRounds.drain("))
+        val held = src("service/HeldLinkRegistrations.kt")
+        assertTrue(held.contains("ops.inOneRun { for ((key, payload) in owed.entries.toList()) {"))
+        assertTrue(held.contains("override suspend fun inOneRun(block: suspend () -> Unit) = RfedLink.holding(nodeHex, block)"))
+
         // A request is counted from before its turn until it ends.
         val csm = src("service/ConnectionStateManager.kt")
         val send = csm.substringAfter("private suspend fun slowRouteSend(").substringBefore("    /**")

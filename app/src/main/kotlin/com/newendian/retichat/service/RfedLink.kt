@@ -46,6 +46,9 @@ object RfedLink {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + logEscapedExceptions(TAG))
 
+    /** Runs of requests ([holding]) under way on each node: hex → how many. */
+    private val runs = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
     /** Nodes whose rfed.link this stack has set up: hex → identity handle it was set up with. */
     private val setUp = mutableMapOf<String, Long>()
 
@@ -172,9 +175,35 @@ object RfedLink {
             StackRuntime.meshRelayHex != null
     }
 
-    /** After a request: a link this device doesn't hold closes once no other request waits its turn on it. */
+    /**
+     * Run [block], a run of requests to [nodeHexes] sent one after another,
+     * holding each node's link from one request to the next: a link this
+     * device doesn't hold ([holdsNoLink]) closes when the run ends, not
+     * between its requests (staging, 2026-11-05: closed after each channel
+     * pull, every pull opened a link of its own over LoRa).
+     */
+    suspend fun <T> holding(nodeHexes: Collection<String>, block: suspend () -> T): T {
+        val nodes = nodeHexes.map { it.lowercase() }.toSet()
+        nodes.forEach { runs.merge(it, 1, Int::plus) }
+        try {
+            return block()
+        } finally {
+            for (node in nodes) {
+                runs.computeIfPresent(node) { _, n -> if (n <= 1) null else n - 1 }
+                destHash(node)?.let { closeIfIdle(node, it) }
+            }
+        }
+    }
+
+    suspend fun <T> holding(nodeHex: String, block: suspend () -> T): T = holding(listOf(nodeHex), block)
+
+    /**
+     * After a request or a run: a link this device doesn't hold closes once
+     * no run holds it and no other request waits its turn on it.
+     */
     private fun closeIfIdle(nodeHex: String, dest: ByteArray) {
-        if (!holdsNoLink(nodeHex) || !ConnectionStateManager.slowRouteIdle(dest) ||
+        if (!holdsNoLink(nodeHex) || runs.containsKey(nodeHex.lowercase()) ||
+            !ConnectionStateManager.slowRouteIdle(dest) ||
             ConnectionStateManager.appLinkStatus(dest) == RetichatBridge.AppLinkStatus.NONE
         ) return
         Log.i(TAG, "${nodeHex.take(8)}: slow route, no request waiting: link closed; RFed wakes this device")

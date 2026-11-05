@@ -734,7 +734,7 @@ class RfedChannelClient(
         Log.i(TAG, "Re-subscribing to ${channels.size} persisted channel(s) after restart")
         // One line per channel, each said: until 2026-10-10 a stored hash that
         // could not be used was skipped without a word under the count above.
-        for (channel in channels) {
+        RfedLink.holding(channels.map { it.rfedNodeIdentityHashHex }) { for (channel in channels) {
             val channelHashBytes = FcmTokenRegistrar.hexToBytes(channel.id) ?: run {
                 Log.w(TAG, "Re-subscribe failed for '${channel.channelName}': its stored channel hash is not hex")
                 null
@@ -750,7 +750,7 @@ class RfedChannelClient(
             }.onFailure { e ->
                 Log.w(TAG, "Re-subscribe failed for '${channel.channelName}': ${e.message}")
             }
-        }
+        } }
         reconfigureChannelStreams()
     }
 
@@ -929,7 +929,7 @@ class RfedChannelClient(
             pending = { if (!started() || !NetworkMonitor.isOnline.value) emptyList() else channelDao.queuedOutboundMessages() },
         ) { rows ->
             Log.i(TAG, "SEND: releasing ${rows.size} queued post(s)")
-            for (row in rows) {
+            RfedLink.holding(channelDao.activeChannels().map { it.rfedNodeIdentityHashHex }) { for (row in rows) {
                 val channel = channelDao.findById(row.channelId)
                 if (channel == null) {
                     Log.w(TAG, "SEND: queued ${row.id} has no channel ${row.channelId} — failed")
@@ -944,7 +944,7 @@ class RfedChannelClient(
                     continue
                 }
                 sendMutex.withLock { post(channel, row.content, queuedId = row.id) }
-            }
+            } }
         }
     }
 
@@ -1491,7 +1491,7 @@ class RfedChannelClient(
         val channels = channelsOnNode(channelDao.activeChannels(), nodeIdentityHashHex)
         if (channels.isEmpty()) return
         Log.i(TAG, "PULL on rfed.link ACTIVE: ${channels.size} channel(s) on ${nodeIdentityHashHex.take(8)}")
-        for (channel in channels) {
+        RfedLink.holding(nodeIdentityHashHex) { for (channel in channels) {
             if (pullStateKey(channel) in _pullInFlight.value) continue
             try {
                 var pages = 0
@@ -1504,7 +1504,7 @@ class RfedChannelClient(
             } catch (e: Exception) {
                 Log.w(TAG, "PULL on rfed.link ACTIVE failed for '${channel.channelName}'", e)
             }
-        }
+        } }
     }
 
     // ── Inbound blob dispatch ──────────────────────────────────────────

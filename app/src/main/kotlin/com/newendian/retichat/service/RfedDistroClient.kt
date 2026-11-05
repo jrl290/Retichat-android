@@ -215,7 +215,7 @@ object RfedDistroClient {
             var drained = 0
             var unfinished: String? = null
             var lastMore = false
-            val total = DistroPullRounds.drain(PULL_ROUNDS_MAX, warn = { Log.w(TAG, it) }) {
+            val total = RfedLink.holding(node) { DistroPullRounds.drain(PULL_ROUNDS_MAX, warn = { Log.w(TAG, it) }) {
                 // A round that cannot go is never sent, and never said as RFed's
                 // silence: with no router, appLinkSend returns null at once.
                 DistroPullRounds.unsent(
@@ -248,7 +248,7 @@ object RfedDistroClient {
                 lastMore = more
                 _status.value = _status.value.copy(lastPullCount = drained)
                 DistroPullRounds.Page(pairs.size, more)
-            }
+            } }
             // "drained" only when RFed's last page said nothing more was queued:
             // until 2026-10-10 a pull its round cap stopped said "drained" too.
             when {
