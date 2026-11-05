@@ -65,7 +65,13 @@ object PropagationSync {
             return false
         }
 
-        val slow = RetichatBridge.appLinkRouteSpeed(nodeHash) == RetichatBridge.RouteSpeed.SLOW
+        // Over a slow route no deadline of ours. The propagation node's own
+        // route is measured only once its link is up, so RFed's, on the same
+        // radio, counts too (staging, 2026-11-05: unmeasured, the sync was
+        // cut at 20 s over LoRa before its link came up).
+        val rfedDest = RfedLink.destHash(UserPreferences.getEffectiveRfedNodeIdentityHash(context))
+        val slow = RetichatBridge.appLinkRouteSpeed(nodeHash) == RetichatBridge.RouteSpeed.SLOW ||
+            (rfedDest != null && RetichatBridge.appLinkRouteSpeed(rfedDest) == RetichatBridge.RouteSpeed.SLOW)
         val deadline = System.currentTimeMillis() + DEADLINE_MS
         var lastState = -1
         while (slow || System.currentTimeMillis() < deadline) {

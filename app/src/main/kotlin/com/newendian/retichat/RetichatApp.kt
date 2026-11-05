@@ -16,6 +16,7 @@ import com.newendian.retichat.service.ForegroundHold
 import com.newendian.retichat.service.NetworkMonitor
 import com.newendian.retichat.service.PropagationSync
 import com.newendian.retichat.service.RfedChannelClient
+import com.newendian.retichat.service.RfedCollect
 import com.newendian.retichat.service.RfedDistroClient
 import com.newendian.retichat.service.RfedLink
 import com.newendian.retichat.service.StackRuntime
@@ -213,8 +214,14 @@ class RetichatApp : Application() {
                 val now = SystemClock.elapsedRealtime()
                 if (lastPollMs == 0L || now - lastPollMs >= interval) {
                     lastPollMs = now
-                    runCatching { PropagationSync.runOnce(this@RetichatApp) }
-                        .onFailure { Log.w(TAG, "foreground propagation poll failed", it) }
+                    // Over a slow route the check collects all RFed holds, in
+                    // order: distro, propagation, the channels with push on.
+                    if (interval > 0L) {
+                        RfedCollect.request(this@RetichatApp, "the 6-hour check")
+                    } else {
+                        runCatching { PropagationSync.runOnce(this@RetichatApp) }
+                            .onFailure { Log.w(TAG, "foreground propagation poll failed", it) }
+                    }
                 }
                 delay(POLL_INTERVAL_MS)
             }

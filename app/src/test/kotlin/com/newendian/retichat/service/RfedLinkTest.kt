@@ -2,6 +2,7 @@ package com.newendian.retichat.service
 
 import com.newendian.retichat.data.db.entity.ChannelEntity
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
@@ -149,9 +150,11 @@ class RfedLinkTest {
         val stream = bind.indexOf("bindPushes(app, node)")
         val pull = bind.indexOf("app.rfedChannelClient.pullDeferredForNode(node)")
         assertTrue(stream >= 0 && pull > stream)
+        // The propagation stream (and its distro pull) before the channel
+        // stream (James, 2026-11-05: "distro and propagation should be first").
         val pushes = link.substringAfter("private suspend fun bindPushes(").substringBefore("    /**")
-        assertTrue(pushes.contains("app.rfedChannelClient.sendChannelStreamConfigForNode(node)"))
-        assertTrue(pushes.contains("PropagationStream.onLinkActive(app, node)"))
+        val propagation = pushes.indexOf("PropagationStream.onLinkActive(app, node)")
+        assertTrue(propagation >= 0 && propagation < pushes.indexOf("app.rfedChannelClient.sendChannelStreamConfigForNode(node)"))
     }
 
     @Test
@@ -166,7 +169,9 @@ class RfedLinkTest {
         assertTrue(holds.contains("RetichatBridge.appLinkRouteSpeed(dest) == RetichatBridge.RouteSpeed.SLOW"))
         assertTrue(holds.contains("StackRuntime.meshRelayHex != null"))
         val bind = link.substringAfter("private suspend fun bind(").substringBefore("    /**")
-        assertTrue(bind.contains("if (!holdsNoLink(node)) bindPushes(app, node)"))
+        val slow = bind.indexOf("if (holdsNoLink(node)) {")
+        assertTrue(slow >= 0 && slow < bind.indexOf("RfedCollect.request(app, \"rfed.link opened\", linkOpened = true)"))
+        assertTrue(bind.indexOf("return") < bind.indexOf("bindPushes(app, node)"))
         val request = link.substringAfter("suspend fun request(").substringBefore("    /**")
         assertTrue(request.indexOf("closeIfIdle(nodeHex, dest)") > request.indexOf("ConnectionStateManager.appLinkSend("))
         val close = link.substringAfter("private fun closeIfIdle(").substringBefore("    /**")
@@ -179,7 +184,8 @@ class RfedLinkTest {
         val holding = link.substringAfter("suspend fun <T> holding(nodeHexes: Collection<String>").substringBefore("    suspend fun")
         assertTrue(holding.substringAfter("} finally {").contains("closeIfIdle(node, it)"))
         val client = src("service/RfedChannelClient.kt")
-        assertTrue(client.contains("RfedLink.holding(nodeIdentityHashHex) { for (channel in channels) {"))
+        assertTrue(client.contains("RfedLink.holding(nodeIdentityHashHex) { pullPages(channels, \"on rfed.link ACTIVE\") }"))
+        assertTrue(client.contains("RfedLink.holding(channels.map { it.rfedNodeIdentityHashHex }) { pullPages(channels, \"with push on\") }"))
         assertTrue(client.contains("RfedLink.holding(channels.map { it.rfedNodeIdentityHashHex }) { for (channel in channels) {"))
         assertTrue(client.contains("RfedLink.holding(channelDao.activeChannels().map { it.rfedNodeIdentityHashHex }) { for (row in rows) {"))
         assertTrue(src("service/RfedDistroClient.kt").contains("RfedLink.holding(node) { DistroPullRounds.drain("))
@@ -205,5 +211,42 @@ class RfedLinkTest {
         val app = File("src/main/kotlin/com/newendian/retichat/RetichatApp.kt").readText()
         assertTrue(app.contains("private const val WOKEN_POLL_INTERVAL_MS = 6 * 60 * 60 * 1000L"))
         assertTrue(app.contains("if (RfedLink.holdsNoLink(node)) WOKEN_POLL_INTERVAL_MS else 0L"))
+        assertTrue(app.contains("RfedCollect.request(this@RetichatApp, \"the 6-hour check\")"))
+    }
+
+    @Test
+    fun aCollectionPullsTheDistroQueueThenPropagationThenTheChannelsWithPushOn() {
+        // James, 2026-11-05: "if a Channel is registered as a notify, it
+        // should be pulled", and "distro and propagation should be first".
+        val collect = src("service/RfedCollect.kt").substringAfter("private suspend fun collect(")
+        val held = collect.indexOf("RfedLink.holding(node) {")
+        val distro = collect.indexOf("RfedDistroClient.pull(app)")
+        val sync = collect.indexOf("PropagationSync.runOnce(app)")
+        val channels = collect.indexOf("app.rfedChannelClient.pullPushChannels()")
+        assertTrue("one run, distro, propagation, channels", held in 0 until distro && distro < sync && sync < channels)
+        val push = src("service/RfedChannelClient.kt").substringAfter("internal suspend fun pullPushChannels()").substringBefore("    /**")
+        assertTrue(push.contains("UserPreferences.getChannelPushEnabled(appContext)"))
+        assertTrue(push.contains(".filter { it.id.lowercase() in push }"))
+    }
+
+    @Test
+    fun oneCollectionAtATimeAndAWakeDuringOneHasItRunAgain() {
+        val turns = RfedCollect.Turns()
+        assertTrue(turns.ask(linkOpened = false))
+        // The link it opened is covered by it.
+        assertFalse(turns.ask(linkOpened = true))
+        assertFalse(turns.next())
+        // Ended: the next asks collects.
+        assertTrue(turns.ask(linkOpened = true))
+        // A wake during it: once more, however many wakes came.
+        assertFalse(turns.ask(linkOpened = false))
+        assertFalse(turns.ask(linkOpened = false))
+        assertTrue(turns.next())
+        assertFalse(turns.next())
+        // Cancelled: nothing is left running.
+        assertTrue(turns.ask(linkOpened = false))
+        assertFalse(turns.ask(linkOpened = false))
+        turns.stopped()
+        assertTrue(turns.ask(linkOpened = false))
     }
 }

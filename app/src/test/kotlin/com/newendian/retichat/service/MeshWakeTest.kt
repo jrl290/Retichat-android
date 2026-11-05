@@ -234,14 +234,15 @@ class MeshWakeTest {
 
         val wake = member(stack, "private fun onMeshWake(")
         assertTrue(
-            "parsed; one for another receiver is ignored; a channel wake pulls that channel",
-            ordered(wake, listOf("MeshWake.parse(payload)", "wake.receiver.contentEquals(selfDestHash)", "PropagationSync.runOnce(app)", "rfedChannelClient.pullDeferred(channel)")),
+            "parsed; one for another receiver is ignored; any other collects, a channel wake for a joined channel",
+            ordered(wake, listOf("MeshWake.parse(payload)", "wake.receiver.contentEquals(selfDestHash)", "RfedCollect.request(app, \"a wake for message", "not joined here: ignored", "RfedCollect.request(app, \"a wake for channel")),
         )
         // Staging, 2026-11-05: over LoRa WakeWorker's 25 s budget ran out on
         // its pull of every channel, and the propagation sync never ran.
-        assertTrue("the distro pull and a sync on the running stack, not WakeWorker",
-            wake.contains("RfedDistroClient.pull(app)") && !wake.contains("WakeWorker.enqueue("))
+        assertTrue("collected on the running stack, not WakeWorker", !wake.contains("WakeWorker.enqueue("))
         assertTrue("over a slow route the sync has no deadline of ours",
             sync.contains("while (slow || System.currentTimeMillis() < deadline)"))
+        assertTrue("RFed's slow route counts while the propagation node's is unmeasured",
+            sync.contains("(rfedDest != null && RetichatBridge.appLinkRouteSpeed(rfedDest) == RetichatBridge.RouteSpeed.SLOW)"))
     }
 }

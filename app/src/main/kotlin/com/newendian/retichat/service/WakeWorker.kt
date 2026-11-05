@@ -23,8 +23,8 @@ import kotlinx.coroutines.withTimeoutOrNull
  *      is the first announce at start (the app's own, or the publish
  *      daemon's first refresh sweep), which starts the 30-min period per
  *      interface; later up-edges inside that period stay quiet.
- *   2. Pull the per-channel deferred queue once.
- *   3. Run a propagation poll for LXMF.
+ *   2. Pull the distro queue, then run a propagation poll for LXMF.
+ *   3. Pull the per-channel deferred queue once.
  *   4. [StackRuntime.release] — exactly once, on every path. The stack
  *      stays up (D7): a wake finishing never stops it.
  *
@@ -112,6 +112,13 @@ class WakeWorker(
                         .onFailure { Log.w(TAG, "distro pull failed", it) }
                 }
 
+                // LXMF propagation sync, before the channels (James, 2026-11-05:
+                // "distro and propagation should be first").
+                // Force a fresh propagation app-link ACTIVE edge here so a
+                // wake-triggered pull does not reuse a stale held link from
+                // before the transport reconnect completed.
+                PropagationSync.runOnce(applicationContext, requireFreshTransport = true)
+
                 // Per-channel pull (drain one page each).
                 val channels = app.database.channelDao().activeChannels()
                 for (channel in channels) {
@@ -120,12 +127,6 @@ class WakeWorker(
                         Log.d(TAG, "PULL ${channel.channelName}: drained=$n more=$more")
                     }.onFailure { Log.w(TAG, "pullDeferred failed for ${channel.channelName}", it) }
                 }
-
-                // LXMF propagation sync.
-                // Force a fresh propagation app-link ACTIVE edge here so a
-                // wake-triggered pull does not reuse a stale held link from
-                // before the transport reconnect completed.
-                PropagationSync.runOnce(applicationContext, requireFreshTransport = true)
             }
             if (!inBudget) Log.w(TAG, "WakeWorker exceeded ${BUDGET_MS}ms budget")
         } finally {

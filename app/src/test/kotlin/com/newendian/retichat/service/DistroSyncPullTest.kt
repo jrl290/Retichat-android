@@ -15,14 +15,15 @@ class DistroSyncPullTest {
     private fun src(path: String) = File("src/main/kotlin/com/newendian/retichat/$path").readText()
 
     @Test
-    fun aWakePullsTheDistroQueueBeforeAnyChannelAndThePropagationPullStaysLast() {
+    fun aWakePullsTheDistroQueueThenThePropagationNodeBeforeAnyChannel() {
+        // James, 2026-11-05: "distro and propagation should be first".
         val worker = src("service/WakeWorker.kt")
         val distro = worker.indexOf("RfedDistroClient.pull(applicationContext)")
         val channels = worker.indexOf("pullDeferred(channel)")
         val propagation = worker.indexOf("PropagationSync.runOnce(applicationContext, requireFreshTransport = true)")
         assertTrue("the wake must pull the distro queue", distro >= 0)
-        assertTrue("the distro pull goes before the per-channel pulls", distro < channels)
-        assertTrue("the propagation pull stays after both", channels < propagation)
+        assertTrue("the distro pull goes before the propagation pull", distro < propagation)
+        assertTrue("the per-channel pulls come after both", propagation < channels)
     }
 
     @Test

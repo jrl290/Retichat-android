@@ -1491,7 +1491,26 @@ class RfedChannelClient(
         val channels = channelsOnNode(channelDao.activeChannels(), nodeIdentityHashHex)
         if (channels.isEmpty()) return
         Log.i(TAG, "PULL on rfed.link ACTIVE: ${channels.size} channel(s) on ${nodeIdentityHashHex.take(8)}")
-        RfedLink.holding(nodeIdentityHashHex) { for (channel in channels) {
+        RfedLink.holding(nodeIdentityHashHex) { pullPages(channels, "on rfed.link ACTIVE") }
+    }
+
+    /**
+     * Pull the channels with push on, the ones RFed wakes this device for
+     * (RfedNotifyRegistrar), page by page as on an ACTIVE edge: the last step
+     * of [RfedCollect], over a slow route, where the other channels wait
+     * until they are opened.
+     */
+    internal suspend fun pullPushChannels() {
+        val push = UserPreferences.getChannelPushEnabled(appContext)
+        val channels = channelsForWakePull(channelDao.activeChannels().filter { it.id.lowercase() in push })
+        if (channels.isEmpty()) return
+        Log.i(TAG, "PULL of the channels with push on: ${channels.size}")
+        RfedLink.holding(channels.map { it.rfedNodeIdentityHashHex }) { pullPages(channels, "with push on") }
+    }
+
+    /** One run of pulls, up to [ACTIVE_EDGE_PULL_PAGES] pages each; a channel already pulling is left to that pull. */
+    private suspend fun pullPages(channels: List<ChannelEntity>, what: String) {
+        for (channel in channels) {
             if (pullStateKey(channel) in _pullInFlight.value) continue
             try {
                 var pages = 0
@@ -1502,9 +1521,9 @@ class RfedChannelClient(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                Log.w(TAG, "PULL on rfed.link ACTIVE failed for '${channel.channelName}'", e)
+                Log.w(TAG, "PULL $what failed for '${channel.channelName}'", e)
             }
-        } }
+        }
     }
 
     // ── Inbound blob dispatch ──────────────────────────────────────────

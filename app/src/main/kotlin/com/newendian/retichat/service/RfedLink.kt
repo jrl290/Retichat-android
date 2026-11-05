@@ -243,15 +243,21 @@ object RfedLink {
     }
 
     /**
-     * A fresh link: bind it for channel and LXMF pushes (Link.md "The client
-     * re-binds on every link"), unless it closes after its requests
-     * ([holdsNoLink]).
+     * A fresh link: bind it for LXMF and channel pushes (Link.md "The client
+     * re-binds on every link"). A link this device doesn't hold
+     * ([holdsNoLink]) opened for requests and closes after them: what RFed
+     * holds is collected in order instead, the channels with push on only
+     * ([RfedCollect]).
      */
     private suspend fun bind(app: RetichatApp, node: String) {
         // The posts queued or held for a link go on its every ACTIVE edge;
         // launched, they wait for none of the binding below.
         app.rfedChannelClient.onRfedLinkActive()
-        if (!holdsNoLink(node)) bindPushes(app, node)
+        if (holdsNoLink(node)) {
+            RfedCollect.request(app, "rfed.link opened", linkOpened = true)
+            return
+        }
+        bindPushes(app, node)
         // What the node deferred while the link was down, collected now
         // instead of on a wake or rfed's re-send (~30 min late on 10-19).
         // Last: a page can take the request's 5 s.
@@ -264,21 +270,26 @@ object RfedLink {
         }
     }
 
-    /** Ask the node to push on this link: the channel and propagation stream opens. */
+    /**
+     * Ask the node to push on this link: the propagation stream opens first,
+     * with its pull of the distro queue (PropagationStream.sendOpen), then the
+     * channel stream (James, 2026-11-05: "distro and propagation should be
+     * first").
+     */
     private suspend fun bindPushes(app: RetichatApp, node: String) {
-        try {
-            app.rfedChannelClient.sendChannelStreamConfigForNode(node)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Log.e(TAG, "channel stream open on rfed.link failed", e)
-        }
         try {
             PropagationStream.onLinkActive(app, node)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "propagation stream open on rfed.link failed", e)
+        }
+        try {
+            app.rfedChannelClient.sendChannelStreamConfigForNode(node)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "channel stream open on rfed.link failed", e)
         }
     }
 

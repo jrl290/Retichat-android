@@ -664,11 +664,12 @@ object StackRuntime {
 
     /**
      * A wake RFed sent to this device's own relay over the mesh (MeshWake),
-     * on a Transport thread. Port of the wake observer in
-     * Retichat-ios/Retichat/RetichatApp.swift: a wake for another receiver is
-     * ignored; a channel wake pulls that channel's waiting posts, one page as
-     * a wake pulls for each channel (WakeWorker); any other collects as iOS's
-     * collectAfterWake does. One line in the log for each.
+     * on a Transport thread. A wake for another receiver is ignored, as is a
+     * channel wake for a channel not joined here; any other collects what
+     * RFed holds, in order: the distro queue, then propagation, then the
+     * channels with push on ([RfedCollect]). Not WakeWorker: over LoRa its
+     * 25 s budget ran out on its pull of every channel, and the sync never
+     * ran (staging, 2026-11-05). One line in the log for each.
      */
     private fun onMeshWake(app: RetichatApp, payload: ByteArray) {
         val wake = MeshWake.parse(payload)
@@ -678,22 +679,9 @@ object StackRuntime {
             !wake.receiver.contentEquals(selfDestHash) ->
                 Log.i(MeshWake.TAG, "Mesh wake for another receiver (${wake.receiver.toHex().take(8)}), ignored")
             channelHash == null -> {
-                Log.i(MeshWake.TAG, "Mesh wake from RFed for message ${wake.message?.toHex()?.take(16) ?: "-"}: collecting")
-                // As iOS's collectAfterWake, on the stack the wake came in on:
-                // the distro pull and a propagation sync, neither waiting for
-                // the other. Not WakeWorker: over LoRa its 25 s budget ran out
-                // on its pull of every channel, and the sync never ran
-                // (staging, 2026-11-05). Channels with push on wake their own.
-                if (DistroManager.hasDistro) {
-                    app.applicationScope.launch(Dispatchers.IO) {
-                        runCatching { RfedDistroClient.pull(app) }
-                            .onFailure { Log.w(MeshWake.TAG, "Mesh wake: distro pull failed", it) }
-                    }
-                }
-                app.applicationScope.launch(Dispatchers.IO) {
-                    runCatching { PropagationSync.runOnce(app) }
-                        .onFailure { Log.w(MeshWake.TAG, "Mesh wake: propagation sync failed", it) }
-                }
+                val message = wake.message?.toHex()?.take(16) ?: "-"
+                Log.i(MeshWake.TAG, "Mesh wake from RFed for message $message: collecting")
+                RfedCollect.request(app, "a wake for message $message")
             }
             else -> app.applicationScope.launch(Dispatchers.IO) {
                 val channelHex = channelHash.toHex()
@@ -703,9 +691,8 @@ object StackRuntime {
                     Log.i(MeshWake.TAG, "Mesh wake from RFed for channel ${channelHex.take(8)}, not joined here: ignored")
                     return@launch
                 }
-                Log.i(MeshWake.TAG, "Mesh wake from RFed for channel '${channel.channelName}': pulling its waiting posts")
-                runCatching { app.rfedChannelClient.pullDeferred(channel) }
-                    .onFailure { Log.w(MeshWake.TAG, "Mesh wake: pulling '${channel.channelName}' failed", it) }
+                Log.i(MeshWake.TAG, "Mesh wake from RFed for channel '${channel.channelName}': collecting")
+                RfedCollect.request(app, "a wake for channel '${channel.channelName}'")
             }
         }
     }
