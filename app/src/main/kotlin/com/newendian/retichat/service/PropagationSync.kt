@@ -12,7 +12,9 @@ import kotlinx.coroutines.delay
  * `LxmfClient.sync(nodeHash:)` — i.e. set the user-configured (or randomly
  * chosen) propagation node, ask the router to request messages, and monitor
  * the propagation state machine until it reaches a terminal state or the
- * deadline expires.
+ * deadline expires. Over a slow route there is no deadline of ours: the
+ * sync ends with its answer or its own failure (DESIGN_PRINCIPLES.md §1,
+ * "LoRa connections"; over LoRa the link alone took 13 s on 2026-11-05).
  *
  * Designed to be called from both the FCM/expedited-WakeWorker path and the
  * foreground 5-minute polling timer so both share identical behaviour.
@@ -63,9 +65,10 @@ object PropagationSync {
             return false
         }
 
+        val slow = RetichatBridge.appLinkRouteSpeed(nodeHash) == RetichatBridge.RouteSpeed.SLOW
         val deadline = System.currentTimeMillis() + DEADLINE_MS
         var lastState = -1
-        while (System.currentTimeMillis() < deadline) {
+        while (slow || System.currentTimeMillis() < deadline) {
             val state = RetichatBridge.routerGetPropagationState(routerHandle)
             if (state != lastState) {
                 Log.d(TAG, "propagation state=0x${"%02X".format(state)}")

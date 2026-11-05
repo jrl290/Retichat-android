@@ -228,15 +228,20 @@ class MeshWakeTest {
     }
 
     @Test
-    fun aWakeForThisDeviceCollectsAsAPushDoes() {
+    fun aWakeForThisDeviceCollectsAsOnIos() {
         val stack = source("src/main/kotlin/com/newendian/retichat/service/StackRuntime.kt")
-        val fcm = source("src/main/kotlin/com/newendian/retichat/service/RetichatFcmService.kt")
+        val sync = source("src/main/kotlin/com/newendian/retichat/service/PropagationSync.kt")
 
         val wake = member(stack, "private fun onMeshWake(")
         assertTrue(
             "parsed; one for another receiver is ignored; a channel wake pulls that channel",
-            ordered(wake, listOf("MeshWake.parse(payload)", "wake.receiver.contentEquals(selfDestHash)", "WakeWorker.enqueue(app)", "rfedChannelClient.pullDeferred(channel)")),
+            ordered(wake, listOf("MeshWake.parse(payload)", "wake.receiver.contentEquals(selfDestHash)", "PropagationSync.runOnce(app)", "rfedChannelClient.pullDeferred(channel)")),
         )
-        assertTrue("an FCM wake is handled the same way", fcm.contains("WakeWorker.enqueue(applicationContext)"))
+        // Staging, 2026-11-05: over LoRa WakeWorker's 25 s budget ran out on
+        // its pull of every channel, and the propagation sync never ran.
+        assertTrue("the distro pull and a sync on the running stack, not WakeWorker",
+            wake.contains("RfedDistroClient.pull(app)") && !wake.contains("WakeWorker.enqueue("))
+        assertTrue("over a slow route the sync has no deadline of ours",
+            sync.contains("while (slow || System.currentTimeMillis() < deadline)"))
     }
 }

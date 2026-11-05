@@ -667,8 +667,8 @@ object StackRuntime {
      * on a Transport thread. Port of the wake observer in
      * Retichat-ios/Retichat/RetichatApp.swift: a wake for another receiver is
      * ignored; a channel wake pulls that channel's waiting posts, one page as
-     * a wake pulls for each channel (WakeWorker); any other is handled as an
-     * FCM wake is (RetichatFcmService). One line in the log for each.
+     * a wake pulls for each channel (WakeWorker); any other collects as iOS's
+     * collectAfterWake does. One line in the log for each.
      */
     private fun onMeshWake(app: RetichatApp, payload: ByteArray) {
         val wake = MeshWake.parse(payload)
@@ -678,8 +678,22 @@ object StackRuntime {
             !wake.receiver.contentEquals(selfDestHash) ->
                 Log.i(MeshWake.TAG, "Mesh wake for another receiver (${wake.receiver.toHex().take(8)}), ignored")
             channelHash == null -> {
-                Log.i(MeshWake.TAG, "Mesh wake from RFed for message ${wake.message?.toHex()?.take(16) ?: "-"}: collecting as for a push")
-                WakeWorker.enqueue(app)
+                Log.i(MeshWake.TAG, "Mesh wake from RFed for message ${wake.message?.toHex()?.take(16) ?: "-"}: collecting")
+                // As iOS's collectAfterWake, on the stack the wake came in on:
+                // the distro pull and a propagation sync, neither waiting for
+                // the other. Not WakeWorker: over LoRa its 25 s budget ran out
+                // on its pull of every channel, and the sync never ran
+                // (staging, 2026-11-05). Channels with push on wake their own.
+                if (DistroManager.hasDistro) {
+                    app.applicationScope.launch(Dispatchers.IO) {
+                        runCatching { RfedDistroClient.pull(app) }
+                            .onFailure { Log.w(MeshWake.TAG, "Mesh wake: distro pull failed", it) }
+                    }
+                }
+                app.applicationScope.launch(Dispatchers.IO) {
+                    runCatching { PropagationSync.runOnce(app) }
+                        .onFailure { Log.w(MeshWake.TAG, "Mesh wake: propagation sync failed", it) }
+                }
             }
             else -> app.applicationScope.launch(Dispatchers.IO) {
                 val channelHex = channelHash.toHex()
