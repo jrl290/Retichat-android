@@ -56,6 +56,8 @@ object UserPreferences {
     /** Comma-separated channel hashes opted-in to notifications (default off). */
     const val PREF_KEY_CHANNEL_NOTIFICATIONS_ON = "channel_notifications_on"
     const val PREF_KEY_CHANNEL_PUSH_ENABLED     = "channel_push_enabled"
+    /** This device's own RFed Notify relay as last registered (MeshWake.kt); absent when none is. */
+    const val PREF_KEY_MESH_WAKE_RELAY_HEX = "mesh_wake_relay_hex"
 
     /**
      * The placeholder Android sent as the name of every user who never set
@@ -233,6 +235,24 @@ object UserPreferences {
         prefs(context).edit()
             .putString(PREF_KEY_LXMF_PROPAGATION_HASH, normalizedHex(hex))
             .apply()
+    }
+
+    // ── Mesh wake ─────────────────────────────────────────────────────
+
+    /**
+     * The device's own RFed Notify relay (MeshWake.kt) as last registered
+     * with the RFed node, so it can be unregistered once no Bluetooth radio
+     * is configured or the node changes; null when none is registered. Port
+     * of `UserPreferences.meshWakeRelayHex` in Retichat-ios.
+     */
+    fun getMeshWakeRelayHex(context: Context): String? =
+        normalizedHex(prefs(context).getString(PREF_KEY_MESH_WAKE_RELAY_HEX, "")).ifEmpty { null }
+
+    fun setMeshWakeRelayHex(context: Context, hex: String?) {
+        val edit = prefs(context).edit()
+        if (hex.isNullOrEmpty()) edit.remove(PREF_KEY_MESH_WAKE_RELAY_HEX)
+        else edit.putString(PREF_KEY_MESH_WAKE_RELAY_HEX, normalizedHex(hex))
+        edit.apply()
     }
 
     // ── FCM token ─────────────────────────────────────────────────────

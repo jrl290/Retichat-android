@@ -1728,6 +1728,167 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeR
 }
 
 // ---------------------------------------------------------------------------
+// Mesh wake: this device as its own RFed Notify relay
+// ---------------------------------------------------------------------------
+//
+// Port of `retichat_notify_relay_start` / `retichat_notify_relay_stop` in
+// Retichat-ios/rust/retichat-ffi/src/lib.rs. RFed wakes a device through every
+// notify relay it registered (RFed-spec Notify.md). A relay the device hosts
+// itself, `rfed.notify` under its own identity, gets that wake over the mesh:
+// through a Bluetooth RTNode the packet reaches the app with no internet, where
+// FCM cannot. rfed records the device's key when it registers the relay
+// (RFed-rust notify/rns.rs remember_self_hosted_relay) and sends the wake as
+// one encrypted DATA packet, unproved. Each wake's payload is delivered to a
+// Kotlin object implementing:
+//   interface MeshWakeCallback { fun onWake(payload: ByteArray) }
+
+static NOTIFY_RELAY: Mutex<Option<Destination>> = Mutex::new(None);
+static NOTIFY_RELAY_CB: Mutex<Option<(JavaVM, GlobalRef)>> = Mutex::new(None);
+
+/// This device's `rfed.notify`: the name rfed builds a self-hosted relay's
+/// wake under (RFed-rust notify/rns.rs RELAY_WAKE_NAMES).
+fn notify_relay_destination(identity: Identity) -> Result<Destination, String> {
+    Destination::new_inbound(
+        Some(identity),
+        DestinationType::Single,
+        "rfed".to_string(),
+        vec!["notify".to_string()],
+    )
+}
+
+/// `RetichatBridge.nativeNotifyRelayStart(identityHandle: Long, callback: MeshWakeCallback): ByteArray?`
+///
+/// Host `rfed.notify` under `identity_handle`'s identity, hand each wake's
+/// payload (RFed-spec Notify.md "Wake packet") to `callback.onWake` on a
+/// Transport thread, and publish it (announced at once, on every interface
+/// up-edge and every 30 minutes, SUBSYSTEMS.md §2) so rfed has a path to it.
+/// Returns the 16-byte destination hash, the relay hash to register; null on
+/// failure (lastError).
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeNotifyRelayStart(
+    env: JNIEnv,
+    _class: JClass,
+    identity_handle: jlong,
+    callback: JObject,
+) -> jbyteArray {
+    let identity: Identity = match rns::get_handle::<Identity>(identity_handle as u64) {
+        Some(id) => id,
+        None => {
+            rns::set_error("invalid identity handle".into());
+            return std::ptr::null_mut();
+        }
+    };
+    let jvm = match env.get_java_vm() {
+        Ok(vm) => vm,
+        Err(e) => {
+            rns::set_error(format!("get_java_vm: {}", e));
+            return std::ptr::null_mut();
+        }
+    };
+    let global_ref = match env.new_global_ref(&callback) {
+        Ok(r) => r,
+        Err(e) => {
+            rns::set_error(format!("new_global_ref: {}", e));
+            return std::ptr::null_mut();
+        }
+    };
+
+    notify_relay_stop();
+
+    let mut dest = match notify_relay_destination(identity) {
+        Ok(d) => d,
+        Err(e) => {
+            rns::set_error(e);
+            return std::ptr::null_mut();
+        }
+    };
+
+    *NOTIFY_RELAY_CB.lock().unwrap() = Some((jvm, global_ref));
+
+    let packet_cb: Arc<dyn Fn(&[u8], &Packet) + Send + Sync> =
+        Arc::new(move |data: &[u8], _pkt: &Packet| {
+            let guard = NOTIFY_RELAY_CB.lock().unwrap();
+            let (jvm, cb_ref) = match guard.as_ref() {
+                Some(p) => p,
+                None => return,
+            };
+            let mut env = match jvm.attach_current_thread() {
+                Ok(e) => e,
+                Err(_) => return,
+            };
+            let j_payload = match env.byte_array_from_slice(data) {
+                Ok(b) => b,
+                Err(_) => return,
+            };
+            let _ = env.call_method(
+                cb_ref.as_obj(),
+                "onWake",
+                "([B)V",
+                &[JValue::Object(&j_payload)],
+            );
+            if env.exception_check().unwrap_or(false) {
+                let _ = env.exception_describe();
+                let _ = env.exception_clear();
+            }
+        });
+    dest.set_packet_callback(Some(packet_cb));
+    Transport::register_destination(dest.clone());
+    Transport::publish_destination(
+        dest.hash.clone(),
+        Some(std::time::Duration::from_secs(30 * 60)),
+        None,
+    );
+
+    let hash = vec_to_jbytes(&env, &dest.hash);
+    *NOTIFY_RELAY.lock().unwrap() = Some(dest);
+    hash
+}
+
+/// Stop hosting `rfed.notify` (a no-op when not started).
+fn notify_relay_stop() {
+    if let Some(dest) = NOTIFY_RELAY.lock().unwrap().take() {
+        Transport::unpublish_destination(&dest.hash);
+        Transport::deregister_destination(&dest.hash);
+    }
+    *NOTIFY_RELAY_CB.lock().unwrap() = None;
+}
+
+/// `RetichatBridge.nativeNotifyRelayStop(): Int`
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeNotifyRelayStop(
+    _env: JNIEnv,
+    _class: JClass,
+) -> jint {
+    notify_relay_stop();
+    0
+}
+
+#[cfg(test)]
+mod notify_relay_tests {
+    use super::*;
+
+    /// rfed wakes a self-hosted relay at the hash it derives from the key it
+    /// recorded at registration, under `rfed.notify`
+    /// (notify/rns.rs relay_wake_destination): the device must host exactly
+    /// that hash. Port of the iOS FFI's test of the same name.
+    #[test]
+    fn the_hosted_relay_is_the_hash_rfed_derives_from_the_registrants_key() {
+        let device = Identity::new(true);
+        let public = Identity::from_public_key(&device.get_public_key().unwrap()).unwrap();
+        let hosted = notify_relay_destination(device).unwrap();
+        let derived = Destination::new_outbound(
+            Some(public),
+            DestinationType::Single,
+            "rfed".to_string(),
+            vec!["notify".to_string()],
+        )
+        .unwrap();
+        assert_eq!(hosted.hash, derived.hash);
+        assert_eq!(hosted.hash.len(), 16);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Channel crypto / stamp / LXM pack-unpack
 //
 // The channel key derivation and LXM pack/unpack live once in

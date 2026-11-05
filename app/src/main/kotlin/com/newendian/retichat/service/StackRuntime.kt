@@ -4,10 +4,12 @@ import android.content.Context
 import android.util.Log
 import com.newendian.retichat.RetichatApp
 import com.newendian.retichat.bridge.AnnounceCallback
+import com.newendian.retichat.bridge.MeshWakeCallback
 import com.newendian.retichat.bridge.MessageCallback
 import com.newendian.retichat.bridge.MessageStateCallback
 import com.newendian.retichat.bridge.RetichatBridge
 import com.newendian.retichat.bridge.RfedBlobCallback
+import com.newendian.retichat.data.model.toHex
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -61,6 +63,14 @@ object StackRuntime {
         private set
 
     @Volatile var isReady: Boolean = false
+        private set
+
+    /**
+     * This device's own RFed Notify relay while it is hosted (MeshWake.kt),
+     * its 32 hex digits; null when it is not. Read by RfedNotifyRegistrar to
+     * register it for a channel beside the FCM bridge's relay.
+     */
+    @Volatile var meshRelayHex: String? = null
         private set
 
     /**
@@ -450,6 +460,12 @@ object StackRuntime {
         // no app-level retries (DESIGN_PRINCIPLES.md §2).
         if (identityHandle != 0L) {
             RfedNotifyRegistrar.registerIfNeeded(app, identityHandle)
+            // This device's own relay beside it, with a Bluetooth radio
+            // configured: hosted after the delivery destination is published
+            // and before Bluetooth starts, so the RTNode's up-edge announces
+            // it too (MeshWake).
+            runCatching { setUpMeshWake(app, withChannels = false) }
+                .onFailure { Log.e(MeshWake.TAG, "setUpMeshWake failed", it) }
         }
         // Distro (RFed SPEC §17): register this device for the shared identity
         // and have RFed announce it. No-op when no distro is loaded.
@@ -490,6 +506,10 @@ object StackRuntime {
         // leave Transport before the stack shuts down (no-op if never started).
         runCatching { RTNodeBluetooth.stop() }
             .onFailure { Log.e(TAG, "RTNodeBluetooth.stop failed", it) }
+        // The device's own relay leaves Transport too; the next start hosts it
+        // again (MeshWake).
+        runCatching { RetichatBridge.notifyRelayStop() }
+        meshRelayHex = null
 
         app.repository.configure(ByteArray(0), 0L, 0L)
 
@@ -556,6 +576,11 @@ object StackRuntime {
      * Serialised with bootstrap, shutdown and restart by initLock, and the
      * preference is read under the lock, so two quick Applies end in the
      * last one's state.
+     *
+     * The switch is also what decides, with no RNode saved, whether this
+     * device hosts its own relay (MeshWake), so on a ready stack it is
+     * brought in line here as well: hosted before Bluetooth starts (the
+     * RTNode's up-edge announces it), unregistered after Bluetooth stops.
      */
     suspend fun applyRtnodeBluetoothSetting(context: Context) {
         val app = context.applicationContext as RetichatApp
@@ -564,13 +589,109 @@ object StackRuntime {
                 if (!UserPreferences.isRtnodeBluetoothEnabled(app)) {
                     runCatching { RTNodeBluetooth.stop() }
                         .onFailure { Log.e(TAG, "RTNodeBluetooth.stop failed", it) }
+                    if (isReady) {
+                        runCatching { setUpMeshWake(app, withChannels = true) }
+                            .onFailure { Log.e(MeshWake.TAG, "setUpMeshWake failed", it) }
+                    }
                 } else if (isReady) {
+                    runCatching { setUpMeshWake(app, withChannels = true) }
+                        .onFailure { Log.e(MeshWake.TAG, "setUpMeshWake failed", it) }
                     val configDir = File(app.filesDir, "reticulum")
                     runCatching { RTNodeBluetooth.start(app, configDir.absolutePath) }
                         .onFailure { Log.e(TAG, "RTNodeBluetooth.start failed", it) }
                 } else {
                     Log.i(TAG, "Nearby RTNode on; the stack is not up: its next bootstrap starts Bluetooth")
                 }
+            }
+        }
+    }
+
+    // ── Mesh wake (MeshWake.kt) ───────────────────────────────────────
+
+    /**
+     * The type a saved RNode's interface row would have (Reticulum's config
+     * name). Settings offers only TCP Client on Android today, so in practice
+     * the Nearby RTNode switch alone decides.
+     */
+    private const val RNODE_INTERFACE_TYPE = "RNodeInterface"
+
+    /**
+     * With a Bluetooth radio configured, host this device's own RFed Notify
+     * relay and owe its registration to the RFed node, beside the FCM
+     * bridge's relay (MeshWake). With none, stop hosting it and unregister
+     * the relay registered before, if any, with its channel registrations.
+     * Port of `setUpMeshWake` in Retichat-ios/Retichat/Services/ChatRepository.swift.
+     *
+     * [withChannels]: also register the relay for every channel whose push
+     * toggle is on. Not at bootstrap: there the channels' push is registered
+     * again only after the distro's queue is applied (DistroFirst), and
+     * RfedNotifyRegistrar.registerForChannel then registers the hosted relay
+     * too. Called under initLock, with the stack's identity loaded.
+     */
+    private suspend fun setUpMeshWake(app: RetichatApp, withChannels: Boolean) {
+        val wanted = MeshWake.wanted(
+            savedRNode = app.database.interfaceConfigDao().enabledInterfaces().any { it.type == RNODE_INTERFACE_TYPE },
+            rtnodeSwitchOn = UserPreferences.isRtnodeBluetoothEnabled(app),
+        )
+        if (!wanted) {
+            if (meshRelayHex != null) {
+                runCatching { RetichatBridge.notifyRelayStop() }
+                meshRelayHex = null
+            }
+            val relayHex = UserPreferences.getMeshWakeRelayHex(app) ?: return
+            Log.i(MeshWake.TAG, "No Bluetooth radio: unregistering own relay ${relayHex.take(8)}")
+            RfedNotifyRegistrar.unregisterMeshRelay(app, identityHandle, relayHex, pushChannelHashes(app))
+            return
+        }
+        if (meshRelayHex != null) return
+        val hash = RetichatBridge.notifyRelayStart(identityHandle, object : MeshWakeCallback {
+            override fun onWake(payload: ByteArray) = onMeshWake(app, payload)
+        }) ?: run {
+            Log.e(MeshWake.TAG, "Own relay did not start: ${RetichatBridge.lastError()}")
+            return
+        }
+        val relayHex = hash.toHex()
+        meshRelayHex = relayHex
+        UserPreferences.setMeshWakeRelayHex(app, relayHex)
+        val channels = if (withChannels) pushChannelHashes(app) else emptyList()
+        RfedNotifyRegistrar.registerMeshRelay(app, identityHandle, relayHex, channels)
+        Log.i(MeshWake.TAG, "Own relay ${relayHex.take(8)} hosted; its registration is owed to RFed")
+    }
+
+    /** The channels whose push toggle is on (RfedChannelClient.enableChannelPush). */
+    private fun pushChannelHashes(app: RetichatApp): List<ByteArray> =
+        UserPreferences.getChannelPushEnabled(app).mapNotNull { FcmTokenRegistrar.hexToBytes(it) }
+
+    /**
+     * A wake RFed sent to this device's own relay over the mesh (MeshWake),
+     * on a Transport thread. Port of the wake observer in
+     * Retichat-ios/Retichat/RetichatApp.swift: a wake for another receiver is
+     * ignored; a channel wake pulls that channel's waiting posts, one page as
+     * a wake pulls for each channel (WakeWorker); any other is handled as an
+     * FCM wake is (RetichatFcmService). One line in the log for each.
+     */
+    private fun onMeshWake(app: RetichatApp, payload: ByteArray) {
+        val wake = MeshWake.parse(payload)
+        val channelHash = wake?.channel
+        when {
+            wake == null -> Log.i(MeshWake.TAG, "Mesh wake: unreadable, ignored")
+            !wake.receiver.contentEquals(selfDestHash) ->
+                Log.i(MeshWake.TAG, "Mesh wake for another receiver (${wake.receiver.toHex().take(8)}), ignored")
+            channelHash == null -> {
+                Log.i(MeshWake.TAG, "Mesh wake from RFed for message ${wake.message?.toHex()?.take(16) ?: "-"}: collecting as for a push")
+                WakeWorker.enqueue(app)
+            }
+            else -> app.applicationScope.launch(Dispatchers.IO) {
+                val channelHex = channelHash.toHex()
+                val channel = app.database.channelDao().activeChannels()
+                    .firstOrNull { it.id.equals(channelHex, ignoreCase = true) }
+                if (channel == null) {
+                    Log.i(MeshWake.TAG, "Mesh wake from RFed for channel ${channelHex.take(8)}, not joined here: ignored")
+                    return@launch
+                }
+                Log.i(MeshWake.TAG, "Mesh wake from RFed for channel '${channel.channelName}': pulling its waiting posts")
+                runCatching { app.rfedChannelClient.pullDeferred(channel) }
+                    .onFailure { Log.w(MeshWake.TAG, "Mesh wake: pulling '${channel.channelName}' failed", it) }
             }
         }
     }

@@ -69,6 +69,17 @@ interface RfedBlobCallback {
 }
 
 /**
+ * A wake RFed sent to this device's own `rfed.notify` relay over the mesh
+ * (service/MeshWake.kt): its payload, a msgpack map (RFed-spec Notify.md
+ * "Wake packet"). Fires on a Rust Transport thread already attached to the
+ * JVM: hand the work to a coroutine scope inside `onWake`.
+ */
+@Keep
+interface MeshWakeCallback {
+    fun onWake(payload: ByteArray)
+}
+
+/**
  * Callback interface for APP_LINK status transitions. Fires on a Rust
  * background thread already attached to the JVM — marshal to a coroutine
  * scope inside `onStatus` if you need to touch UI state.
@@ -1249,6 +1260,26 @@ object RetichatBridge {
     private external fun nativeRfedDeliveryStart(identityHandle: Long, callback: RfedBlobCallback): Int
     private external fun nativeRfedDeliveryAnnounce(): Int
     private external fun nativeRfedDeliveryStop(): Int
+
+    // -------------------------------------------------------------------
+    // Mesh wake — this device as its own RFed Notify relay (MeshWake.kt)
+    // -------------------------------------------------------------------
+
+    /**
+     * Host `rfed.notify` under [identityHandle]'s identity and publish it, so
+     * the RFed node has a path to it; each wake's payload goes to [callback].
+     * Returns the 16-byte destination hash, the relay hash to register with
+     * RFed, or null on failure ([lastError]). Port of
+     * `RetichatBridge.meshWakeStart` in Retichat-ios.
+     */
+    fun notifyRelayStart(identityHandle: Long, callback: MeshWakeCallback): ByteArray? =
+        nativeNotifyRelayStart(identityHandle, callback)
+
+    /** Stop hosting `rfed.notify` (a no-op when not started). */
+    fun notifyRelayStop(): Boolean = nativeNotifyRelayStop() == 0
+
+    private external fun nativeNotifyRelayStart(identityHandle: Long, callback: MeshWakeCallback): ByteArray?
+    private external fun nativeNotifyRelayStop(): Int
 
     // -------------------------------------------------------------------
     // Channel crypto / stamp / LXM pack-unpack
