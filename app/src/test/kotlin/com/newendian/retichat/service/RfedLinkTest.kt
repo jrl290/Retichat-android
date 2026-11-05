@@ -144,9 +144,52 @@ class RfedLinkTest {
         assertEquals(listOf("aa", "bb"), RfedChannelClient.channelsOnNode(channels, "node1").map { it.id })
         assertEquals(listOf("cc"), RfedChannelClient.channelsOnNode(channels, "NODE2").map { it.id })
 
-        val bind = src("service/RfedLink.kt").substringAfter("private suspend fun bind(").substringBefore("    /**")
-        val stream = bind.indexOf("app.rfedChannelClient.sendChannelStreamConfigForNode(node)")
+        val link = src("service/RfedLink.kt")
+        val bind = link.substringAfter("private suspend fun bind(").substringBefore("    /**")
+        val stream = bind.indexOf("bindPushes(app, node)")
         val pull = bind.indexOf("app.rfedChannelClient.pullDeferredForNode(node)")
         assertTrue(stream >= 0 && pull > stream)
+        val pushes = link.substringAfter("private suspend fun bindPushes(").substringBefore("    /**")
+        assertTrue(pushes.contains("app.rfedChannelClient.sendChannelStreamConfigForNode(node)"))
+        assertTrue(pushes.contains("PropagationStream.onLinkActive(app, node)"))
+    }
+
+    @Test
+    fun overASlowRouteTheLinkOpensForRequestsOnly() {
+        // James, 2026-11-05: "for LoRa/Slow connections we can't maintain a
+        // link to RFed". Measured slow, with this device's own wake address
+        // hosted, RFed wakes the device instead of pushing: no push binding,
+        // nothing opens the link to be pushed to, and it closes once no
+        // request waits its turn.
+        val link = src("service/RfedLink.kt")
+        val holds = link.substringAfter("fun holdsNoLink(").substringBefore("    /**")
+        assertTrue(holds.contains("RetichatBridge.appLinkRouteSpeed(dest) == RetichatBridge.RouteSpeed.SLOW"))
+        assertTrue(holds.contains("StackRuntime.meshRelayHex != null"))
+        val bind = link.substringAfter("private suspend fun bind(").substringBefore("    /**")
+        assertTrue(bind.contains("if (!holdsNoLink(node)) bindPushes(app, node)"))
+        val request = link.substringAfter("suspend fun request(").substringBefore("    /**")
+        assertTrue(request.indexOf("closeIfIdle(nodeHex, dest)") > request.indexOf("ConnectionStateManager.appLinkSend("))
+        val close = link.substringAfter("private fun closeIfIdle(").substringBefore("    /**")
+        assertTrue(close.contains("ConnectionStateManager.slowRouteIdle(dest)"))
+        assertTrue(close.contains("ConnectionStateManager.closeAppLink(dest)"))
+
+        // A request is counted from before its turn until it ends.
+        val csm = src("service/ConnectionStateManager.kt")
+        val send = csm.substringAfter("private suspend fun slowRouteSend(").substringBefore("    /**")
+        val counted = send.indexOf("slowRouteWaiting.merge(key, 1, Int::plus)")
+        assertTrue(counted >= 0 && counted < send.indexOf("slowRouteTurns.getOrPut(key)"))
+        assertTrue(send.substringAfter("} finally {").contains("slowRouteWaiting.computeIfPresent(key)"))
+
+        // The stream opens don't open the link on such a route.
+        val stream = src("service/PropagationStream.kt").substringAfter("suspend fun start(").substringBefore("    /**")
+        assertTrue(stream.indexOf("if (RfedLink.holdsNoLink(nodeHex)) return") in 0 until stream.indexOf("RfedLink.ensure("))
+        val channels = src("service/RfedChannelClient.kt")
+        val reconfigure = channels.substringBefore("val streamDest = RfedLink.ensure(app, nodeIdentityHashHex)").takeLast(400)
+        assertTrue(reconfigure.contains("if (RfedLink.holdsNoLink(nodeIdentityHashHex)) {"))
+
+        // The casual poll waits six hours there; wakes sync at once.
+        val app = File("src/main/kotlin/com/newendian/retichat/RetichatApp.kt").readText()
+        assertTrue(app.contains("private const val WOKEN_POLL_INTERVAL_MS = 6 * 60 * 60 * 1000L"))
+        assertTrue(app.contains("if (RfedLink.holdsNoLink(node)) WOKEN_POLL_INTERVAL_MS else 0L"))
     }
 }

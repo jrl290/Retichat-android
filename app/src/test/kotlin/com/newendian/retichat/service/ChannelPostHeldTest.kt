@@ -86,7 +86,7 @@ class ChannelPostHeldTest {
         inOrder(
             bind,
             "app.rfedChannelClient.onRfedLinkActive()",
-            "app.rfedChannelClient.sendChannelStreamConfigForNode(node)",
+            "bindPushes(app, node)",
         )
         assertTrue(body(client, "onRfedLinkActive").contains("scope.launch(Dispatchers.IO) { releaseQueuedPosts() }"))
         // After a post rfed took: launched, never inline. post() holds sendMutex and may run

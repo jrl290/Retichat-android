@@ -611,6 +611,8 @@ class RfedChannelClient(
     /**
      * Enable push wakeups for a channel: persist the pref and register with rfed.notify
      * so the rfed node will fire a silent push for every new message in this channel.
+     * While this device hosts its own relay (MeshWake.kt) the registrar registers that
+     * one for the channel too, so its wakes also come over the mesh.
      */
     suspend fun enableChannelPush(channelHashHex: String): Boolean = withContext(Dispatchers.IO) {
         UserPreferences.setChannelPushEnabled(appContext, channelHashHex, true)
@@ -770,6 +772,11 @@ class RfedChannelClient(
         }
 
         for (nodeIdentityHashHex in nodes) {
+            // Not opened just to be pushed to over a slow route (RfedLink.holdsNoLink).
+            if (RfedLink.holdsNoLink(nodeIdentityHashHex)) {
+                channelStreamMutex.withLock { trackedChannelStreamNodes.add(nodeIdentityHashHex) }
+                continue
+            }
             val streamDest = RfedLink.ensure(app, nodeIdentityHashHex) ?: continue
             channelStreamMutex.withLock { trackedChannelStreamNodes.add(nodeIdentityHashHex) }
 

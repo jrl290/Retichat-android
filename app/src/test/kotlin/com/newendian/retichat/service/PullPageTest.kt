@@ -134,7 +134,9 @@ class PullPageTest {
         // rfed.link's ACTIVE edge: both stream opens (and the pull after the
         // propagation one) and the channel pull, each guarded, a cancellation
         // passed on.
-        val bind = between(src("service/RfedLink.kt"), "private suspend fun bind(", "    /**")
+        val link = src("service/RfedLink.kt")
+        val bind = between(link, "private suspend fun bind(", "    /**") +
+            between(link, "private suspend fun bindPushes(", "    /**")
         assertTrue(bind.contains("PropagationStream.onLinkActive(app, node)"))
         assertTrue(bind.contains("sendChannelStreamConfigForNode(node)"))
         assertTrue(bind.contains("pullDeferredForNode(node)"))

@@ -46,6 +46,8 @@ object PropagationStream {
         }
         val current = Session(nodeHex, routerHandle, identityHandle, selfDestHash)
         session = current
+        // Not opened just to be pushed to over a slow route (RfedLink.holdsNoLink).
+        if (RfedLink.holdsNoLink(nodeHex)) return
         val dest = RfedLink.ensure(app, nodeHex) ?: return
         if (ConnectionStateManager.appLinkStatus(dest) == RetichatBridge.AppLinkStatus.ACTIVE) {
             sendOpen(app, current)

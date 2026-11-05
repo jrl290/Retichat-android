@@ -93,6 +93,9 @@ object ConnectionStateManager {
     /** Times each node's link went down, counted as the event arrives (not under stateMutex). */
     private val appLinkDowns = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
+    /** Each node's slow-route requests holding or waiting for its turn ([slowRouteIdle]). */
+    private val slowRouteWaiting = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
     private val essentialRequestMutex = Mutex()
     private val rfedMonitorLock = Any()
     private var rfedStatusMonitorRetainCount = 0
@@ -426,31 +429,40 @@ object ConnectionStateManager {
         payload: ByteArray,
     ): ByteArray? {
         val key = destHash.toHex()
-        val downsBefore = appLinkDowns[key] ?: 0L
-        val turn = stateMutex.withLock { slowRouteTurns.getOrPut(key) { Mutex() } }
-        return turn.withLock {
-            if ((appLinkDowns[key] ?: 0L) != downsBefore) {
-                Log.i(TAG, "slow route to ${key.take(8)}: link went down while $path waited its turn")
-                return@withLock null
-            }
-            RetichatBridge.appLinkOpenPersistent(rh, destHash, app, aspectsCsv)
-            if (!awaitAppLinkSettled(destHash)) return@withLock null
-            suspendCoroutine { cont ->
-                val ok = RetichatBridge.appLinkRequestAsync(
-                    rh, destHash, path, payload, /* timeoutSecs = none */ 0.0,
-                    object : AppLinkRequestCallback {
-                        override fun onResult(status: Int, bytes: ByteArray?) {
-                            when (status) {
-                                RetichatBridge.AppLinkRequestStatus.RESPONSE -> cont.resume(bytes)
-                                else -> cont.resume(null)
+        // Counted while it holds or waits for its turn ([slowRouteIdle]).
+        slowRouteWaiting.merge(key, 1, Int::plus)
+        try {
+            val downsBefore = appLinkDowns[key] ?: 0L
+            val turn = stateMutex.withLock { slowRouteTurns.getOrPut(key) { Mutex() } }
+            return turn.withLock {
+                if ((appLinkDowns[key] ?: 0L) != downsBefore) {
+                    Log.i(TAG, "slow route to ${key.take(8)}: link went down while $path waited its turn")
+                    return@withLock null
+                }
+                RetichatBridge.appLinkOpenPersistent(rh, destHash, app, aspectsCsv)
+                if (!awaitAppLinkSettled(destHash)) return@withLock null
+                suspendCoroutine { cont ->
+                    val ok = RetichatBridge.appLinkRequestAsync(
+                        rh, destHash, path, payload, /* timeoutSecs = none */ 0.0,
+                        object : AppLinkRequestCallback {
+                            override fun onResult(status: Int, bytes: ByteArray?) {
+                                when (status) {
+                                    RetichatBridge.AppLinkRequestStatus.RESPONSE -> cont.resume(bytes)
+                                    else -> cont.resume(null)
+                                }
                             }
-                        }
-                    },
-                )
-                if (!ok) cont.resume(null)
+                        },
+                    )
+                    if (!ok) cont.resume(null)
+                }
             }
+        } finally {
+            slowRouteWaiting.computeIfPresent(key) { _, n -> if (n <= 1) null else n - 1 }
         }
     }
+
+    /** Whether no request holds or waits for a slow-route turn on [destHash]. */
+    fun slowRouteIdle(destHash: ByteArray): Boolean = !slowRouteWaiting.containsKey(destHash.toHex())
 
     /**
      * Open (idempotently) an APP_LINK to [destHash] for the given app/aspects

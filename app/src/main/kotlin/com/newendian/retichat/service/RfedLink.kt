@@ -30,6 +30,11 @@ import kotlinx.coroutines.runBlocking
  * push handlers are set before the link is created (a link captures its
  * destination at creation). Pushes are bound per link: every ACTIVE edge
  * sends the stream-open requests again.
+ *
+ * Over a slow route the device holds no link ([holdsNoLink], James
+ * 2026-11-05: "for LoRa/Slow connections we can't maintain a link to
+ * RFed"): RFed wakes its own wake address instead of pushing (MeshWake),
+ * the link opens for requests only, and it closes once none waits.
  */
 object RfedLink {
 
@@ -150,7 +155,30 @@ object RfedLink {
      */
     suspend fun request(app: RetichatApp, nodeHex: String, path: String, payload: ByteArray): ByteArray? {
         val dest = ensure(app, nodeHex) ?: return null
-        return ConnectionStateManager.appLinkSend(dest, "rfed", "link", path, payload)
+        val answer = ConnectionStateManager.appLinkSend(dest, "rfed", "link", path, payload)
+        closeIfIdle(nodeHex, dest)
+        return answer
+    }
+
+    /**
+     * Whether this device holds no link to [nodeHex]: its route was measured
+     * slow (ConnectionStateManager.slowRouteSend) and it hosts its own wake
+     * address (MeshWake), so RFed wakes it when something waits. Then nothing
+     * opens the link just to be pushed to.
+     */
+    fun holdsNoLink(nodeHex: String): Boolean {
+        val dest = destHash(nodeHex) ?: return false
+        return RetichatBridge.appLinkRouteSpeed(dest) == RetichatBridge.RouteSpeed.SLOW &&
+            StackRuntime.meshRelayHex != null
+    }
+
+    /** After a request: a link this device doesn't hold closes once no other request waits its turn on it. */
+    private fun closeIfIdle(nodeHex: String, dest: ByteArray) {
+        if (!holdsNoLink(nodeHex) || !ConnectionStateManager.slowRouteIdle(dest) ||
+            ConnectionStateManager.appLinkStatus(dest) == RetichatBridge.AppLinkStatus.NONE
+        ) return
+        Log.i(TAG, "${nodeHex.take(8)}: slow route, no request waiting: link closed; RFed wakes this device")
+        ConnectionStateManager.closeAppLink(dest)
     }
 
     /**
@@ -185,11 +213,30 @@ object RfedLink {
         synchronized(statusListeners) { statusListeners.clear() }
     }
 
-    /** A fresh link: bind it for channel and LXMF pushes (Link.md "The client re-binds on every link"). */
+    /**
+     * A fresh link: bind it for channel and LXMF pushes (Link.md "The client
+     * re-binds on every link"), unless it closes after its requests
+     * ([holdsNoLink]).
+     */
     private suspend fun bind(app: RetichatApp, node: String) {
         // The posts queued or held for a link go on its every ACTIVE edge;
         // launched, they wait for none of the binding below.
         app.rfedChannelClient.onRfedLinkActive()
+        if (!holdsNoLink(node)) bindPushes(app, node)
+        // What the node deferred while the link was down, collected now
+        // instead of on a wake or rfed's re-send (~30 min late on 10-19).
+        // Last: a page can take the request's 5 s.
+        try {
+            app.rfedChannelClient.pullDeferredForNode(node)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "channel pull on rfed.link ACTIVE failed", e)
+        }
+    }
+
+    /** Ask the node to push on this link: the channel and propagation stream opens. */
+    private suspend fun bindPushes(app: RetichatApp, node: String) {
         try {
             app.rfedChannelClient.sendChannelStreamConfigForNode(node)
         } catch (e: CancellationException) {
@@ -203,16 +250,6 @@ object RfedLink {
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "propagation stream open on rfed.link failed", e)
-        }
-        // What the node deferred while the link was down, collected now
-        // instead of on a wake or rfed's re-send (~30 min late on 10-19).
-        // Last: a page can take the request's 5 s.
-        try {
-            app.rfedChannelClient.pullDeferredForNode(node)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Log.e(TAG, "channel pull on rfed.link ACTIVE failed", e)
         }
     }
 

@@ -3,6 +3,7 @@ package com.newendian.retichat
 import android.app.Activity
 import android.app.Application
 import android.os.Bundle
+import android.os.SystemClock
 import android.util.Log
 import androidx.lifecycle.ProcessLifecycleOwner
 import com.newendian.retichat.bridge.RetichatBridge
@@ -16,7 +17,9 @@ import com.newendian.retichat.service.NetworkMonitor
 import com.newendian.retichat.service.PropagationSync
 import com.newendian.retichat.service.RfedChannelClient
 import com.newendian.retichat.service.RfedDistroClient
+import com.newendian.retichat.service.RfedLink
 import com.newendian.retichat.service.StackRuntime
+import com.newendian.retichat.service.UserPreferences
 import com.newendian.retichat.service.logEscapedExceptions
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -48,6 +51,13 @@ class RetichatApp : Application() {
 
         /** Foreground propagation poll interval (matches iOS 300 s). */
         private const val POLL_INTERVAL_MS = 300_000L
+
+        /**
+         * The poll's cadence while RFed wakes this device over a slow route
+         * (RfedLink.holdsNoLink): the longest a message whose wake was lost
+         * on the radio waits, as on the T-Deck and iOS. Wakes sync at once.
+         */
+        private const val WOKEN_POLL_INTERVAL_MS = 6 * 60 * 60 * 1000L
 
         @Volatile var isInForeground: Boolean = false
             private set
@@ -196,9 +206,16 @@ class RetichatApp : Application() {
         if (foregroundPollJob?.isActive == true) return
         foregroundPollJob = applicationScope.launch {
             delay(initialDelayMs)
+            var lastPollMs = 0L
             while (isActive) {
-                runCatching { PropagationSync.runOnce(this@RetichatApp) }
-                    .onFailure { Log.w(TAG, "foreground propagation poll failed", it) }
+                val node = UserPreferences.getEffectiveRfedNodeIdentityHash(this@RetichatApp)
+                val interval = if (RfedLink.holdsNoLink(node)) WOKEN_POLL_INTERVAL_MS else 0L
+                val now = SystemClock.elapsedRealtime()
+                if (lastPollMs == 0L || now - lastPollMs >= interval) {
+                    lastPollMs = now
+                    runCatching { PropagationSync.runOnce(this@RetichatApp) }
+                        .onFailure { Log.w(TAG, "foreground propagation poll failed", it) }
+                }
                 delay(POLL_INTERVAL_MS)
             }
         }
