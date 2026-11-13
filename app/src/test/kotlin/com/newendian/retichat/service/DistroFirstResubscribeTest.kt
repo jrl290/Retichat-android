@@ -313,4 +313,35 @@ class DistroFirstResubscribeTest {
         assertTrue(announce.contains("Log.w(TAG, said)"))
         assertTrue(client.contains("return@withContext fail(DistroCodec.notAYes(\"registration\", resp))"))
     }
+
+    @Test
+    fun overASlowRouteTheStartOwesTheReSubscriptionToTheNextLinkUp() {
+        // DESIGN_PRINCIPLES §1, "LoRa connections" (2026-11-13): a phone on Bluetooth to an RTNode
+        // and LoRa waited 5 s here for RFed and re-subscribed no channel in the whole run.
+        val channels = src("service/RfedChannelClient.kt")
+        val body = channels.substring(
+            channels.indexOf("suspend fun scheduleResubscribeOnRfedChannelActive("),
+            channels.indexOf("suspend fun resubscribePersistedChannels()"),
+        )
+        val slow = body.indexOf("if (ConnectionStateManager.rfedRouteIsSlow(appContext)) {")
+        val owed = body.indexOf("resubscribeOwed.set(true)")
+        val reachable = body.indexOf("if (!ConnectionStateManager.rfedReachableNow()) {")
+        val taken = body.indexOf("if (!resubscribeOwed.compareAndSet(true, false)) {")
+        val fast = body.indexOf("} else if (!ConnectionStateManager.waitForRfedReachable(timeoutMs = 5_000L)) {")
+        assertTrue(
+            "the slow branch owes the re-subscription, then checks RFed, then takes it; a fast route keeps its 5 s",
+            slow >= 0 && slow < owed && owed < reachable && reachable < taken && taken < fast,
+        )
+        assertTrue(body.contains("RFed not reachable yet over a slow route: \${channels.size} persisted channel(s) re-subscribed when the rfed.link comes up"))
+        assertTrue(body.contains("The rfed.link came up while this start checked RFed: its ACTIVE edge re-subscribes the \${channels.size} persisted channel(s)"))
+        // The rfed.link's ACTIVE edge takes what is owed and runs it through the start's distro-first gate.
+        val edge = channels.substring(channels.indexOf("fun onRfedLinkActive() {"), channels.indexOf("private suspend fun releaseQueuedPosts()"))
+        assertTrue(edge.contains("if (resubscribeOwed.compareAndSet(true, false)) {\n            scope.launch(Dispatchers.IO) { resubscribeOwedOnLinkActive() }"))
+        assertTrue(edge.contains("DistroFirst.thenResubscribe(") && edge.contains("pull = { RfedDistroClient.pullOutcome(appContext) },"))
+        assertTrue("once per process", edge.indexOf("if (didResubscribeOnActive) {") < edge.indexOf("resubscribePersistedChannels()"))
+        // Slow means not measured fast, as for the requests (slowRouteSend).
+        val csm = src("service/ConnectionStateManager.kt")
+        assertTrue(csm.contains("return RetichatBridge.appLinkRouteSpeed(dest) != RetichatBridge.RouteSpeed.FAST"))
+        assertTrue(csm.contains("fun rfedReachableNow(): Boolean = rfedNodeLinkStatusRuntime() == RetichatBridge.AppLinkStatus.ACTIVE"))
+    }
 }

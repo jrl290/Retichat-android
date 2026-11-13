@@ -725,6 +725,19 @@ object ConnectionStateManager {
      */
     fun rfedNodeLinkStatus(): Int = rfedNodeLinkStatusRuntime()
 
+    /**
+     * Whether the RFed node's route is slow (DESIGN_PRINCIPLES §1, "LoRa connections"):
+     * its rfed.link has not measured it fast (`AppLinks::route_speed`), and one not
+     * measured yet counts as slow, as for [slowRouteSend].
+     */
+    fun rfedRouteIsSlow(context: Context): Boolean {
+        val dest = RfedLink.destHash(UserPreferences.getEffectiveRfedNodeIdentityHash(context)) ?: return false
+        return RetichatBridge.appLinkRouteSpeed(dest) != RetichatBridge.RouteSpeed.FAST
+    }
+
+    /** The RFed node is reachable now: [waitForRfedReachable]'s check, once, without waiting. */
+    fun rfedReachableNow(): Boolean = rfedNodeLinkStatusRuntime() == RetichatBridge.AppLinkStatus.ACTIVE
+
     /** Wait for rfed.node reachability, mirroring iOS `waitForRfedReachable`. */
     suspend fun waitForRfedReachable(timeoutMs: Long): Boolean = withContext(Dispatchers.IO) {
         val deadline = System.currentTimeMillis() + timeoutMs

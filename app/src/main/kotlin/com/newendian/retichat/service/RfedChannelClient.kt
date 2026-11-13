@@ -658,6 +658,14 @@ class RfedChannelClient(
     @Volatile private var didResubscribeOnActive = false
 
     /**
+     * The start's re-subscription, owed when RFed was not reachable yet over a slow
+     * route ([scheduleResubscribeOnRfedChannelActive]). Whoever takes it runs it: the
+     * start itself if RFed is reachable after all, else the next rfed.link ACTIVE edge
+     * ([onRfedLinkActive]), through the same distro-first gate ([resubscribeOwedOnLinkActive]).
+     */
+    private val resubscribeOwed = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
     * Re-subscribe to persisted channels once the rfed node is reachable.
     * The historical name is retained for call-site stability, but the
     * readiness gate now mirrors iOS: path reachability, not a held
@@ -693,7 +701,23 @@ class RfedChannelClient(
             Log.i(TAG, "No persisted channels to re-subscribe at this start")
             return@withContext
         }
-        if (!ConnectionStateManager.waitForRfedReachable(timeoutMs = 5_000L)) {
+        if (ConnectionStateManager.rfedRouteIsSlow(appContext)) {
+            // Over a slow route (DESIGN_PRINCIPLES §1, "LoRa connections") there is no
+            // 5 s wait: RFed answers over LoRa in its own time. The re-subscription is
+            // owed, and runs now if RFed is reachable, else on the rfed.link's next
+            // ACTIVE edge ([onRfedLinkActive]). Owed first, then checked: an edge that
+            // comes between the two still finds it. Until 2026-11-13 this waited 5 s on
+            // every route, and a phone on LoRa re-subscribed no channel in the whole run.
+            resubscribeOwed.set(true)
+            if (!ConnectionStateManager.rfedReachableNow()) {
+                Log.i(TAG, "RFed not reachable yet over a slow route: ${channels.size} persisted channel(s) re-subscribed when the rfed.link comes up")
+                return@withContext
+            }
+            if (!resubscribeOwed.compareAndSet(true, false)) {
+                Log.i(TAG, "The rfed.link came up while this start checked RFed: its ACTIVE edge re-subscribes the ${channels.size} persisted channel(s)")
+                return@withContext
+            }
+        } else if (!ConnectionStateManager.waitForRfedReachable(timeoutMs = 5_000L)) {
             // Said, never silent: until 2026-10-10 this returned without a word.
             Log.w(TAG, "RFed node not reachable within 5 s: ${channels.size} persisted channel(s) not re-subscribed at this start")
             return@withContext
@@ -909,6 +933,32 @@ class RfedChannelClient(
      */
     fun onRfedLinkActive() {
         scope.launch(Dispatchers.IO) { releaseQueuedPosts() }
+        if (resubscribeOwed.compareAndSet(true, false)) {
+            scope.launch(Dispatchers.IO) { resubscribeOwedOnLinkActive() }
+        }
+    }
+
+    /**
+     * The start's re-subscription that RFed was not reachable for over a slow route
+     * ([resubscribeOwed]), run on the rfed.link ACTIVE edge that took it: through the
+     * same distro-first gate as the start (DESIGN_PRINCIPLES §5), so the distro's
+     * queue is applied before any channel is subscribed again.
+     */
+    private suspend fun resubscribeOwedOnLinkActive() {
+        DistroFirst.thenResubscribe(
+            hasDistro = DistroManager.hasDistro,
+            pull = { RfedDistroClient.pullOutcome(appContext) },
+            stopped = { StackRuntime.identityHandle == 0L },
+            say = { line, warning -> if (warning) Log.w(DistroFirst.TAG, line) else Log.i(DistroFirst.TAG, line) },
+        ) {
+            if (didResubscribeOnActive) {
+                Log.i(TAG, ALREADY_RESUBSCRIBED)
+                return@thenResubscribe
+            }
+            didResubscribeOnActive = true
+            Log.i(TAG, "rfed.link came up — re-subscribing the persisted channels this start owed")
+            resubscribePersistedChannels()
+        }
     }
 
     /**
