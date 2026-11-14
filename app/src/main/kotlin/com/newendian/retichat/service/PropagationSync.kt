@@ -2,6 +2,7 @@ package com.newendian.retichat.service
 
 import android.content.Context
 import android.util.Log
+import com.newendian.retichat.RetichatApp
 import com.newendian.retichat.bridge.RetichatBridge
 import kotlinx.coroutines.delay
 
@@ -21,6 +22,10 @@ import kotlinx.coroutines.delay
  *
  * The caller is responsible for ensuring the Reticulum stack is up
  * ([StackRuntime.acquire]).
+ *
+ * With an RFed node of protocol version 2 the sync goes on its rfed.link
+ * ([RfedPropagationCarrier]), held for the whole sync, and no link to its
+ * `lxmf.propagation` is opened.
  *
  * Returns `true` if the request reached PR_COMPLETE, `false` otherwise.
  */
@@ -42,7 +47,14 @@ object PropagationSync {
         )
         val nodeHash = nodeManager.primaryNode
 
-        if (requireFreshTransport) {
+        // RFed-spec/Link.md: a node of protocol version 2 takes the sync on
+        // its rfed.link, the one link this device holds to it.
+        val rfedNode = UserPreferences.getEffectiveRfedNodeIdentityHash(context)
+        val app = context.applicationContext as? RetichatApp
+        val viaRfedLink = app != null && rfedNode.length == 32 &&
+            RfedPropagationCarrier.sync(app, rfedNode)?.contentEquals(nodeHash) == true
+
+        if (requireFreshTransport && !viaRfedLink) {
             Log.d(TAG, "wake sync: reopening lxmf.propagation app-link before pull")
             if (!ConnectionStateManager.reopenPersistentAppLinkAndAwaitActive(
                     nodeHash,
@@ -60,6 +72,17 @@ object PropagationSync {
             Log.w(TAG, "setPropagationNode failed: ${RetichatBridge.lastError()}")
             return false
         }
+        // The list, the fetch and the purge are three requests: over a slow
+        // route the link a device doesn't hold stays up from one to the next.
+        return if (viaRfedLink) {
+            RfedLink.holding(rfedNode) { requestAndFollow(context, routerHandle, identityHandle, nodeHash) }
+        } else {
+            requestAndFollow(context, routerHandle, identityHandle, nodeHash)
+        }
+    }
+
+    /** Ask the router for the node's messages, and follow its sync to its end. */
+    private suspend fun requestAndFollow(context: Context, routerHandle: Long, identityHandle: Long, nodeHash: ByteArray): Boolean {
         if (!RetichatBridge.routerRequestMessages(routerHandle, identityHandle)) {
             Log.w(TAG, "requestMessages failed: ${RetichatBridge.lastError()}")
             return false

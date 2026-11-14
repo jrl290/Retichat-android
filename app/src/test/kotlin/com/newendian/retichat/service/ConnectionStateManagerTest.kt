@@ -102,7 +102,9 @@ class ConnectionStateManagerTest {
         val connectionState = sourceFile("src/main/kotlin/com/newendian/retichat/service/ConnectionStateManager.kt")
 
         assertTrue(wakeWorker.contains("PropagationSync.runOnce(applicationContext, requireFreshTransport = true)"))
-        assertTrue(propagation.contains("if (requireFreshTransport)"))
+        // Not with a node of protocol version 2: its sync goes on rfed.link,
+        // and no link to its lxmf.propagation is opened (RFed-spec/Link.md).
+        assertTrue(propagation.contains("if (requireFreshTransport && !viaRfedLink)"))
         assertTrue(propagation.contains("ConnectionStateManager.reopenPersistentAppLinkAndAwaitActive("))
         assertTrue(propagation.contains("\"lxmf\",") && propagation.contains("\"propagation\","))
         assertTrue(connectionState.contains("suspend fun reopenPersistentAppLinkAndAwaitActive("))

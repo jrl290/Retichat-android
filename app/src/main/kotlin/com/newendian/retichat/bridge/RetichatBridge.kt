@@ -110,6 +110,18 @@ interface AppLinkInboundRequestCallback {
 }
 
 /**
+ * The app's side of the router's propagation carrier
+ * ([RetichatBridge.routerSyncRfedCarrier]): send [data] (msgpack) as a request
+ * on [path] over the app's rfed.link, then answer with
+ * [RetichatBridge.propagationCarrierComplete] — once, null when the request
+ * failed. Called on a native thread of its own; return at once.
+ */
+@Keep
+interface PropagationCarrierCallback {
+    fun onRequest(token: Long, path: String, data: ByteArray)
+}
+
+/**
  * One-shot callback for [RetichatBridge.appLinkRequestAsync].  Fires
  * exactly once: on response, failure, or timeout.
  *
@@ -478,11 +490,33 @@ object RetichatBridge {
     fun routerCancelPropagation(router: Long): Boolean =
         nativeRouterCancelPropagation(router) == 0
 
+    /**
+     * Carry the router's propagation (uploads and the message get) over the
+     * app's rfed.link to the RFed node behind [rfedLinkHash] when that node
+     * announces protocol version 2 with a propagation stamp cost
+     * (RFed-spec/Link.md, "LXMF propagation on rfed.link"), and remove the
+     * carrier otherwise. Returns the node's `lxmf.propagation` hash when the
+     * carrier is installed: the router uses it while that is its propagation
+     * node, and opens no link to `lxmf.propagation`.
+     */
+    fun routerSyncRfedCarrier(router: Long, rfedLinkHash: ByteArray, carrier: PropagationCarrierCallback): ByteArray? =
+        nativeRouterSyncRfedCarrier(router, rfedLinkHash, carrier)
+
+    /** The answer to carrier request [token]: the node's response (msgpack), or null when the request failed. */
+    fun propagationCarrierComplete(token: Long, response: ByteArray?): Boolean =
+        nativePropagationCarrierComplete(token, response) == 0
+
+    /** The protocol version the RFed node announces on [destHash] (its rfed.link, RFed SPEC §12); 0 when unknown. */
+    fun rfedNodeProtocolVersion(destHash: ByteArray): Int = nativeRfedNodeProtocolVersion(destHash)
+
     private external fun nativeRouterSetPropagationNode(router: Long, destHash: ByteArray): Int
     private external fun nativeRouterRequestMessages(router: Long, identity: Long): Int
     private external fun nativeRouterGetPropagationState(router: Long): Int
     private external fun nativeRouterGetPropagationProgress(router: Long): Float
     private external fun nativeRouterCancelPropagation(router: Long): Int
+    private external fun nativeRouterSyncRfedCarrier(router: Long, rfedLinkHash: ByteArray, carrier: PropagationCarrierCallback): ByteArray?
+    private external fun nativePropagationCarrierComplete(token: Long, response: ByteArray?): Int
+    private external fun nativeRfedNodeProtocolVersion(destHash: ByteArray): Int
 
     // ---- Keepalive tuning ----
 

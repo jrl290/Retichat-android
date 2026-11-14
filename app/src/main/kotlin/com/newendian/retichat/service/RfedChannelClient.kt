@@ -97,6 +97,20 @@ class RfedChannelClient(
         private const val TAG = "RfedChannel"
 
         /**
+         * The `/channel/stream/open` payload for a node announcing
+         * [nodeProtocolVersion]: [signed], the three-element `[value, pubkey,
+         * signature]`, and to a node of version 2 or later a fourth element,
+         * 2 — this client handles the channel push `/channel/delivery`
+         * (RFed-spec/Link.md). Never to an older node, which refuses a signed
+         * payload of four elements; it pushes the deprecated `/delivery`.
+         */
+        internal fun channelStreamBind(signed: ByteArray, nodeProtocolVersion: Int): ByteArray {
+            if (nodeProtocolVersion < 2) return signed
+            require(signed.isNotEmpty() && signed[0] == 0x93.toByte()) { "not a three-element signed payload" }
+            return byteArrayOf(0x94.toByte()) + signed.copyOfRange(1, signed.size) + byteArrayOf(0x02)
+        }
+
+        /**
          * rfed's answer to `/channel/publish` (RFed-spec Link.md): `[true, nil]` is
          * accepted, stored and fanned out (null here); `[false, reason]` gives the
          * reason; no answer, or one that isn't either, says so.
@@ -849,7 +863,7 @@ class RfedChannelClient(
         val identityHandle = StackRuntime.identityHandle
         if (identityHandle == 0L) return
 
-        val payload = buildChannelStreamPayload(identityHandle, filters) ?: run {
+        val payload = buildChannelStreamPayload(identityHandle, filters, RfedLink.protocolVersion(nodeIdentityHashHex)) ?: run {
             Log.w(TAG, "channel.stream config build failed for node=$nodeIdentityHashHex")
             return
         }
@@ -1803,11 +1817,12 @@ class RfedChannelClient(
     private fun buildChannelStreamPayload(
         identityHandle: Long,
         filters: List<ByteArray>,
+        nodeProtocolVersion: Int,
     ): ByteArray? {
         val pubkey = RetichatBridge.identityPublicKey(identityHandle) ?: return null
         val value = msgpackArrayOfBins(filters)
         val sig = RetichatBridge.identitySign(identityHandle, value) ?: return null
-        return msgpackSigned(value, pubkey, sig)
+        return channelStreamBind(msgpackSigned(value, pubkey, sig), nodeProtocolVersion)
     }
 
     private fun channelStreamResponseOk(response: ByteArray?): Boolean {

@@ -16,9 +16,12 @@ import kotlinx.coroutines.runBlocking
  * operation, both ways (RFed-spec/Link.md). The client's requests go as
  * requests on their path (`/channel/subscribe`, `/channel/publish`,
  * `/distro/pull`, ...); the node's pushes come back on the same link as
- * requests to `/delivery` (channel posts), `/lxmf/delivery` (LXMF messages
- * for this device or its distro) and `/notify` (a wake), and this client's
- * answer to each is the delivery proof.
+ * requests to `/channel/delivery` (channel posts; `/delivery` from a node
+ * before the 2026-11-13 revision), `/lxmf/delivery` (LXMF messages for this
+ * device or its distro) and `/notify` (a wake), and this client's answer to
+ * each is the delivery proof. With a node of protocol version 2 the link also
+ * carries the router's LXMF propagation ([RfedPropagationCarrier]), so this
+ * device holds no second link to the node's `lxmf.propagation`.
  *
  * Before 2026-10-18 Android used a destination per operation: a link per
  * aspect, publishes as unanswered DATA, and pushes on two stream links.
@@ -40,6 +43,9 @@ object RfedLink {
 
     private const val TAG = "RfedLink"
 
+    /** The channel push (RFed-spec/Link.md), from a node of protocol version 2. */
+    const val PUSH_CHANNEL_DELIVERY = "/channel/delivery"
+    /** The channel push's name before the 2026-11-13 revision, deprecated: older nodes push it. */
     const val PUSH_DELIVERY = "/delivery"
     const val PUSH_LXMF = "/lxmf/delivery"
     const val PUSH_NOTIFY = "/notify"
@@ -71,6 +77,13 @@ object RfedLink {
         RfedChannelClient.rfedDestHash(nodeHex.lowercase(), "rfed", listOf("link"))
             ?.let { FcmTokenRegistrar.hexToBytes(it) }
 
+    /**
+     * The protocol version [nodeHex] announces on its rfed.link (RFed SPEC
+     * §12), from the announce the stack holds; 0 when none is known.
+     */
+    fun protocolVersion(nodeHex: String): Int =
+        destHash(nodeHex)?.let { RetichatBridge.rfedNodeProtocolVersion(it) } ?: 0
+
     /** Whether [nodeHex]'s rfed.link is ACTIVE now. */
     fun isActive(nodeHex: String): Boolean =
         destHash(nodeHex)?.let { ConnectionStateManager.appLinkStatus(it) } == RetichatBridge.AppLinkStatus.ACTIVE
@@ -89,7 +102,10 @@ object RfedLink {
             RetichatBridge.appLinkSetOutboundSetup(
                 identityHandle,
                 dest,
-                listOf(PUSH_DELIVERY, PUSH_LXMF, PUSH_NOTIFY),
+                // Both channel push names: a node of version 2 pushes the
+                // new one to a client that binds saying so, an older node
+                // the old one (RFed-spec/Link.md).
+                listOf(PUSH_CHANNEL_DELIVERY, PUSH_DELIVERY, PUSH_LXMF, PUSH_NOTIFY),
                 object : AppLinkInboundRequestCallback {
                     override fun onRequest(path: String, data: ByteArray): Boolean = onPush(app, path, data)
                 },
@@ -105,6 +121,10 @@ object RfedLink {
             return null
         }
         if (setup == Setup.Fresh) {
+            // What the node announced, remembered from before, decides at
+            // once where the router's propagation goes; each ACTIVE edge
+            // decides again.
+            RfedPropagationCarrier.sync(app, node)
             ConnectionStateManager.setAppLinkStatusHandler(dest) { status ->
                 val listeners = synchronized(statusListeners) { statusListeners[node]?.values?.toList().orEmpty() }
                 listeners.forEach { runCatching { it(status) } }
@@ -250,6 +270,9 @@ object RfedLink {
      * ([RfedCollect]).
      */
     private suspend fun bind(app: RetichatApp, node: String) {
+        // The path response before the link carried the node's announce:
+        // its protocol version decides where the router's propagation goes.
+        RfedPropagationCarrier.sync(app, node)
         // The posts queued or held for a link go on its every ACTIVE edge;
         // launched, they wait for none of the binding below.
         app.rfedChannelClient.onRfedLinkActive()
@@ -301,7 +324,7 @@ object RfedLink {
      */
     private fun onPush(app: RetichatApp, path: String, data: ByteArray): Boolean = try {
         when (path) {
-            PUSH_DELIVERY -> runBlocking(Dispatchers.IO) { app.rfedChannelClient.dispatchInboundBlob(data) }
+            PUSH_CHANNEL_DELIVERY, PUSH_DELIVERY -> runBlocking(Dispatchers.IO) { app.rfedChannelClient.dispatchInboundBlob(data) }
             PUSH_LXMF -> runBlocking(Dispatchers.IO) { PropagationStream.onLinkPush(app, data) }
             PUSH_NOTIFY -> {
                 // A wake: something was deferred for this device, collected with

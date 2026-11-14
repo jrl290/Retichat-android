@@ -1,6 +1,7 @@
 package com.newendian.retichat.service
 
 import com.newendian.retichat.data.db.entity.ChannelEntity
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -50,7 +51,7 @@ class RfedLinkTest {
         val ensure = link.substringAfter("suspend fun ensure(").substringBefore("    /**")
         val setup = ensure.indexOf("RetichatBridge.appLinkSetOutboundSetup(")
         assertTrue(setup >= 0 && setup < ensure.indexOf("ConnectionStateManager.primeAppLink(dest, \"rfed\", \"link\")"))
-        assertTrue(ensure.contains("listOf(PUSH_DELIVERY, PUSH_LXMF, PUSH_NOTIFY)"))
+        assertTrue(ensure.contains("listOf(PUSH_CHANNEL_DELIVERY, PUSH_DELIVERY, PUSH_LXMF, PUSH_NOTIFY)"))
         assertTrue(ensure.contains("if (status != RetichatBridge.AppLinkStatus.ACTIVE) return@setAppLinkStatusHandler\n                scope.launch { bind(app, node) }"))
         // One held link for every RFed operation: the only rfed aspect kept open.
         val csm = src("service/ConnectionStateManager.kt")
@@ -248,5 +249,46 @@ class RfedLinkTest {
         assertFalse(turns.ask(linkOpened = false))
         turns.stopped()
         assertTrue(turns.ask(linkOpened = false))
+    }
+
+    // ── The 2026-11-13 revision (RFed-spec/Link.md) ─────────────────────
+
+    @Test
+    fun theChannelBindSaysItHandlesChannelDeliveryOnlyToAVersion2Node() {
+        val signed = byteArrayOf(0x93.toByte(), 0xc4.toByte(), 1, 0x41, 0xc4.toByte(), 1, 0x42, 0xc4.toByte(), 1, 0x43)
+        // An older node, or one not yet heard: three elements, as before.
+        assertArrayEquals(signed, RfedChannelClient.channelStreamBind(signed, 0))
+        assertArrayEquals(signed, RfedChannelClient.channelStreamBind(signed, 1))
+        // Version 2: [value, pubkey, signature, 2], the signature untouched.
+        val four = byteArrayOf(0x94.toByte()) + signed.copyOfRange(1, signed.size) + byteArrayOf(0x02)
+        assertArrayEquals(four, RfedChannelClient.channelStreamBind(signed, 2))
+        assertArrayEquals(four, RfedChannelClient.channelStreamBind(signed, 3))
+    }
+
+    @Test
+    fun bothChannelPushNamesReachTheChannelClient() {
+        assertEquals("/channel/delivery", RfedLink.PUSH_CHANNEL_DELIVERY)
+        assertEquals("/delivery", RfedLink.PUSH_DELIVERY)
+        val link = src("service/RfedLink.kt")
+        assertTrue(
+            "set up before the link exists, with both names",
+            link.contains("listOf(PUSH_CHANNEL_DELIVERY, PUSH_DELIVERY, PUSH_LXMF, PUSH_NOTIFY)"),
+        )
+        assertTrue(link.contains("PUSH_CHANNEL_DELIVERY, PUSH_DELIVERY -> runBlocking(Dispatchers.IO) { app.rfedChannelClient.dispatchInboundBlob(data) }"))
+    }
+
+    @Test
+    fun withAVersion2NodeTheSyncGoesOnRfedLinkHeldForTheWholeSync() {
+        val sync = src("service/PropagationSync.kt")
+        assertTrue(sync.contains("RfedPropagationCarrier.sync(app, rfedNode)?.contentEquals(nodeHash) == true"))
+        assertTrue("no lxmf.propagation link opened for it", sync.contains("if (requireFreshTransport && !viaRfedLink)"))
+        assertTrue(sync.contains("RfedLink.holding(rfedNode) { requestAndFollow("))
+        val link = src("service/RfedLink.kt")
+        val bind = link.substringAfter("private suspend fun bind(app: RetichatApp, node: String) {")
+        assertTrue("each ACTIVE edge decides again, first", bind.trimStart().startsWith("// The path response") &&
+            bind.indexOf("RfedPropagationCarrier.sync(app, node)") < bind.indexOf("app.rfedChannelClient.onRfedLinkActive()"))
+        val carrier = src("service/RfedPropagationCarrier.kt")
+        assertTrue("every carrier request is answered once", carrier.contains("} finally {") &&
+            carrier.contains("RetichatBridge.propagationCarrierComplete(token, answer)"))
     }
 }

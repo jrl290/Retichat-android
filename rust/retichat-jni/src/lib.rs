@@ -730,6 +730,95 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeR
     ))
 }
 
+/// `RetichatBridge.nativeRouterSyncRfedCarrier(router: Long, rfedLinkHash: ByteArray, carrier: PropagationCarrierCallback): ByteArray?`
+///
+/// RFed-spec/Link.md, "LXMF propagation on `rfed.link`": when the RFed node
+/// behind `rfedLinkHash` announces protocol version 2 with a propagation stamp
+/// cost, the router's uploads and message get go as requests on this app's
+/// rfed.link to it, through `carrier.onRequest(token, path, data)`, which the
+/// app answers with `nativePropagationCarrierComplete`; otherwise the carrier
+/// is removed and the router links to `lxmf.propagation` as before. Returns
+/// the node's `lxmf.propagation` hash when the carrier is installed, else
+/// null (also on error). iOS: `lxmf_client_sync_rfed_carrier`.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeRouterSyncRfedCarrier(
+    mut env: JNIEnv,
+    _class: JClass,
+    router: jlong,
+    rfed_link_hash: JByteArray,
+    carrier: JObject,
+) -> jbyteArray {
+    let hash = jbytes_to_vec(&env, &rfed_link_hash);
+    let jvm = match env.get_java_vm() {
+        Ok(vm) => vm,
+        Err(e) => { rns::set_error(format!("Failed to get JavaVM: {e}")); return std::ptr::null_mut(); }
+    };
+    let carrier_ref = match env.new_global_ref(&carrier) {
+        Ok(reference) => reference,
+        Err(e) => { rns::set_error(format!("Failed to create carrier ref: {e}")); return std::ptr::null_mut(); }
+    };
+    let ask: lxmf::CarrierAsk = Arc::new(move |token: u64, path: &str, data: &[u8]| {
+        let mut env = match jvm.attach_current_thread() { Ok(env) => env, Err(_) => return };
+        let answered = (|| -> jni::errors::Result<()> {
+            let j_path = env.new_string(path)?;
+            let j_data = env.byte_array_from_slice(data)?;
+            env.call_method(
+                carrier_ref.as_obj(),
+                "onRequest",
+                "(JLjava/lang/String;[B)V",
+                &[JValue::Long(token as jlong), JValue::Object(&j_path), JValue::Object(&j_data)],
+            )?;
+            Ok(())
+        })();
+        if answered.is_err() {
+            // The app never got it: the router must not wait on it.
+            let _ = env.exception_clear();
+            lxmf::propagation_carrier_complete(token, None);
+        }
+    });
+    match lxmf::router_sync_rfed_carrier(router as u64, &hash, ask) {
+        Ok(Some(node)) => vec_to_jbytes(&env, &node),
+        Ok(None) => std::ptr::null_mut(),
+        Err(e) => {
+            rns::set_error(e);
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// `RetichatBridge.nativePropagationCarrierComplete(token: Long, response: ByteArray?): Int`
+///
+/// The answer to a carrier request: the node's response (msgpack), or null
+/// when the request failed. 0, or -1 when no request waits under `token`.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativePropagationCarrierComplete(
+    env: JNIEnv,
+    _class: JClass,
+    token: jlong,
+    response: JByteArray,
+) -> jint {
+    let response = if response.is_null() { None } else { Some(jbytes_to_vec(&env, &response)) };
+    if lxmf::propagation_carrier_complete(token as u64, response) { 0 } else { -1 }
+}
+
+/// `RetichatBridge.nativeRfedNodeProtocolVersion(destHash: ByteArray): Int`
+///
+/// The protocol version an RFed node announces on `destHash` (its rfed.link,
+/// RFed SPEC §12); 0 when no announce is known. From 2 the node takes the
+/// fourth element on `/channel/stream/open` and pushes `/channel/delivery`.
+/// iOS: `lxmf_rfed_node_protocol_version`.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeRfedNodeProtocolVersion(
+    env: JNIEnv,
+    _class: JClass,
+    dest_hash: JByteArray,
+) -> jint {
+    let hash = jbytes_to_vec(&env, &dest_hash);
+    lxmf::recall_rfed_node_announce(&hash)
+        .map(|announce| announce.protocol_version.min(i32::MAX as u64) as jint)
+        .unwrap_or(0)
+}
+
 /// `RetichatBridge.nativeRouterSetAnnounceCallback(routerHandle: Long, callback: AnnounceCallback): Int`
 ///
 /// `AnnounceCallback` is a Kotlin interface with:
