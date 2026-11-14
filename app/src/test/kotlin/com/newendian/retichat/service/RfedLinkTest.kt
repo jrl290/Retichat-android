@@ -290,6 +290,14 @@ class RfedLinkTest {
         val carrier = src("service/RfedPropagationCarrier.kt")
         assertTrue("every carrier request is answered once", carrier.contains("} finally {") &&
             carrier.contains("RetichatBridge.propagationCarrierComplete(token, answer)"))
+        assertTrue(
+            "only the node this device propagates through decides, never a channel's node",
+            carrier.contains("if (node != UserPreferences.getEffectiveRfedNodeIdentityHash(app).lowercase()) return null"),
+        )
+        // A propagated send gives the router its node after the carrier is synced, so no
+        // link to lxmf.propagation opens first (iPad, 2026-11-13: one did, at first contact).
+        val select = src("data/repository/ChatRepository.kt").substringAfter("private fun selectPropagationNode(): ByteArray? {")
+        assertTrue(select.indexOf("RfedPropagationCarrier.sync(app,") in 0 until select.indexOf("RetichatBridge.routerSetPropagationNode(routerHandle, nodeHash)"))
     }
 
     @Test

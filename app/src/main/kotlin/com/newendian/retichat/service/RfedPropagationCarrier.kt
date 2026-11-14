@@ -37,14 +37,19 @@ object RfedPropagationCarrier {
     /**
      * Install the router's carrier to [nodeHex]'s rfed.link when the node
      * announces version 2 with a propagation stamp cost, and remove it
-     * otherwise. Returns the node's `lxmf.propagation` hash when installed:
-     * the router uses the carrier while that is its propagation node.
+     * otherwise; only for the RFed node this device propagates through
+     * (Settings, else the default). Returns the `lxmf.propagation` hash the
+     * carrier reaches: the router uses it while that is its propagation node.
      */
     fun sync(app: RetichatApp, nodeHex: String): ByteArray? {
-        val router = StackRuntime.routerHandle
-        val dest = RfedLink.destHash(nodeHex)
-        if (router == 0L || dest == null) return null
         val node = nodeHex.lowercase()
+        // Only the RFed node this device propagates through decides: it also
+        // links to the nodes its channels live on, and a carrier to one of
+        // those would take this one's place.
+        if (node != UserPreferences.getEffectiveRfedNodeIdentityHash(app).lowercase()) return null
+        val router = StackRuntime.routerHandle
+        val dest = RfedLink.destHash(node)
+        if (router == 0L || dest == null) return null
         val propagation = RetichatBridge.routerSyncRfedCarrier(router, dest, object : PropagationCarrierCallback {
             override fun onRequest(token: Long, path: String, data: ByteArray) {
                 scope.launch {

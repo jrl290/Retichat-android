@@ -1521,6 +1521,12 @@ class ChatRepository(
         )
         val nodeHash = nodeMgr.primaryNode
 
+        // First what the RFed node announced: with a node of protocol version 2
+        // the router then opens no link to its lxmf.propagation when it is given
+        // the node, and the send goes on rfed.link (RfedPropagationCarrier).
+        (appContext.applicationContext as? com.newendian.retichat.RetichatApp)?.let { app ->
+            com.newendian.retichat.service.RfedPropagationCarrier.sync(app, UserPreferences.getEffectiveRfedNodeIdentityHash(appContext))
+        }
         if (!RetichatBridge.routerSetPropagationNode(routerHandle, nodeHash)) {
             Log.w(TAG, "setPropagationNode failed: ${RetichatBridge.lastError()}")
             return null
