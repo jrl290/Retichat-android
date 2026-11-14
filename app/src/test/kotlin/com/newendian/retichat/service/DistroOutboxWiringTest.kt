@@ -146,8 +146,10 @@ class DistroOutboxWiringTest {
         assertFalse(runtime.contains("appLinkReopen"))
         assertFalse(runtime.contains("routerSetPropagationNode"))
         assertFalse(runtime.contains("selectPropagationNode"))
-        // onLinkEstablished: the link callback's ACTIVE event and the check at start, nothing else.
-        assertEquals(2, Regex("onLinkEstablished\\(").findAll(runtime).count())
+        // onLinkEstablished: the link callback's ACTIVE event, the check at start, and the same
+        // check when the propagation moves to the RFed node's rfed.link or back (linkChanged,
+        // RFed-spec/Link.md: with a node of protocol version 2), nothing else.
+        assertEquals(3, Regex("onLinkEstablished\\(").findAll(runtime).count())
         // onLinkRecovered: the link callback's RECOVERED event (a STALE link that heard the node
         // again), nothing else: no clock, no poll of the link.
         assertEquals(1, Regex("onLinkRecovered\\(").findAll(runtime).count())

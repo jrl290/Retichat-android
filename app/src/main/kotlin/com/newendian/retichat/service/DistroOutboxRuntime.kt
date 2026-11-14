@@ -39,7 +39,12 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * It never starts the propagation link: the link is the one the router holds
  * for the propagation node ([PropagationSync] and the send paths set the node
- * and open it), and what is owed waits for that link to come up.
+ * and open it), and what is owed waits for that link to come up. With an RFed
+ * node that announces protocol version 2 that link is the node's rfed.link
+ * ([RfedPropagationCarrier]; RFed-spec/Link.md, "LXMF propagation on
+ * rfed.link"): an upload goes as a `/propagation/upload` request, its answer
+ * `true` is the proof, and the link events followed are rfed.link's. A loss
+ * there never tears the link down: it carries every other RFed request.
  *
  * The link comes up in two ways (James, 2026-10-03), and both are events the
  * stack tells, never read by polling (DESIGN_PRINCIPLES §1 and §3): a new link's
@@ -158,9 +163,20 @@ object DistroOutboxRuntime {
         scope.launch { outbox.onStop() }
     }
 
+    /**
+     * The propagation's link changed ([RfedPropagationCarrier]: to the RFed
+     * node's rfed.link, or back): a link already up is its coming-up, as at
+     * [start].
+     */
+    fun linkChanged() {
+        val outbox = box ?: return
+        val held = port?.held() ?: return
+        if (held.active) scope.launch { outbox.onLinkEstablished(held.id) }
+    }
+
     private val linkCallback = object : PropagationLinkCallback {
         override fun onLink(destHash: ByteArray, status: Int, linkId: ByteArray?) {
-            val node = port?.node() ?: return
+            val node = port?.linkDest() ?: return
             if (!destHash.contentEquals(node)) return
             val id = linkId?.takeIf { it.isNotEmpty() }?.toHex()
             Log.d(TAG, "propagation link status=$status link=${id?.take(8)}")
@@ -389,9 +405,23 @@ object DistroOutboxRuntime {
             return DistroCodec.hexToBytes(hex.trim().lowercase())?.takeIf { it.size == 16 }
         }
 
-        override fun held(): HeldLink? {
+        /**
+         * The RFed node whose rfed.link carries the uploads: when the propagation
+         * node is its own lxmf.propagation and it announces protocol version 2
+         * ([RfedPropagationCarrier]). Null: they go on the link to lxmf.propagation.
+         */
+        fun rfedCarrier(): String? {
             val node = node() ?: return null
-            val link = RetichatBridge.propagationLink(node) ?: return null
+            if (!RfedPropagationCarrier.carries(node)) return null
+            return UserPreferences.getEffectiveRfedNodeIdentityHash(context).takeIf { it.length == 32 }
+        }
+
+        /** The destination whose link the uploads go on, and whose link events the outbox follows. */
+        fun linkDest(): ByteArray? = rfedCarrier()?.let { RfedLink.destHash(it) } ?: node()
+
+        override fun held(): HeldLink? {
+            val dest = linkDest() ?: return null
+            val link = RetichatBridge.propagationLink(dest) ?: return null
             return HeldLink(link.id, link.active)
         }
 
@@ -419,6 +449,7 @@ object DistroOutboxRuntime {
         }
 
         override fun upload(upload: ByteArray, sink: UploadSink): UploadLeft? {
+            rfedCarrier()?.let { rfed -> return uploadOnRfedLink(rfed, upload, sink) }
             val node = node() ?: return null
             val decided = AtomicBoolean(false)
             val callback = object : PropagationUploadCallback {
@@ -448,5 +479,35 @@ object DistroOutboxRuntime {
             }
             return UploadLeft(started.linkId, started.resource)
         }
+
+        /**
+         * [upload] as a `/propagation/upload` request on [rfed]'s rfed.link, which
+         * must be ACTIVE (RFed-spec/Link.md). The node answers once it has
+         * validated and stored it: `true` is the proof; a refusal or no answer is
+         * a loss, and the link is kept. Over the link MDU the request goes as a
+         * Resource, as RNS carries any request.
+         */
+        private fun uploadOnRfedLink(rfed: String, upload: ByteArray, sink: UploadSink): UploadLeft? {
+            val dest = RfedLink.destHash(rfed) ?: return null
+            val link = RetichatBridge.propagationLink(dest)?.takeIf { it.active } ?: run {
+                // Said as a line: nothing was sent, which is no failure (as for the link to lxmf.propagation).
+                Log.i(TAG, "upload did not leave: rfed.link is not up")
+                return null
+            }
+            val app = context.applicationContext as RetichatApp
+            scope.launch {
+                val answer = RfedLink.request(app, rfed, "/propagation/upload", app.rfedChannelClient.msgpackBin(upload))
+                if (answer != null && answer.size == 1 && answer[0] == 0xc3.toByte()) {
+                    sink.proved()
+                } else {
+                    Log.w(TAG, "upload on rfed.link not proved: ${answer?.toHex() ?: "no answer"}")
+                    sink.lost()
+                }
+            }
+            return UploadLeft(link.id, upload.size > RFED_LINK_MDU)
+        }
     }
+
+    /** RNS's link MDU: a request larger than this goes as a Resource. */
+    private const val RFED_LINK_MDU = 431
 }

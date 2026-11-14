@@ -291,4 +291,19 @@ class RfedLinkTest {
         assertTrue("every carrier request is answered once", carrier.contains("} finally {") &&
             carrier.contains("RetichatBridge.propagationCarrierComplete(token, answer)"))
     }
+
+    @Test
+    fun withAVersion2NodeTheDistroOutboxUploadsOnRfedLink() {
+        val outbox = src("service/DistroOutboxRuntime.kt")
+        // Its link events are rfed.link's, and its uploads requests on it.
+        assertTrue(outbox.contains("val node = port?.linkDest() ?: return"))
+        assertTrue(outbox.contains("rfedCarrier()?.let { rfed -> return uploadOnRfedLink(rfed, upload, sink) }"))
+        val upload = outbox.substringAfter("private fun uploadOnRfedLink(").substringBefore("/** RNS's link MDU")
+        assertTrue("only on an ACTIVE link", upload.contains("RetichatBridge.propagationLink(dest)?.takeIf { it.active }"))
+        assertTrue(upload.contains("RfedLink.request(app, rfed, \"/propagation/upload\", app.rfedChannelClient.msgpackBin(upload))"))
+        assertTrue("true is the proof", upload.contains("answer[0] == 0xc3.toByte()") && upload.contains("sink.proved()"))
+        assertTrue("a loss keeps the link", upload.contains("sink.lost()") && !upload.contains("teardown"))
+        // When the propagation's link changes, a link already up is its coming-up.
+        assertTrue(src("service/RfedPropagationCarrier.kt").contains("DistroOutboxRuntime.linkChanged()"))
+    }
 }

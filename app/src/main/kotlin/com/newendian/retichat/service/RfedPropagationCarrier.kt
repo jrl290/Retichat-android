@@ -27,9 +27,12 @@ object RfedPropagationCarrier {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + logEscapedExceptions(TAG))
 
-    /** The `lxmf.propagation` the carrier is installed for (hex), for the log. */
+    /** The `lxmf.propagation` the carrier is installed for (hex). */
     @Volatile
     private var carried: String? = null
+
+    /** Whether the router's propagation to [node] (an `lxmf.propagation` hash) goes on rfed.link. */
+    fun carries(node: ByteArray): Boolean = carried == node.joinToString("") { "%02x".format(it) }
 
     /**
      * Install the router's carrier to [nodeHex]'s rfed.link when the node
@@ -64,6 +67,8 @@ object RfedPropagationCarrier {
                 if (now != null) "${node.take(8)}: LXMF propagation on rfed.link (protocol version 2)"
                 else "${node.take(8)}: LXMF propagation on lxmf.propagation",
             )
+            // What the distro outbox owes follows the propagation to its link.
+            DistroOutboxRuntime.linkChanged()
         }
         return propagation
     }
