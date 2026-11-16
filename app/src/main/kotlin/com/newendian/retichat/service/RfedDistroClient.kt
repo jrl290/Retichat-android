@@ -5,6 +5,7 @@ import android.util.Log
 import com.newendian.retichat.RetichatApp
 import com.newendian.retichat.bridge.LxmfFields
 import com.newendian.retichat.bridge.RetichatBridge
+import com.newendian.retichat.data.repository.DeliveryPolicy
 import com.newendian.retichat.service.DistroCodec.toHex
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -395,6 +396,14 @@ object RfedDistroClient {
                 app.repository.onDistroSentCopy(copy.recipientHex, title, content, timestamp, fieldsRaw)
                 return true
             }
+        }
+        // A Distro control message no branch above took (a channel join or leave
+        // without its 0xFC, a transfer without its key, a kind a later build adds)
+        // is no message: dropped with a line, as the web drops it. Until 2026-10-24
+        // it went on as a DM from its sender.
+        DeliveryPolicy.distroControlType(LxmfFields.decode(fieldsRaw))?.let { type ->
+            Log.i(TAG, "Distro control message $type from ${srcHex.take(8)} is no kind this build acts on — dropped, not a message")
+            return false
         }
         val srcHash = DistroCodec.hexToBytes(srcHex) ?: return false
         // The unwrap's hash: M's LXMF hash, kept beside the derived id (REACTIONS-DESIGN.md §5.1).

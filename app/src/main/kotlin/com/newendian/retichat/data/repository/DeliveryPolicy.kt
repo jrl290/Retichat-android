@@ -268,6 +268,18 @@ object DeliveryPolicy {
     fun isDistroSentCopy(fields: LxmfFields): Boolean =
         fields.getString(LxmfFields.FIELD_CUSTOM_TYPE) == LxmfFields.DISTRO_SENT_TYPE
 
+    /**
+     * The `rfed.distro.` type [fields] carry in 0xFB (a sent copy, a transfer,
+     * a channel join or leave, a group sync, or a kind a later build adds), or
+     * null when they carry none. A Distro control message is never a message
+     * to show: one no branch acts on is dropped with a log line, on the direct
+     * path ([DirectRoute.DistroControl]) and on the distro unwrap
+     * (RfedDistroClient.handleBlob), as the web drops it. Until 2026-10-24 it
+     * went on as a DM.
+     */
+    fun distroControlType(fields: LxmfFields): String? =
+        fields.getString(LxmfFields.FIELD_CUSTOM_TYPE)?.takeIf { it.startsWith(LxmfFields.DISTRO_TYPE_PREFIX) }
+
     /** What a message that arrived directly, on the device's own address, is ([directRoute]). */
     sealed class DirectRoute {
         /**
@@ -285,6 +297,12 @@ object DeliveryPolicy {
         object BadGroupId : DirectRoute()
         /** A group message for [groupId], 32 lowercase hex. */
         data class Group(val groupId: String) : DirectRoute()
+        /**
+         * A Distro control message of [type] ([distroControlType]) with no group id and
+         * not a transfer: it belongs to the Distro Fanout, never the device's own address,
+         * so it is dropped with a log line, never a DM.
+         */
+        data class DistroControl(val type: String) : DirectRoute()
         /** Everything else: a direct message, under the privacy filter. */
         object Direct : DirectRoute()
     }
@@ -310,13 +328,17 @@ object DeliveryPolicy {
      * first, and offered such a transfer or dropped such a copy. A
      * `rfed.distro.channel` or `rfed.distro.group` marker means nothing to the
      * group id ([LxmfFields.directGroupEntries]): beside a GROUP_ID it leaves it
-     * a group message, as on iOS and the web.
+     * a group message, as on iOS and the web. Without one, any `rfed.distro.`
+     * type but a transfer's is [DirectRoute.DistroControl], dropped; a transfer
+     * marker without a usable key stays a DM, as on iOS and the web.
      */
     fun directRoute(fields: LxmfFields): DirectRoute {
         val entries = fields.directGroupEntries()
         if (entries.hasGroupId && entries.groupId == null) return DirectRoute.BadGroupId
         if (isDistroSentCopy(fields)) return DirectRoute.SentCopy
         distroTransferKey(fields)?.let { return DirectRoute.Transfer(it) }
-        return entries.groupId?.let { DirectRoute.Group(it) } ?: DirectRoute.Direct
+        entries.groupId?.let { return DirectRoute.Group(it) }
+        distroControlType(fields)?.takeIf { it != LxmfFields.DISTRO_TRANSFER_TYPE }?.let { return DirectRoute.DistroControl(it) }
+        return DirectRoute.Direct
     }
 }

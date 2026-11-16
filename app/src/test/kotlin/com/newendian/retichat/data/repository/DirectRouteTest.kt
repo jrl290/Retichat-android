@@ -89,10 +89,13 @@ class DirectRouteTest {
 
     @Test
     fun aGroupSyncOrAMembershipMessageThatReachesTheDeviceDirectlyIsNoGroupMessage() {
-        // A G carries no GROUP_ID: on the direct path its marker means nothing, so it is a DM,
-        // under the privacy filter, as on iOS and the web.
+        // A G carries no GROUP_ID, so it is no group message on the direct path; it is a Distro
+        // control message, dropped (DistroControlNoChatTest), as on iOS and the web. Until
+        // 2026-10-24 it was a DM, under the privacy filter.
         for (set in listOf("ops", "variants")) {
-            for (vector in list(set)) assertEquals("$set ${vector["name"]}", DirectRoute.Direct, DeliveryPolicy.directRoute(fields(vector)))
+            for (vector in list(set)) {
+                assertEquals("$set ${vector["name"]}", DirectRoute.DistroControl(LxmfFields.DISTRO_GROUP_TYPE), DeliveryPolicy.directRoute(fields(vector)))
+            }
         }
     }
 

@@ -1919,6 +1919,14 @@ class ChatRepository(
                 Log.i(TAG, "onMessageReceived: REFUSED group message from ${srcHash.toHex().take(8)}: its GROUP_ID is not a str of 32 hex characters (RFed SPEC §17.14)")
                 return
             }
+            // A Distro control message without a group id (a channel join or leave, a group
+            // sync, a kind a later build adds) belongs to the Distro Fanout, never this
+            // address: dropped, whoever sent it and filter on or off, as the web drops it.
+            // Until 2026-10-24 it went on as a DM, an empty one in a chat with its sender.
+            is DeliveryPolicy.DirectRoute.DistroControl -> {
+                Log.i(TAG, "onMessageReceived: DROPPED Distro control message ${route.type} from ${srcHash.toHex().take(8)} outside the Distro Fanout")
+                return
+            }
             else -> Unit
         }
         // A distro identity transfer from another of our devices (RFed SPEC §17.9):
