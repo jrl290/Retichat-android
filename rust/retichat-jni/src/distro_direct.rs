@@ -12,7 +12,7 @@
 //! offline addresses the device knows. The Kotlin side
 //! (`service/DistroOffline.kt`) decides when the device is offline, what it
 //! announces and when, what a sender keeps, and which messages it sends where;
-//! this module does what Kotlin cannot:
+//! this module does what the app cannot:
 //!
 //! * the wire forms of §17.15 (the announce and lookup `app_data`, a copy and
 //!   the answer to a request), and the two addresses' hashes;
@@ -20,18 +20,18 @@
 //!   propagation, so every copy and RFed's are one sealed message with one
 //!   stamp ([`direct_copy`] says how);
 //! * [`hold`], [`take`]: the device's two addresses (app-links' held
-//!   addresses), and each copy checked before Kotlin is asked to keep it: the
+//!   addresses), and each copy checked before the app is asked to keep it: the
 //!   stamp against the device's own RFed node's cost, and the distro;
 //! * [`sign_sealed`]: the §17.13 Distro Sync proof of a message received
 //!   direct, which the device uploads to RFed as it owes a §17.11 Distro Sync
 //!   of a send;
 //! * [`hook_announces`]: offline addresses and lookup answers heard, handed to
-//!   Kotlin once the address checks out against the announced identity;
+//!   the app once the address checks out against the announced identity;
 //! * [`send`], [`ask`]: a sender's copy to one offline address, and its path
 //!   requests over the mesh connections it names.
 //!
 //! Nothing here sends on a timer or sends again (DESIGN_PRINCIPLES §3): a
-//! send's outcome is told once, and Kotlin decides what follows.
+//! send's outcome is told once, and the app decides what follows.
 
 use std::sync::{Arc, Mutex, Once};
 
@@ -84,7 +84,7 @@ pub fn lookup_hash(identity_hash: &[u8]) -> Vec<u8> {
     Destination::hash(Some(identity_hash), APP_NAME, &["distro", "direct"])
 }
 
-/// The distro's own `lxmf.delivery`, which Kotlin knows a distro by.
+/// The distro's own `lxmf.delivery`, which the app knows a distro by.
 fn distro_of(identity_hash: &[u8]) -> Vec<u8> {
     Destination::hash(Some(identity_hash), "lxmf", &["delivery"])
 }
@@ -240,7 +240,7 @@ pub fn direct_copy(msg: &mut LXMessage, cost: Option<u32>) -> Result<Vec<u8>, St
 /// Check a copy as RFed checks an upload (§17.15 "Taking a message"):
 /// `sealed` is for the distro whose `lxmf.delivery` is `distro`, and `stamp` is
 /// a propagation stamp over `full_hash(sealed)` of at least `cost`. The message
-/// itself is opened by Kotlin, with `lxmf_rust::distro::unwrap_blob`.
+/// itself is opened by the app, with `lxmf_rust::distro::unwrap_blob`.
 pub fn check_copy(sealed: &[u8], stamp: &[u8], distro: &[u8], cost: u32) -> Result<(), String> {
     if sealed.len() <= DEST_LEN || sealed[..DEST_LEN] != *distro {
         return Err("it is not addressed to this distro".into());
@@ -280,11 +280,11 @@ pub fn sign_sealed(distro: &Identity, sealed: &[u8]) -> Result<Vec<u8>, String> 
 }
 
 // ---------------------------------------------------------------------------
-// What Kotlin is told
+// What the app is told
 // ---------------------------------------------------------------------------
 
 /// A copy taken at an offline address of the distro (its `lxmf.delivery`),
-/// checked: Kotlin keeps it, or not, and answers [`HELD`] and [`BACK`] bits.
+/// checked: the app keeps it, or not, and answers [`HELD`] and [`BACK`] bits.
 pub type OnDirect = Arc<dyn Fn(&[u8], &[u8], &[u8]) -> u8 + Send + Sync>;
 
 /// An offline address of the distro announced, or answered for: its random
@@ -317,7 +317,7 @@ pub fn clear_sink() {
     }
 }
 
-/// The sink, cloned out of its lock: what it does (a call into Kotlin) never holds it.
+/// The sink, cloned out of its lock: what it does (a call into the app) never holds it.
 fn sink() -> Option<Sink> {
     SINK.lock().ok().and_then(|slot| slot.clone())
 }
@@ -465,7 +465,7 @@ pub fn announce(offline: &[u8], interfaces: &[String]) -> Result<usize, String> 
 
 /// A copy that came to the offline address `offline`, as one packet or as a
 /// request: checked here ([`check_copy`], against the cost the RFed node
-/// announced), then handed to Kotlin, which opens it, keeps it or not, and
+/// announced), then handed to the app, which opens it, keeps it or not, and
 /// answers. Returns [`HELD`] and [`BACK`] bits; a copy refused here is said in
 /// the log, never silently.
 pub fn take(offline: &[u8], data: &[u8]) -> u8 {
