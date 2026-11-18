@@ -18,6 +18,7 @@
 //! thread-safe.  The delivery callback is dispatched from a Rust background
 //! thread, so it attaches to the JVM before calling Kotlin.
 
+mod distro_direct;
 mod distro_outbox;
 mod group_status;
 mod interface_count;
@@ -3834,4 +3835,392 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeP
     link: jlong,
 ) -> jint {
     ok_or_neg(prns_ble::link_closed(link as u64))
+}
+
+// ---------------------------------------------------------------------------
+// Offline use of a distro address (RFed SPEC §17.15, James 2026-11-17)
+//
+// Thin wrappers over `distro_direct.rs`: the device's two addresses and what
+// comes to them, the Distro Sync proof and upload of a message received
+// direct, and the sender's copy, send and path requests. Kotlin
+// (service/DistroOffline.kt) decides when and where; nothing here sends on a
+// timer or sends again.
+// ---------------------------------------------------------------------------
+
+/// The strings of a Kotlin `Array<String>`; a null array or element is left out.
+fn jstring_array_to_vec(env: &mut JNIEnv, arr: &JObjectArray) -> Vec<String> {
+    if arr.is_null() {
+        return Vec::new();
+    }
+    let count = env.get_array_length(arr).unwrap_or(0);
+    let mut out = Vec::with_capacity(count.max(0) as usize);
+    for index in 0..count {
+        let Ok(element) = env.get_object_array_element(arr, index) else { continue };
+        if element.is_null() {
+            continue;
+        }
+        let element = JString::from(element);
+        let text: Option<String> = env.get_string(&element).ok().map(|s| s.into());
+        if let Some(text) = text {
+            out.push(text);
+        }
+    }
+    out
+}
+
+/// A Kotlin `Array<String>` of `items`.
+fn string_array<'local>(env: &mut JNIEnv<'local>, items: &[String]) -> Option<JObjectArray<'local>> {
+    let arr = env.new_object_array(items.len() as i32, "java/lang/String", JObject::null()).ok()?;
+    for (index, item) in items.iter().enumerate() {
+        let s = env.new_string(item).ok()?;
+        env.set_object_array_element(&arr, index as i32, &s).ok()?;
+    }
+    Some(arr)
+}
+
+/// Describe and clear a Kotlin exception left pending on this Rust thread.
+fn clear_kotlin_exception(env: &mut JNIEnv) -> bool {
+    if env.exception_check().unwrap_or(false) {
+        let _ = env.exception_describe();
+        let _ = env.exception_clear();
+        return true;
+    }
+    false
+}
+
+/// `RetichatBridge.nativeDistroDirectRegister(callback: DistroDirectCallback): Int`
+///
+/// Tell `callback` what comes to the device's offline address
+/// (`onDirect(distro, sealed, stamp): Int`, its answer's bits: 1 held, 2 back),
+/// and every offline address (`onOfflineAddress(distro, random, back)`) and
+/// lookup answer (`onLookup(distro, randoms)`) heard, each checked against the
+/// identity that announced it. One callback at a time; a later register
+/// replaces it. Calls come on Rust threads already attached to the JVM.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeDistroDirectRegister(
+    env: JNIEnv,
+    _class: JClass,
+    callback: JObject,
+) -> jint {
+    let jvm = match env.get_java_vm() {
+        Ok(vm) => Arc::new(vm),
+        Err(e) => { rns::set_error(format!("Failed to get JavaVM: {e}")); return -1; }
+    };
+    let callback = match env.new_global_ref(&callback) {
+        Ok(r) => r,
+        Err(e) => { rns::set_error(format!("Failed to create global ref: {e}")); return -1; }
+    };
+    let (direct_vm, direct_cb) = (jvm.clone(), callback.clone());
+    let on_direct: distro_direct::OnDirect = Arc::new(move |distro: &[u8], sealed: &[u8], stamp: &[u8]| -> u8 {
+        let mut env = match direct_vm.attach_current_thread() {
+            Ok(env) => env,
+            Err(_) => return 0,
+        };
+        let (Ok(d), Ok(s), Ok(t)) = (
+            env.byte_array_from_slice(distro),
+            env.byte_array_from_slice(sealed),
+            env.byte_array_from_slice(stamp),
+        ) else {
+            return 0;
+        };
+        let bits = env
+            .call_method(
+                direct_cb.as_obj(),
+                "onDirect", "([B[B[B)I",
+                &[JValue::Object(&d), JValue::Object(&s), JValue::Object(&t)],
+            )
+            .and_then(|v| v.i())
+            .unwrap_or(0);
+        if clear_kotlin_exception(&mut env) {
+            return 0;
+        }
+        (bits & 0xff) as u8
+    });
+    let (offline_vm, offline_cb) = (jvm.clone(), callback.clone());
+    let on_offline_address: distro_direct::OnOfflineAddress = Arc::new(move |distro: &[u8], random: &str, back: bool| {
+        let mut env = match offline_vm.attach_current_thread() {
+            Ok(env) => env,
+            Err(_) => return,
+        };
+        let (Ok(d), Ok(r)) = (env.byte_array_from_slice(distro), env.new_string(random)) else { return };
+        let _ = env.call_method(
+            offline_cb.as_obj(),
+            "onOfflineAddress", "([BLjava/lang/String;Z)V",
+            &[JValue::Object(&d), JValue::Object(&r), JValue::Bool(back as jboolean)],
+        );
+        clear_kotlin_exception(&mut env);
+    });
+    let (lookup_vm, lookup_cb) = (jvm, callback);
+    let on_lookup: distro_direct::OnLookup = Arc::new(move |distro: &[u8], randoms: &[String]| {
+        let mut env = match lookup_vm.attach_current_thread() {
+            Ok(env) => env,
+            Err(_) => return,
+        };
+        let Ok(d) = env.byte_array_from_slice(distro) else { return };
+        let Some(named) = string_array(&mut env, randoms) else { return };
+        let _ = env.call_method(
+            lookup_cb.as_obj(),
+            "onLookup", "([B[Ljava/lang/String;)V",
+            &[JValue::Object(&d), JValue::Object(&named)],
+        );
+        clear_kotlin_exception(&mut env);
+    });
+    distro_direct::set_sink(distro_direct::Sink { on_direct, on_offline_address, on_lookup });
+    distro_direct::hook_announces();
+    0
+}
+
+/// `RetichatBridge.nativeDistroDirectUnregister(): Int`: tell no one (the stack is
+/// stopping). Transport keeps its one announce handler, which then tells no one,
+/// and a copy that comes meanwhile is refused, said in the log.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeDistroDirectUnregister(
+    _env: JNIEnv,
+    _class: JClass,
+) -> jint {
+    distro_direct::clear_sink();
+    0
+}
+
+/// `RetichatBridge.nativeDistroDirectHold(distroHandle: Long, random: String,
+/// ratchetsPath: String, node: ByteArray, back: Boolean, lookup: Array<String>): ByteArray?`
+///
+/// Hold the distro's offline address `rfed.distro.direct.<random>` (its ratchets
+/// kept at `ratchetsPath`) and its lookup address, until the app restarts; a
+/// copy's stamp is checked against the cost of `node`, the RFed node's own
+/// `lxmf.propagation`. Their `app_data` is `[random, back]` and `lookup`. Held
+/// already: the node and the `app_data` are set again. The offline address's
+/// hash, or null with `nativeLastError`.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeDistroDirectHold(
+    mut env: JNIEnv,
+    _class: JClass,
+    distro_handle: jlong,
+    random: JString,
+    ratchets_path: JString,
+    node: JByteArray,
+    back: jboolean,
+    lookup: JObjectArray,
+) -> jbyteArray {
+    let Some(distro) = distro_identity(distro_handle, "distro") else { return std::ptr::null_mut() };
+    let random = jstring_to_string(&mut env, &random);
+    let ratchets_path = jstring_to_string(&mut env, &ratchets_path);
+    let node = if node.is_null() { Vec::new() } else { jbytes_to_vec(&env, &node) };
+    let lookup = jstring_array_to_vec(&mut env, &lookup);
+    bytes_or_null(&env, distro_direct::hold(&distro, &random, &ratchets_path, &node, back != 0, &lookup))
+}
+
+/// `RetichatBridge.nativeDistroDirectSetAppData(offline: ByteArray, back: Boolean, lookup: Array<String>): Int`
+///
+/// The held offline address's `app_data` becomes `[random, back]` and its lookup
+/// address's `lookup`: what Reticulum answers path requests with, and what the
+/// next announce carries. 0, or -1 with `nativeLastError`.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeDistroDirectSetAppData(
+    mut env: JNIEnv,
+    _class: JClass,
+    offline: JByteArray,
+    back: jboolean,
+    lookup: JObjectArray,
+) -> jint {
+    let offline = jbytes_to_vec(&env, &offline);
+    let lookup = jstring_array_to_vec(&mut env, &lookup);
+    ok_or_neg(distro_direct::set_app_data(&offline, back != 0, &lookup))
+}
+
+/// `RetichatBridge.nativeDistroDirectAnnounce(offline: ByteArray, interfaces: Array<String>): Int`
+///
+/// Announce the held offline address on each of `interfaces` that is up (the
+/// device's mesh connections). How many announces went, or -1 with `nativeLastError`.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeDistroDirectAnnounce(
+    mut env: JNIEnv,
+    _class: JClass,
+    offline: JByteArray,
+    interfaces: JObjectArray,
+) -> jint {
+    let offline = jbytes_to_vec(&env, &offline);
+    let interfaces = jstring_array_to_vec(&mut env, &interfaces);
+    match distro_direct::announce(&offline, &interfaces) {
+        Ok(count) => count as jint,
+        Err(e) => {
+            rns::set_error(e);
+            -1
+        }
+    }
+}
+
+/// `RetichatBridge.nativeDistroDirectSign(distroHandle: Long, sealed: ByteArray): ByteArray?`
+///
+/// The §17.13 Distro Sync proof of `sealed`, a message to the distro received
+/// direct: D's 64-byte signature over `"rfed.distro.sync" | 0x01 | D_hash |
+/// SHA-256(sealed)`. Null with `nativeLastError` when the handle has no private
+/// key or `sealed` is not addressed to it.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeDistroDirectSign(
+    env: JNIEnv,
+    _class: JClass,
+    distro_handle: jlong,
+    sealed: JByteArray,
+) -> jbyteArray {
+    let Some(distro) = distro_identity(distro_handle, "distro") else { return std::ptr::null_mut() };
+    let sealed = jbytes_to_vec(&env, &sealed);
+    bytes_or_null(&env, distro_direct::sign_sealed(&distro, &sealed))
+}
+
+/// `RetichatBridge.nativePropagationBuildDirectUpload(distroPublicKey: ByteArray,
+/// sealed: ByteArray, stamp: ByteArray, sig: ByteArray, withClaim: Boolean, node: ByteArray): ByteArray?`
+///
+/// One upload of a message received direct (RFed SPEC §17.15): the sealed bytes
+/// and the sender's stamp unchanged while it meets the node's cost (read from
+/// its announce as `nativePropagationBuildSealedUpload` reads it), a new stamp
+/// when the cost has risen above it, and the claim only when `withClaim`. Blocks
+/// while a stamp is mined: off the main thread. Null with `nativeLastError` when
+/// it cannot be built, with nothing sent.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativePropagationBuildDirectUpload(
+    env: JNIEnv,
+    _class: JClass,
+    distro_public_key: JByteArray,
+    sealed: JByteArray,
+    stamp: JByteArray,
+    sig: JByteArray,
+    with_claim: jboolean,
+    node: JByteArray,
+) -> jbyteArray {
+    let key = jbytes_to_vec(&env, &distro_public_key);
+    let sealed = jbytes_to_vec(&env, &sealed);
+    let stamp = jbytes_to_vec(&env, &stamp);
+    let sig = jbytes_to_vec(&env, &sig);
+    let node = jbytes_to_vec(&env, &node);
+    let Some(cost) = node_stamp_cost_or_ask(&node) else { return std::ptr::null_mut() };
+    let built = distro_outbox::build_direct_upload(&key, &sealed, &stamp, &sig, with_claim != 0, cost).map(|built| {
+        if let Some(why) = &built.claim_refused {
+            // Never silent: the upload goes without the proof, so its devices are woken as before.
+            reticulum_rust::log(
+                format!(
+                    "[distro-direct] the sync claim for the message received direct {} is not one RFed would accept ({why}): \
+                     the upload goes without it, and wakes the distro's devices as before",
+                    reticulum_rust::hexrep(&sealed[..16.min(sealed.len())], false),
+                ),
+                reticulum_rust::LOG_ERROR,
+                false,
+                false,
+            );
+        }
+        built.upload
+    });
+    bytes_or_null(&env, built)
+}
+
+/// `RetichatBridge.nativeDistroDirectCopy(handle: Long, node: ByteArray): ByteArray?`
+///
+/// A sender's copy of the outbound message `handle`, a message to a distro the
+/// router has taken through propagation: `msgpack [ bin sealed, bin stamp ]`,
+/// one sealed message with RFed's and one stamp, made here at `node`'s cost when
+/// the router has not made it yet (`distro_direct::direct_copy`). The cost is
+/// read before the message's lock is taken, never under it. Blocks while a
+/// stamp is mined: off the main thread. Null with `nativeLastError`.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeDistroDirectCopy(
+    env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    node: JByteArray,
+) -> jbyteArray {
+    let node = jbytes_to_vec(&env, &node);
+    let cost = distro_outbox::node_stamp_cost(Identity::recall_app_data(&node).as_deref()).ok();
+    let Some(msg) = rns::get_handle::<Arc<Mutex<lxmf_rust::lx_message::LXMessage>>>(handle as u64) else {
+        rns::set_error("invalid message handle".to_string());
+        return std::ptr::null_mut();
+    };
+    let copy = match msg.lock() {
+        Ok(mut m) => distro_direct::direct_copy(&mut m, cost),
+        Err(e) => Err(e.to_string()),
+    };
+    bytes_or_null(&env, copy)
+}
+
+/// `RetichatBridge.nativeDistroDirectSend(distro: ByteArray, random: String,
+/// copy: ByteArray, callback: DistroDirectSendCallback): Int`
+///
+/// Send `copy` to the offline address `random` of the distro `distro` (its
+/// `lxmf.delivery`): one packet with a proof asked for when it fits, otherwise
+/// one `/distro/direct` request on a link of its own. `callback.onOutcome(bits)`
+/// is told once: 1 held (a proof, or the answer said so), 2 back, 0 failed.
+/// 1 when it went, 0 when no path to the address is known (nothing went; ask
+/// for one), -1 with `nativeLastError`.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeDistroDirectSend(
+    mut env: JNIEnv,
+    _class: JClass,
+    distro: JByteArray,
+    random: JString,
+    copy: JByteArray,
+    callback: JObject,
+) -> jint {
+    let distro = jbytes_to_vec(&env, &distro);
+    let random = jstring_to_string(&mut env, &random);
+    let copy = jbytes_to_vec(&env, &copy);
+    let jvm = match env.get_java_vm() {
+        Ok(vm) => vm,
+        Err(e) => { rns::set_error(format!("Failed to get JavaVM: {e}")); return -1; }
+    };
+    let callback = match env.new_global_ref(&callback) {
+        Ok(r) => r,
+        Err(e) => { rns::set_error(format!("Failed to create global ref: {e}")); return -1; }
+    };
+    let outcome: Arc<dyn Fn(u8) + Send + Sync> = Arc::new(move |bits: u8| {
+        call_kotlin(&jvm, &callback, "onOutcome", "(I)V", &[JValue::Int(bits as jint)]);
+    });
+    match distro_direct::send(&distro, &random, copy, outcome) {
+        Ok(true) => 1,
+        Ok(false) => 0,
+        Err(e) => {
+            rns::set_error(e);
+            -1
+        }
+    }
+}
+
+/// `RetichatBridge.nativeDistroDirectAsk(distro: ByteArray, randoms: Array<String>,
+/// withLookup: Boolean, interfaces: Array<String>): Int`
+///
+/// Path requests, over each of `interfaces` (the sender's mesh connections), for
+/// each offline address `randoms` of the distro `distro` and, `withLookup`, its
+/// lookup address. How many went, or -1 with `nativeLastError`.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeDistroDirectAsk(
+    mut env: JNIEnv,
+    _class: JClass,
+    distro: JByteArray,
+    randoms: JObjectArray,
+    with_lookup: jboolean,
+    interfaces: JObjectArray,
+) -> jint {
+    let distro = jbytes_to_vec(&env, &distro);
+    let randoms = jstring_array_to_vec(&mut env, &randoms);
+    let interfaces = jstring_array_to_vec(&mut env, &interfaces);
+    match distro_direct::ask(&distro, &randoms, with_lookup != 0, &interfaces) {
+        Ok(count) => count as jint,
+        Err(e) => {
+            rns::set_error(e);
+            -1
+        }
+    }
+}
+
+/// `RetichatBridge.nativeOnlineInterfaces(): Array<String>?`: the names of the
+/// interfaces online now (`Transport::online_interface_names`), read at an
+/// interface's up- or down-edge. Null on a JNI error.
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeOnlineInterfaces(
+    mut env: JNIEnv,
+    _class: JClass,
+) -> jni::sys::jobjectArray {
+    let names = Transport::online_interface_names();
+    match string_array(&mut env, &names) {
+        Some(arr) => arr.into_raw(),
+        None => std::ptr::null_mut(),
+    }
 }

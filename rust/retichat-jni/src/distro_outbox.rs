@@ -299,6 +299,40 @@ pub fn build_sealed_upload(
     sealed_upload_with(distro_public_key, sealed, sig, with_claim, &stamp, now_seconds())
 }
 
+/// One upload of a message this device received direct at its offline address
+/// (RFed SPEC §17.15 "Taking a message"): the sealed bytes as the sender sent
+/// them, and the sender's own `stamp` with them, unchanged, when it still meets
+/// the node's `stamp_cost`. If the node's cost has risen above it since, the
+/// stamp is mined anew, as [`build_sealed_upload`] does for every upload of a
+/// Distro Sync of a send. The claim and its gate are [`build_sealed_upload`]'s.
+/// Blocks while a stamp is mined.
+pub fn build_direct_upload(
+    distro_public_key: &[u8],
+    sealed: &[u8],
+    stamp: &[u8],
+    sig: &[u8],
+    with_claim: bool,
+    stamp_cost: u32,
+) -> Result<SealedUpload, String> {
+    check_sealed_destination(distro_public_key, sealed)?;
+    let mut stamped = Vec::with_capacity(sealed.len() + stamp.len());
+    stamped.extend_from_slice(sealed);
+    stamped.extend_from_slice(stamp);
+    if stamp.len() == lxmf_rust::lx_stamper::STAMP_SIZE && lxmf_rust::lx_stamper::validate_pn_stamp(&stamped, stamp_cost).is_some() {
+        return sealed_upload_with(distro_public_key, sealed, sig, with_claim, stamp, now_seconds());
+    }
+    reticulum_rust::log(
+        format!(
+            "[distro-direct] the sender's stamp on {} is below the node's cost of {stamp_cost} now: a new stamp is mined for its upload",
+            reticulum_rust::hexrep(&sealed[..DEST_LEN], false),
+        ),
+        reticulum_rust::LOG_NOTICE,
+        false,
+        false,
+    );
+    build_sealed_upload(distro_public_key, sealed, sig, with_claim, stamp_cost)
+}
+
 /// [`build_sealed_upload`] for a given stamp and timebase (the golden vector's).
 fn sealed_upload_with(
     distro_public_key: &[u8],
@@ -843,6 +877,37 @@ mod tests {
         }
         // The good one is carried.
         assert_eq!(decode(&build_sealed_upload(&key, &sealed, &sig, true, 0).unwrap().upload).len(), 3);
+    }
+
+    /// RFed SPEC §17.15: a message received direct goes up with the sender's own
+    /// stamp, unless the node's cost has risen above it.
+    #[test]
+    fn a_direct_upload_keeps_the_senders_stamp_while_it_meets_the_cost() {
+        let (distro, _hash, packed) = packed_sent_copy("received direct");
+        let (sig, sealed) = sealed_of(&distro, &packed);
+        let key = distro.get_public_key().unwrap();
+        let (stamp, value) = generate_stamp(&sync_transient_id(&sealed), 3, WORKBLOCK_EXPAND_ROUNDS_PN);
+        let stamp = stamp.unwrap();
+
+        let kept = build_direct_upload(&key, &sealed, &stamp, &sig, true, 3).unwrap();
+        assert_eq!(kept.claim_refused, None);
+        let envelope = decode(&kept.upload);
+        assert_eq!(envelope.len(), 3, "the claim, as for a Distro Sync of a send");
+        let data = only_lxmf_data(&envelope);
+        assert_eq!(&data[..data.len() - 32], &sealed[..]);
+        assert_eq!(&data[data.len() - 32..], &stamp[..], "the sender's stamp, unchanged");
+
+        // The node's cost rose above the stamp: a new one, at the new cost.
+        let cost = value + 1;
+        let restamped = build_direct_upload(&key, &sealed, &stamp, &sig, false, cost).unwrap();
+        let envelope = decode(&restamped.upload);
+        assert_eq!(envelope.len(), 2);
+        let data = only_lxmf_data(&envelope);
+        assert_eq!(&data[..data.len() - 32], &sealed[..]);
+        assert!(lxmf_rust::lx_stamper::validate_pn_stamp(&data, cost).is_some());
+        // A stamp that is no stamp is replaced too; another distro's key is refused.
+        assert!(build_direct_upload(&key, &sealed, &[1, 2, 3], &sig, false, 0).is_ok());
+        assert!(build_direct_upload(&Identity::new(true).get_public_key().unwrap(), &sealed, &stamp, &sig, false, 0).is_err());
     }
 
     #[test]
