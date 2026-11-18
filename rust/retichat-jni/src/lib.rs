@@ -4210,6 +4210,31 @@ pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeD
     }
 }
 
+/// `RetichatBridge.nativeDistroDirectWatch(distro: ByteArray, randoms: Array<String>): Int`
+///
+/// Watch for the announces of the lookup address of the distro whose
+/// `lxmf.delivery` is `distro`, and of its offline addresses `randoms` (random
+/// parts) this sender keeps (§17.15): they pass the app's drop of announces.
+/// How many addresses are watched, or -1 with `nativeLastError` (the distro's
+/// identity is not known yet).
+#[no_mangle]
+pub extern "system" fn Java_com_newendian_retichat_bridge_RetichatBridge_nativeDistroDirectWatch(
+    mut env: JNIEnv,
+    _class: JClass,
+    distro: JByteArray,
+    randoms: JObjectArray,
+) -> jint {
+    let distro = jbytes_to_vec(&env, &distro);
+    let randoms = jstring_array_to_vec(&mut env, &randoms);
+    match distro_direct::watch(&distro, &randoms) {
+        Ok(count) => count as jint,
+        Err(e) => {
+            rns::set_error(e);
+            -1
+        }
+    }
+}
+
 /// `RetichatBridge.nativeOnlineInterfaces(): Array<String>?`: the names of the
 /// interfaces online now (`Transport::online_interface_names`), read at an
 /// interface's up- or down-edge. Null on a JNI error.

@@ -1010,6 +1010,14 @@ object RetichatBridge {
     fun distroDirectAsk(distro: ByteArray, randoms: Array<String>, withLookup: Boolean, interfaces: Array<String>): Int =
         nativeDistroDirectAsk(distro, randoms, withLookup, interfaces)
 
+    /**
+     * Watch for the announces of [distro]'s lookup address and of its offline
+     * addresses [randoms], so they pass the app's drop of announces (§17.15).
+     * How many addresses are watched, or -1 with [lastError] (the distro's
+     * identity is not known yet).
+     */
+    fun distroDirectWatch(distro: ByteArray, randoms: Array<String>): Int = nativeDistroDirectWatch(distro, randoms)
+
     /** The names of the Reticulum interfaces online now. */
     fun onlineInterfaces(): Array<String> = nativeOnlineInterfaces() ?: emptyArray()
 
@@ -1121,6 +1129,7 @@ object RetichatBridge {
     private external fun nativeDistroDirectCopy(handle: Long, node: ByteArray): ByteArray?
     private external fun nativeDistroDirectSend(distro: ByteArray, random: String, copy: ByteArray, callback: DistroDirectSendCallback): Int
     private external fun nativeDistroDirectAsk(distro: ByteArray, randoms: Array<String>, withLookup: Boolean, interfaces: Array<String>): Int
+    private external fun nativeDistroDirectWatch(distro: ByteArray, randoms: Array<String>): Int
     private external fun nativeOnlineInterfaces(): Array<String>?
     private external fun nativeInterfaceUpEdges(): Long
     private external fun nativePropagationLink(node: ByteArray): ByteArray?

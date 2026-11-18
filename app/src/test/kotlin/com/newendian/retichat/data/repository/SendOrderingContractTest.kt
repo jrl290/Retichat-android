@@ -117,7 +117,7 @@ class SendOrderingContractTest {
         assertFalse("the clone carries the attachments", start.contains("queuedAttachments"))
         assertFalse(start.contains("messageAddAttachment"))
         assertFalse(body(repo, "sendPropagatedCopy").contains("RetichatBridge.messageCreate"))
-        assertTrue(body(repo, "dispatch").contains("PropagationFallbacks.Send(localId, directHandle = msgHandle)"))
+        assertTrue(body(repo, "dispatch").contains("PropagationFallbacks.Send(localId, directHandle = msgHandle, peer = destHash)"))
     }
 
     @Test

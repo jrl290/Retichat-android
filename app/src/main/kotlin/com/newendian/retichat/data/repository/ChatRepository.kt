@@ -1124,7 +1124,7 @@ class ChatRepository(
             // propagated copy behind it, as they do for a text message.
             if (hashHex != null) {
                 propagationFallbacks.track(
-                    hashHex, PropagationFallbacks.Send(localId, directHandle = msgHandle, bubble = false),
+                    hashHex, PropagationFallbacks.Send(localId, directHandle = msgHandle, peer = destHash, bubble = false),
                 )?.let(::startPropagatedCopy)
                 if (isFailureState(state)) propagationFallbacks.onPolledState(hashHex, state)?.let(::startPropagatedCopy)
             }
@@ -1146,7 +1146,7 @@ class ChatRepository(
             // copy is (see pollMessageState).
             if (!isFailureState(state)) messageDao.updateState(localId, state)
             propagationFallbacks.track(
-                hashHex, PropagationFallbacks.Send(localId, directHandle = msgHandle),
+                hashHex, PropagationFallbacks.Send(localId, directHandle = msgHandle, peer = destHash),
             )?.let(::startPropagatedCopy)
             if (isFailureState(state)) {
                 propagationFallbacks.onPolledState(hashHex, state)?.let(::startPropagatedCopy)
@@ -1334,6 +1334,14 @@ class ChatRepository(
                 // 2026-09-24 the copy was a new message with a new timestamp,
                 // and a recipient given both showed the message twice.
                 createCopy = { RetichatBridge.messageClonePropagated(send.directHandle) },
+                // RFed SPEC §17.15 (2026-11-18): a message to a distro gets its copy for
+                // the distro's offline devices, as one sent through propagation from the
+                // start does. The clone's handle stays here: the bubble follows it.
+                onSent = { handle ->
+                    send.peer?.let { peer ->
+                        com.newendian.retichat.service.DistroOffline.fallbackSent(appContext, peer, handle, send.messageId)
+                    }
+                },
                 bubble = send.bubble,
             )
         }
@@ -1356,7 +1364,8 @@ class ChatRepository(
      * new message for a distro recipient, a clone of the DIRECT message for
      * the fallback. [onSent] runs once it is out; the distro send gives its
      * §17.11 sent-copy there. The DIRECT path sends its own, so a fallback
-     * behind it must not send a second one.
+     * behind it must not send a second one. Both hand the message to
+     * DistroOffline there, for a distro's offline devices (§17.15).
      *
      * A copy that can not go out shows the message failed (iOS does the
      * same) once no DIRECT attempt is left ([propagatedCopyNotSent]); a DIRECT

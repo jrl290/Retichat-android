@@ -88,25 +88,31 @@ object DistroOfflineRules {
  * it holds its offline address `rfed.distro.direct.<random>` and the lookup
  * address `rfed.distro.direct`, both with the distro's key, until the app
  * restarts; `<random>` is made once per distro and kept
- * ([UserPreferences.distroOfflineRandom]). It announces the offline address on
- * each of its mesh connections when it goes offline, and on a mesh connection
- * that comes up while it is offline; never on a timer. Once it reaches RFed
- * again, or the toggle is turned off, it is back: it announces once on its mesh
- * connections that it is back, and the lookup answers nothing. A message that
- * comes to the offline address is kept as Distro mail from RFed is
- * ([RfedDistroClient.takeDirect]) and owed to RFed as a sent-copy is
- * ([DistroOutboxRuntime.oweDirect]).
+ * ([UserPreferences.distroOfflineRandom]). It announces the offline address,
+ * and the lookup address with it (2026-11-18: relays then keep the lookup's
+ * answer), on each of its mesh connections when it goes offline, and on a mesh
+ * connection that comes up while it is offline; never on a timer. Once it
+ * reaches RFed again, or the toggle is turned off, it is back: it announces
+ * once on its mesh connections that it is back, and the lookup answers nothing
+ * and is not announced. A message that comes to the offline address is kept as
+ * Distro mail from RFed is ([RfedDistroClient.takeDirect]) and owed to RFed as
+ * a sent-copy is ([DistroOutboxRuntime.oweDirect]).
  *
  * **The sender.** When this device sends a message to a distro, it also sends
  * the same sealed message, with the same stamp, to each offline address of
  * that distro that is live (a fan-out, [sentToDistro]). It keeps every offline
  * address it learns ([UserPreferences.keepDistroOfflineAddress]); one is live
  * from when its announce, or an answer for it, says it is offline, or a lookup
- * names it, until one says it is back or a send to it fails. Once per distro
- * each time a mesh connection comes up, a send asks over the mesh connections:
- * a path request for each kept address and for the lookup. When an address
- * becomes live, it is sent each message for the distro still waiting to reach
- * RFed, and each sent after asking, that it has not had. A failed send is said
+ * names it, until one says it is back or a send to it fails. It watches every
+ * distro it knows (at start, at a send, and when it keeps a new address): the
+ * distro's lookup address and each kept offline address pass the app's drop of
+ * announces, so it hears a device go offline when it announces (2026-11-18).
+ * Once per distro each time a mesh connection comes up, a send still asks over
+ * the mesh connections, for a device it missed: a path request for each kept
+ * address and for the lookup. A message that went direct first and fell back
+ * to RFed gets its copy too ([fallbackSent]). When an address becomes live, it
+ * is sent each message for the distro still waiting to reach RFed, and each
+ * sent after asking, that it has not had. A failed send is said
  * in the log and never repeated (DESIGN_PRINCIPLES §3); the message still goes
  * through RFed. A send the device proves, or answers it holds, shows the
  * message delivered.
@@ -168,6 +174,9 @@ object DistroOffline {
     /** Distros heard from (an offline address's announce or answer, a lookup answer) since a mesh connection last came up. */
     private val heard = HashSet<String>()
 
+    /** Distro (hex) -> the kept random parts watched for in this run, its lookup with them. */
+    private val watching = HashMap<String, Set<String>>()
+
     // ---- Start and stop ----
 
     /**
@@ -185,6 +194,9 @@ object DistroOffline {
             rnodeNames = rnodes
             online = RetichatBridge.onlineInterfaces().toSet()
             rfedReached = null
+            // The sender listens for every distro it knows, not only those it sends to in this run.
+            watching.clear()
+            for (d in UserPreferences.getDistroContacts(app)) watch(d)
         }
         if (!RetichatBridge.distroDirectRegister(callback)) {
             Log.e(TAG, "offline use of the distro address not registered: ${RetichatBridge.lastError()}")
@@ -363,7 +375,10 @@ object DistroOffline {
             return
         }
         if (!sendsTo(app, d)) return
-        if (UserPreferences.keepDistroOfflineAddress(app, d, random)) Log.i(TAG, "kept ${d.take(8)}'s offline address $random (§17.15)")
+        if (UserPreferences.keepDistroOfflineAddress(app, d, random)) {
+            Log.i(TAG, "kept ${d.take(8)}'s offline address $random (§17.15)")
+            watch(d)
+        }
         heard.add(d)
         val addresses = live.getOrPut(d) { HashSet() }
         if (back) {
@@ -385,7 +400,30 @@ object DistroOffline {
             UserPreferences.keepDistroOfflineAddress(app, d, random)
             live.getOrPut(d) { HashSet() }.add(random)
         }
+        watch(d)
         sendKept(d, named)
+    }
+
+    /**
+     * Watch for the announces of [d]'s lookup address and of each offline
+     * address of [d] kept, so they pass the app's drop of announces (§17.15,
+     * 2026-11-18): this device hears one of [d]'s devices go offline when it
+     * announces, not only when it next asks. Told again only when something
+     * new is kept; not recorded when it fails ([d]'s identity not known yet),
+     * so the next event for [d] tells it again.
+     */
+    private fun watch(d: String) {
+        val app = app ?: return
+        val distro = DistroCodec.hexToBytes(d) ?: return
+        val kept = UserPreferences.distroOfflineKept(app, d)
+        if (watching[d] == kept) return
+        val count = RetichatBridge.distroDirectWatch(distro, kept.toTypedArray())
+        if (count < 0) {
+            Log.w(TAG, "${d.take(8)}'s offline devices are not watched for yet: ${RetichatBridge.lastError()} (§17.15)")
+            return
+        }
+        watching[d] = kept
+        Log.i(TAG, "watching for ${d.take(8)}'s lookup and ${kept.size} kept offline address(es) (§17.15)")
     }
 
     /**
@@ -398,9 +436,30 @@ object DistroOffline {
      */
     fun sentToDistro(context: Context, distro: ByteArray, handle: Long, localId: String) {
         val app = context.applicationContext as? RetichatApp ?: return
-        val d = distro.toHex()
+        makeCopy(app, distro.toHex(), handle, localId)
+    }
+
+    /**
+     * The propagated copy of a message that went direct first (ChatRepository's
+     * fall-back to RFed), [handle] the clone the router sends, its row [localId]:
+     * made into a copy for the offline devices as [sentToDistro] makes one when
+     * [peer] is a distro this device sends to. The clone's handle stays
+     * ChatRepository's, as the send's own does in [sentToDistro]: the bubble
+     * follows it, so nothing here releases it. Never throws.
+     */
+    fun fallbackSent(context: Context, peer: ByteArray, handle: Long, localId: String) {
+        val app = context.applicationContext as? RetichatApp ?: return
+        val d = peer.toHex()
+        scope.launch {
+            if (started && sendsTo(app, d)) makeCopy(app, d, handle, localId)
+        }
+    }
+
+    /** Watch [d] on [serial], make the copy of [handle] off it, then fan it out there. */
+    private fun makeCopy(app: RetichatApp, d: String, handle: Long, localId: String) {
         io.launch {
             try {
+                withContext(serial) { watch(d) }
                 val node = PropagationSync.resolvePropagationOverride(app)?.trim()?.lowercase()?.let(DistroCodec::hexToBytes)
                 if (node == null) {
                     Log.i(TAG, "no propagation node is configured: the message to ${d.take(8)} has no copy for its offline devices (§17.15)")

@@ -29,14 +29,21 @@ import com.newendian.retichat.bridge.RetichatBridge.MessageState
  */
 internal class PropagationFallbacks(private val capacity: Int = 256) {
     /**
-     * A DIRECT send: its bubble, and the handle its propagated copy is cloned
-     * from. The clone carries the fields, the attachments and the packed
-     * timestamp, so nothing else is held here, and no attachment is read back
-     * from disk for the copy.
+     * A DIRECT send: its bubble, its recipient, and the handle its propagated
+     * copy is cloned from. The clone carries the fields, the attachments and
+     * the packed timestamp, so none of those is held here, and no attachment
+     * is read back from disk for the copy.
      */
     class Send(
         val messageId: String,
         val directHandle: Long,
+        /**
+         * The recipient's address, for a 1:1 send: a copy to a distro also
+         * goes to its offline devices (RFed SPEC §17.15,
+         * DistroOffline.fallbackSent). Null for a Group envelope
+         * (GroupPropagationFallbacks), whose copy has no such step.
+         */
+        val peer: ByteArray? = null,
         /**
          * False for a reaction (REACTIONS-DESIGN.md §2): it goes the way a text
          * message goes, but has no bubble, so [messageId] names no row.

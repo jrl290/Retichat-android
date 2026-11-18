@@ -157,7 +157,7 @@ class ReactionsWiringTest {
         assertTrue(fanOut.contains("if (groupMsgId != null) messageDao.updateState(groupMsgId, RetichatBridge.MessageState.SENT)"))
         val dispatch = body("private suspend fun dispatch(")
         assertTrue(dispatch.contains("bubble = reaction == null,"))
-        assertTrue(dispatch.contains("PropagationFallbacks.Send(localId, directHandle = msgHandle, bubble = false)"))
+        assertTrue(dispatch.contains("PropagationFallbacks.Send(localId, directHandle = msgHandle, peer = destHash, bubble = false)"))
         // A post's id from the start.
         assertTrue(body("private suspend fun holdGroupPost(").contains("postId = Reactions.newPostId(),"))
         assertTrue(body("suspend fun sendGroupMessage(").contains("Reactions.newPostId()"))

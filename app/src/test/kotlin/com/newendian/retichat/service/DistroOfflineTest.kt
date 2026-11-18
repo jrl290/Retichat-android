@@ -97,7 +97,7 @@ class DistroOfflineTest {
         for (name in listOf(
             "nativeDistroDirectRegister", "nativeDistroDirectUnregister", "nativeDistroDirectHold", "nativeDistroDirectSetAppData",
             "nativeDistroDirectAnnounce", "nativeDistroDirectSign", "nativePropagationBuildDirectUpload", "nativeDistroDirectCopy",
-            "nativeDistroDirectSend", "nativeDistroDirectAsk", "nativeOnlineInterfaces",
+            "nativeDistroDirectSend", "nativeDistroDirectAsk", "nativeDistroDirectWatch", "nativeOnlineInterfaces",
         )) {
             assertTrue(name, bridge.contains("private external fun $name("))
             assertTrue(name, rust.contains("fn Java_com_newendian_retichat_bridge_RetichatBridge_$name("))
@@ -155,5 +155,45 @@ class DistroOfflineTest {
         // Only a message to a distro address, once it has gone to the router through propagation.
         val distroBranch = repo.substring(repo.indexOf("is a distro address — propagating"), repo.indexOf("// Register the AppLinks spec synchronously"))
         assertTrue(distroBranch.contains("DistroOffline.sentToDistro(appContext, destHash, handle, localId)"))
+        // A message that went direct first and fell back to RFed gets its copy too (2026-11-18), once the clone is out.
+        assertEquals(1, Regex("DistroOffline\\.fallbackSent\\(").findAll(repo).count())
+        val fallback = repo.substring(repo.indexOf("private fun startPropagatedCopy("), repo.indexOf("private suspend fun sendPropagatedCopy("))
+        assertTrue(fallback.contains("send.peer?.let { peer ->"))
+        assertTrue(fallback.contains("DistroOffline.fallbackSent(appContext, peer, handle, send.messageId)"))
+        val copy = repo.substring(repo.indexOf("private suspend fun sendPropagatedCopy("), repo.indexOf("private suspend fun propagatedCopyNotSent("))
+        assertTrue(copy.indexOf("onSent(propHandle)") > copy.indexOf("val sent = RetichatBridge.messageSendViaAppLinks(propHandle)"))
+    }
+
+    /**
+     * 2026-11-18 (James: "Yes, build it"): the device announces its lookup
+     * address with its offline address while offline, and the sender watches
+     * each distro it knows, so the lookup and kept offline addresses pass the
+     * app's drop of announces.
+     */
+    @Test
+    fun theDeviceAnnouncesItsLookupAndTheSenderWatchesEachDistroItKnows() {
+        val direct = File("../rust/retichat-jni/src/distro_direct.rs").readText()
+        assertTrue(
+            "the lookup is announced only while the device is offline, never once it is back",
+            direct.contains(".find(|h| h.offline == offline && !h.back).map(|h| h.lookup.clone())"),
+        )
+        assertTrue("on the same mesh connections as the offline address", direct.contains("AppLinks::announce_held(&lookup, None, interfaces)"))
+        assertTrue("watched addresses pass the drop of announces", direct.contains("Transport::watch_announce(hash.clone());"))
+        assertTrue(rust.contains("match distro_direct::watch(&distro, &randoms) {"))
+        assertEquals("one watch call site", 1, Regex("RetichatBridge\\.distroDirectWatch\\(").findAll(offline).count())
+        assertTrue("at start, every distro known", offline.contains("for (d in UserPreferences.getDistroContacts(app)) watch(d)"))
+        assertTrue(
+            "at each send to a distro",
+            offline.contains("    private fun makeCopy(app: RetichatApp, d: String, handle: Long, localId: String) {\n        io.launch {\n            try {\n                withContext(serial) { watch(d) }"),
+        )
+        assertTrue(
+            "when it keeps an address it heard announced",
+            offline.contains("            Log.i(TAG, \"kept \${d.take(8)}'s offline address \$random (§17.15)\")\n            watch(d)"),
+        )
+        assertTrue("when a lookup names addresses", offline.contains("        watch(d)\n        sendKept(d, named)"))
+        // The fall-back's copy: only for a distro this device sends to. The clone's handle stays
+        // ChatRepository's (the bubble follows it), so nothing here lets a message go.
+        assertTrue(offline.contains("if (started && sendsTo(app, d)) makeCopy(app, d, handle, localId)"))
+        assertFalse(offline.contains("messageDestroy"))
     }
 }

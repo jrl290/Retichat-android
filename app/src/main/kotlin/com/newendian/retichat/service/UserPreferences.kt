@@ -281,7 +281,7 @@ object UserPreferences {
 
     /** Newest-first list of `source:timestamp` keys of distro copies already stored (cap 500). */
     const val PREF_KEY_DISTRO_SEEN = "distro_seen"
-    /** Comma-separated contact hashes added from an `lxma://` link with a key (distro addresses). */
+    /** Comma-separated addresses whose announce carried the distro flag (RFed SPEC §17.10). */
     const val PREF_KEY_DISTRO_CONTACTS = "distro_contacts"
 
     /** Record a fan-out copy; false when this copy was already stored. */
@@ -319,6 +319,11 @@ object UserPreferences {
         prefs(context).edit().putString(PREF_KEY_DISTRO_SEEN, existing.filter { it != key }.joinToString("\n")).apply()
     }
 
+    /**
+     * Every address whose past announce carried the distro flag: what the send
+     * path takes as a distro, and the distros a sender watches for at start
+     * ([DistroOffline.start], RFed SPEC §17.15).
+     */
     fun getDistroContacts(context: Context): Set<String> = getCsvSet(context, PREF_KEY_DISTRO_CONTACTS)
     fun isDistroContact(context: Context, destHashHex: String): Boolean =
         getDistroContacts(context).contains(destHashHex.lowercase())
