@@ -7,7 +7,8 @@ import kotlinx.coroutines.CancellationException
 /**
  * The distro outbox's storage ([OutboxStore]) in Room's `distro_outbox`
  * (database 13; the sealed bytes and sync signature of the distro sync proof
- * since 15, null for a row owed before). The outbox keeps what is owed in memory and this is its
+ * since 15, null for a row owed before; a sender's stamp on a message received
+ * direct since 19). The outbox keeps what is owed in memory and this is its
  * durable copy: it is read once at start, and written by [put] when something
  * is owed, [remove] when the node proves it or it is owed no more, and
  * [removeId] when a refused write must still take a replaced message out.
@@ -52,6 +53,8 @@ class RoomOutboxStore(private val dao: DistroOutboxDao, private val log: OutboxL
         const val KIND_SENT = "sent"
         /** A §17.14 group sync (GROUPS-DISTRO-DESIGN.md §10.5). The column is a plain string: no migration. */
         const val KIND_GROUP = "group"
+        /** A §17.15 message received direct, with the sender's stamp (database 19, [DirectUploadMigration]). */
+        const val KIND_DIRECT = "direct"
 
         fun toRow(entry: OwedEntry, seq: Long): DistroOutboxEntity = DistroOutboxEntity(
             id = entry.id,
@@ -59,6 +62,7 @@ class RoomOutboxStore(private val dao: DistroOutboxDao, private val log: OutboxL
                 OwedKind.CHANNEL -> KIND_CHANNEL
                 OwedKind.SENT -> KIND_SENT
                 OwedKind.GROUP -> KIND_GROUP
+                OwedKind.DIRECT -> KIND_DIRECT
             },
             distro = entry.distro,
             distroKey = entry.distroKey,
@@ -72,6 +76,7 @@ class RoomOutboxStore(private val dao: DistroOutboxDao, private val log: OutboxL
             seq = seq,
             sealed = entry.sealed,
             syncSig = entry.syncSig,
+            stamp = entry.stamp,
         )
 
         /** Null for a row of a kind this build does not know: it is left alone and never uploaded. */
@@ -80,8 +85,12 @@ class RoomOutboxStore(private val dao: DistroOutboxDao, private val log: OutboxL
                 KIND_CHANNEL -> OwedKind.CHANNEL
                 KIND_SENT -> OwedKind.SENT
                 KIND_GROUP -> OwedKind.GROUP
+                KIND_DIRECT -> OwedKind.DIRECT
                 else -> return null
             }
+            // A message received direct is uploaded only as it came: sealed, with the sender's stamp
+            // and this device's sync signature. A row without all three cannot be, and is left alone.
+            if (kind == OwedKind.DIRECT && (row.sealed == null || row.syncSig == null || row.stamp == null)) return null
             return OwedEntry(
                 id = row.id, kind = kind, distro = row.distro, distroKey = row.distroKey,
                 msgHash = row.msgHash, packed = row.packed, label = row.label,
@@ -90,6 +99,7 @@ class RoomOutboxStore(private val dao: DistroOutboxDao, private val log: OutboxL
                 // ([halfProof] says so when it is loaded).
                 sealed = row.sealed?.takeIf { row.syncSig != null },
                 syncSig = row.syncSig?.takeIf { row.sealed != null },
+                stamp = row.stamp,
             )
         }
 

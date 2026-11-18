@@ -34,8 +34,12 @@ class OnlineInterfaceCountContractTest {
     fun theStackShowsTheOnlineCountFromStartToStop() {
         assertFalse("the enabled rows are not the count", stack.contains("interfaceCount = interfaces.size"))
         val ready = stack.indexOf("identityHashHex = hashHex,")
-        val register = stack.indexOf("RetichatBridge.onlineInterfaceCountRegister { count, peers -> app.updateInterfaceCount(count, peers) }")
+        val register = stack.indexOf("RetichatBridge.onlineInterfaceCountRegister { count, peers ->")
         assertTrue("registered after the state that would overwrite the count", ready in 0 until register)
+        // The same edge tells Settings' count and the offline use of the distro address (RFed SPEC §17.15).
+        val told = stack.substring(register, stack.indexOf("}) {", register))
+        assertTrue(told.contains("app.updateInterfaceCount(count, peers)"))
+        assertTrue(told.contains("DistroOffline.onInterfaceEdge()"))
         val stop = stack.substring(stack.indexOf("private fun shutdownNow("))
         val unregister = stop.indexOf("RetichatBridge.onlineInterfaceCountUnregister()")
         assertTrue("unregistered before the stop clears the state", unregister in 0 until stop.indexOf("app.updateServiceState()"))

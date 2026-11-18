@@ -2,6 +2,7 @@ package com.newendian.retichat.data.db
 
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Assume
@@ -98,7 +99,9 @@ class ChannelActivityMigrationTest {
     @Test
     fun theMigrationIsRegisteredAndEveryEarlierStepIsStillInTheChain() {
         val database = File("src/main/kotlin/com/newendian/retichat/data/db/RetichatDatabase.kt").readText()
-        assertTrue(database.contains("version = ChannelActivityMigration.TO,"))
+        // Database 19 (DirectUploadMigration) came after it: the version is its, the step stays.
+        assertFalse(database.contains("version = ChannelActivityMigration.TO,"))
+        assertEquals(ChannelActivityMigration.TO, DirectUploadMigration.FROM)
         for (step in listOf("MIGRATION_9_10", "MIGRATION_10_11", "MIGRATION_11_12", "MIGRATION_12_13", "MIGRATION_13_14",
                             "MIGRATION_14_15", "MIGRATION_15_16", "MIGRATION_16_17", "MIGRATION_17_18")) {
             assertTrue(step, Regex("addMigrations\\([^)]*$step[^)]*\\)").containsMatchIn(database))

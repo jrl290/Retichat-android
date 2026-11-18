@@ -328,6 +328,57 @@ object UserPreferences {
         putCsvSet(context, PREF_KEY_DISTRO_CONTACTS, current)
     }
 
+    // ── Offline use of a distro address (RFed SPEC §17.15) ─────────────
+    /** The offline toggle: off by default (James, 2026-11-17). */
+    const val PREF_KEY_DISTRO_OFFLINE = "distro_offline_enabled"
+    /** `distro_direct_random:<distro hex>`: this device's random part for that distro. */
+    private const val PREF_KEY_DISTRO_DIRECT_RANDOM = "distro_direct_random:"
+    /** `distro_direct_kept:<distro hex>`: the random parts of that distro's offline addresses a sender keeps. */
+    private const val PREF_KEY_DISTRO_DIRECT_KEPT = "distro_direct_kept:"
+
+    /**
+     * Offline use of the distro address (RFed SPEC §17.15): while this is on
+     * and the device can reach neither RFed nor the internet, it holds an
+     * offline address of its own and announces it on its mesh connections, so
+     * senders nearby can reach it directly. Off by default; it may stay on.
+     */
+    fun isDistroOfflineEnabled(context: Context): Boolean =
+        prefs(context).getBoolean(PREF_KEY_DISTRO_OFFLINE, false)
+
+    fun setDistroOfflineEnabled(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(PREF_KEY_DISTRO_OFFLINE, enabled).apply()
+    }
+
+    /**
+     * This device's random part for the distro [distroHex] (§17.15): 16
+     * lowercase hex characters from 8 random bytes, made the first time and
+     * kept, so its offline address stays the same across offline periods and
+     * restarts. Null when storage refused to keep a new one: an address that
+     * would change at the next start is never held.
+     */
+    @Synchronized
+    fun distroOfflineRandom(context: Context, distroHex: String): String? {
+        val key = PREF_KEY_DISTRO_DIRECT_RANDOM + distroHex.lowercase()
+        prefs(context).getString(key, null)?.takeIf(DistroOfflineRules::isRandomPart)?.let { return it }
+        val bytes = ByteArray(8).also { java.security.SecureRandom().nextBytes(it) }
+        val random = bytes.joinToString("") { "%02x".format(it) }
+        return if (prefs(context).edit().putString(key, random).commit()) random else null
+    }
+
+    /** The random parts of [distroHex]'s offline addresses this device keeps as a sender (§17.15). */
+    fun distroOfflineKept(context: Context, distroHex: String): Set<String> =
+        getCsvSet(context, PREF_KEY_DISTRO_DIRECT_KEPT + distroHex.lowercase())
+
+    /** Keep [random] as an offline address of [distroHex]; false when it was kept already. */
+    @Synchronized
+    fun keepDistroOfflineAddress(context: Context, distroHex: String, random: String): Boolean {
+        val key = PREF_KEY_DISTRO_DIRECT_KEPT + distroHex.lowercase()
+        val current = getCsvSet(context, key)
+        if (random in current) return false
+        putCsvSet(context, key, current + random)
+        return true
+    }
+
     // ── Groups the user rejected or left ──────────────────────────────
 
     /** Oldest-first group ids the user declined or left ([ClosedGroups]), one per line. */

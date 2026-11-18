@@ -178,6 +178,44 @@ interface InterfaceOnlineCallback {
 }
 
 /**
+ * Offline use of a distro address (RFed SPEC §17.15): what comes to this
+ * device's offline address, and the offline addresses and lookup answers
+ * heard ([RetichatBridge.distroDirectRegister]). Each is called on a Rust
+ * thread already attached to the JVM. [onDirect] waits for its answer, so it
+ * may block while the message is kept; the other two must not block.
+ */
+@Keep
+interface DistroDirectCallback {
+    /**
+     * A copy that came to this device's offline address of the distro
+     * [distro] (its lxmf.delivery), its stamp already checked against the
+     * RFed node's cost: open it and keep it, and answer
+     * [RetichatBridge.DistroDirect.HELD] when the device holds the message
+     * afterwards, newly or already, and [RetichatBridge.DistroDirect.BACK]
+     * when the device is back.
+     */
+    fun onDirect(distro: ByteArray, sealed: ByteArray, stamp: ByteArray): Int
+
+    /** An offline address of [distro] announced or answered for: its random part, and whether it says the device is back. */
+    fun onOfflineAddress(distro: ByteArray, random: String, back: Boolean)
+
+    /** [distro]'s lookup address answered for: the offline addresses it names (none once that device is back). */
+    fun onLookup(distro: ByteArray, randoms: Array<String>)
+}
+
+/**
+ * The outcome of one send to an offline address ([RetichatBridge.distroDirectSend]),
+ * told once on a Rust thread: [RetichatBridge.DistroDirect.HELD] the device
+ * holds the message, [RetichatBridge.DistroDirect.BACK] it is back, 0 the send
+ * failed (no proof, the link did not come up or closed, the request failed).
+ * Must not block.
+ */
+@Keep
+interface DistroDirectSendCallback {
+    fun onOutcome(outcome: Int)
+}
+
+/**
  * The outcome of one upload on the held propagation link
  * ([RetichatBridge.propagationUpload]): [onProved] when the node proves the
  * packet (or the Resource completes), [onLost] when the packet receipt times
@@ -890,6 +928,91 @@ object RetichatBridge {
         distroPublicKey: ByteArray, sealed: ByteArray, syncSig: ByteArray, withClaim: Boolean, node: ByteArray,
     ): ByteArray? = nativePropagationBuildSealedUpload(distroPublicKey, sealed, syncSig, withClaim, node)
 
+    // ---- Offline use of a distro address (RFed SPEC §17.15) ----
+
+    /** What an offline address's answer says, as bits ([DistroDirectCallback.onDirect], [DistroDirectSendCallback.onOutcome]). */
+    object DistroDirect {
+        /** The device holds the message afterwards, newly or already. */
+        const val HELD = 1
+        /** The device is back: it reaches RFed again, or its offline toggle is off. */
+        const val BACK = 2
+    }
+
+    /**
+     * Be told what comes to this device's offline address and every offline
+     * address and lookup answer heard ([DistroDirectCallback]). One callback
+     * at a time: a later register replaces it. Register after each start;
+     * [distroDirectUnregister] ends it at the stop.
+     */
+    fun distroDirectRegister(callback: DistroDirectCallback): Boolean = nativeDistroDirectRegister(callback) == 0
+
+    /** Stop telling the callback [distroDirectRegister] set: a copy that comes meanwhile is refused, said in the log. */
+    fun distroDirectUnregister() { nativeDistroDirectUnregister() }
+
+    /**
+     * Hold the distro's offline address `rfed.distro.direct.<random>` (its
+     * ratchets kept at [ratchetsPath]) and its lookup address
+     * `rfed.distro.direct` until the app restarts, with [distroHandle]'s key.
+     * A copy's stamp is checked against the cost of [node], the RFed node's
+     * own lxmf.propagation. Their app_data is `[random, back]` and [lookup].
+     * Held already: the node and app_data are set again. The offline
+     * address's hash, or null with [lastError].
+     */
+    fun distroDirectHold(
+        distroHandle: Long, random: String, ratchetsPath: String, node: ByteArray?, back: Boolean, lookup: Array<String>,
+    ): ByteArray? = nativeDistroDirectHold(distroHandle, random, ratchetsPath, node, back, lookup)
+
+    /** The held offline address's app_data becomes `[random, back]` and its lookup's [lookup]. False with [lastError]. */
+    fun distroDirectSetAppData(offline: ByteArray, back: Boolean, lookup: Array<String>): Boolean =
+        nativeDistroDirectSetAppData(offline, back, lookup) == 0
+
+    /** Announce the held offline address on each of [interfaces] that is up. How many went, or -1 with [lastError]. */
+    fun distroDirectAnnounce(offline: ByteArray, interfaces: Array<String>): Int = nativeDistroDirectAnnounce(offline, interfaces)
+
+    /** The §17.13 Distro Sync proof of [sealed], a message to the distro received direct. Null with [lastError]. */
+    fun distroDirectSign(distroHandle: Long, sealed: ByteArray): ByteArray? = nativeDistroDirectSign(distroHandle, sealed)
+
+    /**
+     * One upload of a message received direct, for the node [node]: [sealed]
+     * and the sender's [stamp] unchanged while it meets the node's cost (a new
+     * stamp when the cost has risen above it), and the claim only when
+     * [withClaim]. Blocks while a stamp is mined: off the main thread. Null
+     * with [lastError]; nothing has left.
+     */
+    fun propagationBuildDirectUpload(
+        distroPublicKey: ByteArray, sealed: ByteArray, stamp: ByteArray, syncSig: ByteArray, withClaim: Boolean, node: ByteArray,
+    ): ByteArray? = nativePropagationBuildDirectUpload(distroPublicKey, sealed, stamp, syncSig, withClaim, node)
+
+    /**
+     * A sender's copy of the outbound message [handle], a message to a distro
+     * the router has taken through propagation: `msgpack [ bin sealed, bin
+     * stamp ]`, the same sealed message and stamp RFed gets; the stamp is made
+     * here at [node]'s cost when the router has not made it yet. Blocks while
+     * a stamp is mined: off the main thread. Null with [lastError].
+     */
+    fun distroDirectCopy(handle: Long, node: ByteArray): ByteArray? = nativeDistroDirectCopy(handle, node)
+
+    /**
+     * Send [copy] to the offline address [random] of the distro [distro] (its
+     * lxmf.delivery): one packet with a proof asked for when it fits,
+     * otherwise one `/distro/direct` request. 1 when it went ([callback] hears
+     * how it ended), 0 when no path to the address is known (nothing went),
+     * -1 with [lastError].
+     */
+    fun distroDirectSend(distro: ByteArray, random: String, copy: ByteArray, callback: DistroDirectSendCallback): Int =
+        nativeDistroDirectSend(distro, random, copy, callback)
+
+    /**
+     * Path requests over each of [interfaces] for each offline address
+     * [randoms] of [distro] and, [withLookup], its lookup address. How many
+     * went, or -1 with [lastError].
+     */
+    fun distroDirectAsk(distro: ByteArray, randoms: Array<String>, withLookup: Boolean, interfaces: Array<String>): Int =
+        nativeDistroDirectAsk(distro, randoms, withLookup, interfaces)
+
+    /** The names of the Reticulum interfaces online now. */
+    fun onlineInterfaces(): Array<String> = nativeOnlineInterfaces() ?: emptyArray()
+
     /**
      * How many interface up-edges Transport has told: app-links' `UpEdgeMark`,
      * which the outbox takes just before each upload and asks again once a
@@ -984,6 +1107,21 @@ object RetichatBridge {
     private external fun nativePropagationBuildSealedUpload(
         distroPublicKey: ByteArray, sealed: ByteArray, sig: ByteArray, withClaim: Boolean, node: ByteArray,
     ): ByteArray?
+    private external fun nativeDistroDirectRegister(callback: DistroDirectCallback): Int
+    private external fun nativeDistroDirectUnregister(): Int
+    private external fun nativeDistroDirectHold(
+        distroHandle: Long, random: String, ratchetsPath: String, node: ByteArray?, back: Boolean, lookup: Array<String>,
+    ): ByteArray?
+    private external fun nativeDistroDirectSetAppData(offline: ByteArray, back: Boolean, lookup: Array<String>): Int
+    private external fun nativeDistroDirectAnnounce(offline: ByteArray, interfaces: Array<String>): Int
+    private external fun nativeDistroDirectSign(distroHandle: Long, sealed: ByteArray): ByteArray?
+    private external fun nativePropagationBuildDirectUpload(
+        distroPublicKey: ByteArray, sealed: ByteArray, stamp: ByteArray, sig: ByteArray, withClaim: Boolean, node: ByteArray,
+    ): ByteArray?
+    private external fun nativeDistroDirectCopy(handle: Long, node: ByteArray): ByteArray?
+    private external fun nativeDistroDirectSend(distro: ByteArray, random: String, copy: ByteArray, callback: DistroDirectSendCallback): Int
+    private external fun nativeDistroDirectAsk(distro: ByteArray, randoms: Array<String>, withLookup: Boolean, interfaces: Array<String>): Int
+    private external fun nativeOnlineInterfaces(): Array<String>?
     private external fun nativeInterfaceUpEdges(): Long
     private external fun nativePropagationLink(node: ByteArray): ByteArray?
     private external fun nativePropagationUpload(node: ByteArray, upload: ByteArray, callback: PropagationUploadCallback): ByteArray?

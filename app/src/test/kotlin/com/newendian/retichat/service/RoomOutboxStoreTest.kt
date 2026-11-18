@@ -47,6 +47,29 @@ class RoomOutboxStoreTest {
         sealed = sealed, syncSig = syncSig,
     )
 
+    /** RFed SPEC §17.15: a message received direct keeps the sender's stamp, and is read back only whole. */
+    @Test
+    fun aMessageReceivedDirectRoundTripsWithItsStampAndIsLeftAloneWithoutIt() {
+        val m = OwedEntry(
+            id = "direct:h9", kind = OwedKind.DIRECT, distro = "d".repeat(32), distroKey = "1".repeat(128),
+            msgHash = "h9", packed = ByteArray(0), label = "the message h9 received direct (§17.15)",
+            sealed = ByteArray(200) { 9 }, syncSig = ByteArray(64) { 7 }, stamp = ByteArray(32) { 5 },
+        )
+        val row = RoomOutboxStore.toRow(m, 7)
+        assertEquals("direct", row.kind)
+        val back = RoomOutboxStore.toEntry(row)!!
+        assertEquals(OwedKind.DIRECT, back.kind)
+        assertArrayEquals(m.sealed, back.sealed)
+        assertArrayEquals(m.syncSig, back.syncSig)
+        assertArrayEquals(m.stamp, back.stamp)
+        // Without any of the three it cannot be uploaded as it came: left alone.
+        assertNull(RoomOutboxStore.toEntry(row.copy(stamp = null)))
+        assertNull(RoomOutboxStore.toEntry(row.copy(syncSig = null)))
+        assertNull(RoomOutboxStore.toEntry(row.copy(sealed = null)))
+        // Every other kind has none.
+        assertNull(RoomOutboxStore.toRow(sent("h1"), 8).stamp)
+    }
+
     @Test
     fun anEntryRoundTripsThroughARowWhole() {
         val c = channel("channel:aa", "h1")

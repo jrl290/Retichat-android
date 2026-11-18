@@ -47,7 +47,7 @@ class GroupsDistroWiringTest {
 
     @Test
     fun theGroupBranchesComeAfterTheChannelSyncAndBeforeTheSourceAndTimestampKey() {
-        val handle = body(client, "handleBlob")
+        val handle = body(client, "handleUnwrapped")
         inOrder(
             handle,
             "handleChannelSync(context, srcHex, timestamp, channelSync",
@@ -322,7 +322,7 @@ class GroupsDistroWiringTest {
 
     @Test
     fun siblingsAreLearnedOnlyFromWhatDSignedAndThisDeviceAccepted() {
-        val handle = body(client, "handleBlob")
+        val handle = body(client, "handleUnwrapped")
         inOrder(handle, "is DistroCodec.SentCopy.Store -> {", "if (o.optBoolean(\"signature_validated\", false)) {", "DistroGroupSync.siblingOf(sentBy,", "app.repository.onDistroSentCopy(")
         inOrder(body(client, "handleChannelSync"), "if (held && signatureValidated && ownDistro != null && srcHex == ownDistro) {", "DistroGroupSync.siblingOf(marker.byHex,")
         // A G teaches its `by` past rules 1-3 (source D, signature D's, not this device).

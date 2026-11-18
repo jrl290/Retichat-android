@@ -38,6 +38,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -53,7 +54,9 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.newendian.retichat.service.DistroManager
+import com.newendian.retichat.service.DistroOffline
 import com.newendian.retichat.service.RfedDistroClient
+import com.newendian.retichat.service.UserPreferences
 import kotlinx.coroutines.launch
 
 /**
@@ -150,6 +153,27 @@ fun IdentityScreen(onBack: () -> Unit) {
                         else -> "Not yet registered with RFed"
                     }
                     Text(line, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.height(12.dp))
+                    // RFed SPEC §17.15: offline use of the distro address, off by default (James, 2026-11-17).
+                    var offlineUse by remember { mutableStateOf(UserPreferences.isDistroOfflineEnabled(context)) }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Offline use", style = MaterialTheme.typography.bodyMedium)
+                            Hint(
+                                "When this device can reach neither RFed nor the internet, people nearby on the mesh " +
+                                    "can still send your distro's mail straight to it. While it does, anyone listening " +
+                                    "on the mesh can tell that this device belongs to your distro.",
+                            )
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Switch(
+                            checked = offlineUse,
+                            onCheckedChange = { on ->
+                                offlineUse = on
+                                DistroOffline.setEnabled(context, on)
+                            },
+                        )
+                    }
                     Spacer(Modifier.height(12.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(onClick = { showAddDevice = true }) { Text("Add another device") }

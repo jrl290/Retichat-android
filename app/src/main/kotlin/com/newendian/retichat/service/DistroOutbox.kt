@@ -70,6 +70,17 @@ import kotlinx.coroutines.launch
  *    asks it once it is recorded (app-links `send_on_held_link_owed`). Mirrors
  *    Retichat-js 80c74ad and 136d13d (`_sendDistroNeverLeft`).
  *
+ * A fourth kind is owed since 2026-11-17 (RFed SPEC §17.15; James: "like sent
+ * copies"): a message this device took at its offline address, received
+ * direct from a sender over a mesh while it could not reach RFed. It is not
+ * D's own message but a sender's, already sealed, with the sender's stamp:
+ * the device uploads it as it came ([OwedEntry.stamp]) with its own Distro
+ * Sync proof, so RFed delivers it to the distro's other devices. Every rule
+ * above applies to it, with one order of its own (DESIGN_PRINCIPLES §5): at a
+ * coming-up it goes after the pull that coming-up starts ([onPulled]), and a
+ * pull or a live delivery that brings the message settles it instead
+ * ([onBrought]). Taken while the propagation link is up, it goes at once.
+ *
  * Each entry owed since the distro sync proof (RFed SPEC §17.13) is also
  * sealed once, when it is owed: the message encrypted to D and signed by D
  * ([OwedEntry.sealed], [OwedEntry.syncSig]), kept in the same write. Every
@@ -88,17 +99,18 @@ import kotlinx.coroutines.launch
  */
 
 /**
- * What an entry is: a §17.12 channel membership message, a §17.11 sent-copy, or
- * a §17.14 group sync (GROUPS-DISTRO-DESIGN.md §10.5). Only [CHANNEL] is owed to
- * the distro held now; a sent-copy and a group sync each report an act already
- * made as their distro, and are kept and go to that distro whatever the device
- * holds later.
+ * What an entry is: a §17.12 channel membership message, a §17.11 sent-copy, a
+ * §17.14 group sync (GROUPS-DISTRO-DESIGN.md §10.5), or a §17.15 message
+ * received direct. Only [CHANNEL] is owed to the distro held now; a sent-copy
+ * and a group sync each report an act already made as their distro, and a
+ * message received direct is one the distro was sent: each is kept and goes to
+ * that distro whatever the device holds later.
  */
-enum class OwedKind { CHANNEL, SENT, GROUP }
+enum class OwedKind { CHANNEL, SENT, GROUP, DIRECT }
 
 /**
  * One thing owed. [id] is `channel:<channel hash>`, `sent:<LXMF message
- * hash>` or `group:<LXMF message hash>`; [msgHash] is the LXMF message hash of [packed], which is what tells
+ * hash>`, `group:<LXMF message hash>` or `direct:<LXMF message hash>`; [msgHash] is the LXMF message hash of [packed], which is what tells
  * one message from another under the same id. [distro] is D's `lxmf.delivery`
  * hash and [distroKey] D's public key (hex), so a sent-copy is still encrypted
  * to its own distro after the device gives that distro up. A channel entry
@@ -113,6 +125,11 @@ enum class OwedKind { CHANNEL, SENT, GROUP }
  * sealed, has neither, and is built the legacy way and wakes the distro's
  * devices once ([SyncProofGate]). A sent-copy keeps its proof after the device
  * gives its distro up, as it keeps its key.
+ *
+ * A message received direct (§17.15, [OwedKind.DIRECT]) has no [packed] of its
+ * own (an empty array): it is the sender's [sealed] message, with the sender's
+ * [stamp], which its upload carries unchanged while the node's cost allows,
+ * and the device's [syncSig] over it. All three are always here.
  */
 class OwedEntry(
     val id: String,
@@ -128,6 +145,7 @@ class OwedEntry(
     val toHex: String? = null,
     val sealed: ByteArray? = null,
     val syncSig: ByteArray? = null,
+    val stamp: ByteArray? = null,
 ) {
     /** Sealed for the distro sync proof: both of [sealed] and [syncSig] are here. */
     val isSealed: Boolean get() = sealed != null && syncSig != null
@@ -471,7 +489,9 @@ class DistroOutbox(
      * when the link next comes up. One already owed under its id (an earlier
      * join or leave of the same channel) is replaced and never goes, even if its
      * upload is being built. It is the user's own action, and reads no failure
-     * record: only the user's own send, join or leave calls it.
+     * record: only the user's own send, join or leave calls it, and a message
+     * this device took at its offline address (§17.15), which is owed once, when
+     * it is taken.
      */
     suspend fun owe(entry: OwedEntry) {
         // The message this one replaces is owed no more: its failure record, if
@@ -575,6 +595,10 @@ class DistroOutbox(
                 // yielded: a later action on the channel may have replaced it, an
                 // upload made meanwhile been proved, or the distro changed.
                 if (!stillOwed(entry)) continue
+                // A message received direct goes after the pull this coming-up
+                // starts, unless that pull brings it (§17.15, [onPulled]). With
+                // its distro no longer held no pull brings it: it goes now.
+                if (entry.kind == OwedKind.DIRECT && holdsDistro(entry.distro)) continue
                 if (distroAttemptOpen(entry, linkId)) continue
                 if (unprovedSince(entry, comingUp)) {
                     log.info("${entry.label} was not proved since this flush began: it waits for the propagation link's next coming-up (DESIGN_PRINCIPLES §3, the distro exception)")
@@ -663,6 +687,63 @@ class DistroOutbox(
      * same id.
      */
     private fun unprovedSince(entry: OwedEntry, comingUp: Long): Boolean = unproved.since(entry, comingUp)
+
+    // ---- A message received direct (RFed SPEC §17.15) ----
+
+    /**
+     * A pull of what RFed holds for the distro finished, every round of it
+     * answered (DESIGN_PRINCIPLES §5, "after the pull"): upload on the
+     * propagation link, if it is up, each message received direct that is still
+     * owed. The pull, and any live delivery before it, settled the ones RFed
+     * brought ([onBrought]); what is left RFed does not have. It is no coming-up
+     * and counts none: an upload of one of them decided not proved at the
+     * coming-up current now waits for the next coming-up and its pull, as a
+     * flush leaves it ([unprovedSince]), so nothing is sent again on its own
+     * failure. Only the runtime's pull calls it. Never throws.
+     */
+    suspend fun onPulled() {
+        if (stopped) return
+        val held = port.held()
+        if (held == null || !held.active) return
+        val comingUp = propComingUps
+        try {
+            val owed = entries.values.filter { it.kind == OwedKind.DIRECT && "${it.id}|${it.msgHash}" !in writing }
+            if (owed.isEmpty()) return
+            log.info("The pull is done: ${owed.size} message(s) received direct that RFed did not bring go now (§17.15)")
+            for (entry in owed) {
+                if (stopped || !linkUp(held.id)) {
+                    log.info("Propagation link gone mid-flush: the messages received direct wait for its next coming-up and pull")
+                    return
+                }
+                if (!stillOwed(entry) || distroAttemptOpen(entry, held.id)) continue
+                if (unprovedSince(entry, comingUp)) {
+                    log.info("${entry.label} was not proved since the propagation link last came up: it waits for its next coming-up (DESIGN_PRINCIPLES §3, the distro exception)")
+                    continue
+                }
+                uploadOwed(held.id, entry, comingUp)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            log.warn("Sending the messages received direct failed: ${e.message}")
+        }
+    }
+
+    /**
+     * RFed brought the message [msgHash] (a pull, or a live delivery): RFed
+     * holds it, so its upload as a message received direct is owed no more
+     * (§17.15). One already on its way is left to its outcome, which finds it
+     * owed no more and says so. A message with nothing owed under it changes
+     * nothing.
+     */
+    fun onBrought(msgHash: String) {
+        val entry = entries["direct:$msgHash"] ?: return
+        if (entry.kind != OwedKind.DIRECT || entry.msgHash != msgHash) return
+        entries.remove(entry.id)
+        unproved.forget(entry)
+        persistRemoval(entry)
+        log.info("${entry.label}: RFed brought it, so it is owed no more (§17.15)")
+    }
 
     // ---- One upload ----
 
@@ -1100,6 +1181,8 @@ class DistroOutbox(
             log.info("The ${entry.op} of #${entry.name} (at ${entry.atMs}) propagated to the distro as a $how: the propagation node proved it (§17.12)")
         } else if (entry.kind == OwedKind.GROUP) {
             log.info("The ${entry.op} group sync of ${entry.name?.take(8)} (at ${entry.atMs}) propagated to the distro as a $how: the propagation node proved it (§17.14)")
+        } else if (entry.kind == OwedKind.DIRECT) {
+            log.info("${entry.label} propagated to the distro as a $how: the propagation node proved it (§17.15)")
         } else {
             log.info("Sent-copy for ${entry.toHex?.take(8)} propagated to the distro as a $how: the propagation node proved it (§17.11)")
         }

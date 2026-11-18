@@ -55,15 +55,27 @@ class NativeRefusalTest {
     @Test
     fun theDistroPathEndsARefusalBeforeAnythingIsReadMarkedOrStoredWithNoSecondLine() {
         val client = src("service/RfedDistroClient.kt")
-        val blob = client.substringAfter("suspend fun handleBlob(context: Context, blob: ByteArray): Boolean {").substringBefore("\n    /**")
-        val outcome = blob.indexOf("DistroUnwrapOutcome.of(RetichatBridge.distroUnwrap(distro, blob)) { RetichatBridge.lastError() }")
-        val refused = blob.indexOf("DistroUnwrapOutcome.Refused -> return false\n")
+        // The unwrap is one function (since RFed SPEC §17.15 a message received direct is opened by it too).
+        val unwrap = client.substringAfter("private fun unwrap(distro: Long, blob: ByteArray): String? =").substringBefore("\n    /**")
+        val outcome = unwrap.indexOf("DistroUnwrapOutcome.of(RetichatBridge.distroUnwrap(distro, blob)) { RetichatBridge.lastError() }")
+        val refused = unwrap.indexOf("DistroUnwrapOutcome.Refused -> null\n")
         assertTrue(outcome >= 0 && refused > outcome)
-        assertTrue(refused < blob.indexOf("val o = JSONObject(json)"))
-        assertTrue(refused < blob.indexOf("UserPreferences.markDistroSeen("))
         // The one Log line about a failed unwrap is the rejection's, never the refusal's.
-        assertEquals(1, Regex("blob rejected").findAll(blob).count())
-        assertTrue(blob.contains("is DistroUnwrapOutcome.Rejected -> {\n                Log.w(TAG, \"blob rejected: \${unwrapped.error}\")"))
+        assertEquals(1, Regex("blob rejected").findAll(unwrap).count())
+        assertTrue(unwrap.contains("is DistroUnwrapOutcome.Rejected -> {\n                Log.w(TAG, \"blob rejected: \${unwrapped.error}\")"))
+        // Both ways in, RFed's blob and a message received direct, end there before anything is read, marked or stored.
+        for ((head, arg) in listOf(
+            "suspend fun handleBlob(context: Context, blob: ByteArray): Boolean {" to "blob",
+            "suspend fun takeDirect(context: Context, sealed: ByteArray, stamp: ByteArray): Boolean {" to "sealed",
+        )) {
+            val way = client.substringAfter(head).substringBefore("\n    /**")
+            val ends = way.indexOf("JSONObject(unwrap(distro, $arg) ?: return false)")
+            assertTrue(head, ends >= 0)
+            for (later in listOf("markDistroSeen(", "handleUnwrapped(", "brought", "oweDirect(")) {
+                val at = way.indexOf(later)
+                assertTrue(later, at < 0 || at > ends)
+            }
+        }
     }
 
     @Test

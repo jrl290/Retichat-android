@@ -331,6 +331,11 @@ data class ChannelMembershipEntity(
  * distro's signature over those bytes, written in the same write as the rest.
  * Both or neither, and null for every row owed before version 15: such a row
  * is built the legacy way and wakes the distro's devices once.
+ *
+ * [stamp] (database 19) is the sender's stamp on a message received direct
+ * (RFed SPEC §17.15, kind `direct`), which its upload carries unchanged while
+ * the node's cost allows; such a row has an empty [packed] and always has
+ * [sealed], [syncSig] and [stamp]. Null on every other row.
  */
 @Entity(tableName = "distro_outbox")
 data class DistroOutboxEntity(
@@ -348,6 +353,7 @@ data class DistroOutboxEntity(
     val seq: Long,
     val sealed: ByteArray? = null,
     val syncSig: ByteArray? = null,
+    val stamp: ByteArray? = null,
 )
 
 /**

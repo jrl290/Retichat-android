@@ -93,7 +93,8 @@ class DistroControlNoChatTest {
     @Test
     fun theDistroUnwrapDropsAKindNoBranchTookBeforeItBecomesADm() {
         val client = File("src/main/kotlin/com/newendian/retichat/service/RfedDistroClient.kt").readText()
-        val start = client.indexOf("suspend fun handleBlob(")
+        // handleBlob opens the blob and hands it to handleUnwrapped (RFed SPEC §17.15: a message received direct too).
+        val start = client.indexOf("suspend fun handleUnwrapped(")
         val blob = client.substring(start, client.indexOf("\n    /**", start))
         val drop = blob.indexOf("DeliveryPolicy.distroControlType(LxmfFields.decode(fieldsRaw))?.let { type ->")
         assertTrue(drop >= 0)

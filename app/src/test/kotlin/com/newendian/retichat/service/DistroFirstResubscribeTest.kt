@@ -177,9 +177,12 @@ class DistroFirstResubscribeTest {
         val client = src("service/RfedDistroClient.kt")
         val body = client.substring(client.indexOf("suspend fun pullOutcome("), client.indexOf("suspend fun handleBlob("))
         val cap = body.indexOf("lastMore -> Log.w(TAG, \"pull stopped at its round cap after \$total blob(s); RFed has more\")")
-        val drained = body.indexOf("else -> Log.i(TAG, \"pull drained \$total blob(s)\")")
+        val drained = body.indexOf("else -> {\n                    Log.i(TAG, \"pull drained \$total blob(s)\")")
         assertTrue(cap >= 0 && drained > cap)
         assertEquals(1, Regex("pull drained").findAll(body).count())
+        // Only a drained pull lets what was received direct go up (RFed SPEC §17.15, after the pull).
+        assertEquals(1, Regex("DistroOutboxRuntime\\.pulled\\(\\)").findAll(body).count())
+        assertTrue(body.indexOf("DistroOutboxRuntime.pulled()") > drained)
     }
 
     @Test

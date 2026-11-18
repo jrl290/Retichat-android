@@ -197,6 +197,19 @@ class ChatRepository(
         }
     }
 
+    /**
+     * An offline device of the distro [localId] was sent to proved it, or
+     * answered that it holds it (RFed SPEC §17.15): the message is delivered,
+     * as any delivery shows it. Nothing downgrades it after
+     * ([pollMessageState] stops at DELIVERED).
+     */
+    suspend fun onDistroDirectDelivered(localId: String) {
+        val row = messageDao.findById(localId) ?: return
+        if (row.state == RetichatBridge.MessageState.DELIVERED) return
+        Log.i(TAG, "delivery: $localId reached an offline device of its distro (§17.15, was state=${row.state})")
+        messageDao.updateStateAndProgress(localId, RetichatBridge.MessageState.DELIVERED, 1f)
+    }
+
     /** Remember where [handle]'s delivery report lands (see [DeliveryTargets]). */
     private fun rememberDeliveryTarget(handle: Long, target: DeliveryTargets.Target) {
         val hash = RetichatBridge.messageGetHash(handle) ?: return
@@ -1025,6 +1038,9 @@ class ChatRepository(
                 onSent = { handle ->
                     val hash = RetichatBridge.messageGetHash(handle)?.toHex()
                     if (reaction == null && hash != null) messageDao.setLxmfHash(localId, hash)
+                    // RFed SPEC §17.15: the same sealed message goes to the distro's offline
+                    // devices over a mesh too, on its own coroutine.
+                    com.newendian.retichat.service.DistroOffline.sentToDistro(appContext, destHash, handle, localId)
                     sendDistroSentCopy(destHash, sendSrc, title = "", content = content, sentHash = hash, reaction = reaction)
                 },
                 bubble = reaction == null,

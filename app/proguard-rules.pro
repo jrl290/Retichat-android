@@ -15,6 +15,8 @@
 -keep interface com.newendian.retichat.bridge.PropagationUploadCallback { *; }
 -keep interface com.newendian.retichat.bridge.InterfaceOnlineCallback { *; }
 -keep interface com.newendian.retichat.bridge.PropagationCarrierCallback { *; }
+-keep interface com.newendian.retichat.bridge.DistroDirectCallback { *; }
+-keep interface com.newendian.retichat.bridge.DistroDirectSendCallback { *; }
 -keep class * implements com.newendian.retichat.bridge.MessageCallback { *; }
 -keep class * implements com.newendian.retichat.bridge.AnnounceCallback { *; }
 -keep class * implements com.newendian.retichat.bridge.MessageStateCallback { *; }
@@ -29,3 +31,5 @@
 -keep class * implements com.newendian.retichat.bridge.PropagationUploadCallback { *; }
 -keep class * implements com.newendian.retichat.bridge.InterfaceOnlineCallback { *; }
 -keep class * implements com.newendian.retichat.bridge.PropagationCarrierCallback { *; }
+-keep class * implements com.newendian.retichat.bridge.DistroDirectCallback { *; }
+-keep class * implements com.newendian.retichat.bridge.DistroDirectSendCallback { *; }

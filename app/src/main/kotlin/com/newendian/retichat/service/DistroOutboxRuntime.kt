@@ -334,6 +334,68 @@ object DistroOutboxRuntime {
         }
     }
 
+    /**
+     * A message this device took at its offline address (RFed SPEC §17.15):
+     * [sealed], the sender's sealed message to [distro], and the sender's
+     * [stamp], with its LXMF hash [msgHash] as the unwrap read it. It is owed
+     * to RFed as a sent-copy is (DESIGN_PRINCIPLES §3; James, 2026-11-17: "like
+     * sent copies"): signed for the Distro Sync proof once, now, with [signer],
+     * the distro handle that opened it, then kept until the node proves it and
+     * uploaded as it came, after the pull at the next coming-up unless that
+     * pull brings it. Never throws.
+     */
+    suspend fun oweDirect(
+        context: Context,
+        distro: DistroManager.DistroState,
+        signer: Long,
+        msgHash: String,
+        sealed: ByteArray,
+        stamp: ByteArray,
+    ) {
+        val label = "the message ${msgHash.take(8)} received direct (§17.15)"
+        try {
+            val sig = withContext(Dispatchers.IO) { RetichatBridge.distroDirectSign(signer, sealed) }
+            if (sig == null) {
+                Log.e(TAG, "$label was not owed to the distro: no Distro Sync proof could be made (${RetichatBridge.lastError()})")
+                _lastError.value = "A message received directly was not copied to your other devices: ${RetichatBridge.lastError()}"
+                return
+            }
+            val entry = OwedEntry(
+                id = "direct:$msgHash", kind = OwedKind.DIRECT,
+                distro = distro.deliveryHashHex, distroKey = distro.publicKeyHex,
+                msgHash = msgHash, packed = ByteArray(0), label = label,
+                sealed = sealed, syncSig = sig, stamp = stamp,
+            )
+            val outbox = outbox(context)
+            withContext(serial) { outbox.owe(entry) }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "$label was not owed to the distro: ${e.message}")
+            _lastError.value = "A message received directly was not copied to your other devices: ${e.message}"
+        }
+    }
+
+    /**
+     * RFed brought the message [msgHash], in a pull or a live delivery: a
+     * message received direct with that hash is owed no more (§17.15). Told on
+     * the outbox's thread in the order the messages came, so a pull's messages
+     * are all told before [pulled] runs.
+     */
+    fun brought(msgHash: String) {
+        val outbox = box ?: return
+        scope.launch { outbox.onBrought(msgHash) }
+    }
+
+    /**
+     * A pull of the distro finished with every round answered: the messages
+     * received direct that it did not bring go now (§17.15, [DistroOutbox.onPulled]).
+     */
+    fun pulled() {
+        val outbox = box ?: return
+        scope.launch { outbox.onPulled() }
+    }
+
     /** A message packed once ([bytes], its hash [hash] in hex) and, unless that failed, sealed for the sync proof. */
     private class Packed(val bytes: ByteArray, val hash: String, val sealed: RetichatBridge.DistroSealed?)
 
@@ -433,7 +495,15 @@ object DistroOutboxRuntime {
         override suspend fun build(entry: OwedEntry): ByteArray = withContext(Dispatchers.IO) {
             val node = node() ?: throw IllegalStateException("no propagation node is configured")
             val key = DistroCodec.hexToBytes(entry.distroKey) ?: throw IllegalStateException("the distro's key is not hex")
-            val built = when (val how = SyncProofGate.buildFor(entry, node.toHex(), PropagationSync.rfedDerivedPropagationHash(context))) {
+            val how = SyncProofGate.buildFor(entry, node.toHex(), PropagationSync.rfedDerivedPropagationHash(context))
+            val built = if (entry.kind == OwedKind.DIRECT) {
+                // A message received direct (§17.15) goes as it came: the sender's sealed message and
+                // stamp, which a new one replaces only when the node's cost has risen above it.
+                val sealed = entry.sealed ?: throw IllegalStateException("a message received direct is kept with its sealed bytes")
+                val stamp = entry.stamp ?: throw IllegalStateException("a message received direct is kept with the sender's stamp")
+                val sig = entry.syncSig ?: throw IllegalStateException("a message received direct is kept with its sync signature")
+                RetichatBridge.propagationBuildDirectUpload(key, sealed, stamp, sig, how is SyncProofGate.Build.Sealed && how.withClaim, node)
+            } else when (how) {
                 SyncProofGate.Build.Legacy -> RetichatBridge.propagationBuildUpload(key, entry.packed, node)
                 is SyncProofGate.Build.Sealed ->
                     RetichatBridge.propagationBuildSealedUpload(key, entry.sealed!!, entry.syncSig!!, how.withClaim, node)

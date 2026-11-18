@@ -1747,4 +1747,122 @@ class DistroOutboxTest {
         unproved.forget(message)
         assertEquals(0, unproved.neverLeftSize)
     }
+
+    // ---- A message received direct (RFed SPEC §17.15) ----
+
+    private fun direct(hash: String, distro: HeldDistro = d1) = OwedEntry(
+        id = "direct:$hash", kind = OwedKind.DIRECT, distro = distro.delivery, distroKey = distro.publicKey,
+        msgHash = hash, packed = ByteArray(0), label = "the message ${hash.take(8)} received direct (§17.15)",
+        sealed = "sealed-$hash".toByteArray(), syncSig = ByteArray(64) { 7 }, stamp = ByteArray(32) { 5 },
+    )
+
+    @Test
+    fun aMessageReceivedDirectWhileTheLinkIsUpGoesAtOnce() = run { rig ->
+        rig.link("L1")
+        val m = direct("m1")
+        rig.outbox.owe(m)
+        yield()
+        assertEquals(1, rig.port.uploadsOf(m.id).size)
+        rig.port.sent[0].proved()
+        yield()
+        assertTrue(rig.outbox.owed().isEmpty())
+        assertTrue(rig.store.rows.isEmpty())
+        assertTrue(rig.lines.info.any { it.contains("received direct") && it.contains("propagated to the distro") })
+    }
+
+    @Test
+    fun atAComingUpItWaitsForThePullAndGoesAfterIt() = run { rig ->
+        val m = direct("m1")
+        val s = sentCopy("s1")
+        rig.outbox.owe(m)
+        rig.outbox.owe(s)
+        rig.link("L1")
+        rig.outbox.onLinkEstablished("L1")
+        yield()
+        // The sent-copy goes at the coming-up; the message received direct waits for the pull.
+        assertEquals(1, rig.port.uploadsOf(s.id).size)
+        assertEquals(0, rig.port.uploadsOf(m.id).size)
+        rig.outbox.onPulled()
+        yield()
+        assertEquals(1, rig.port.uploadsOf(m.id).size)
+    }
+
+    @Test
+    fun whatRfedBringsIsOwedNoMoreAndThePullSendsNothingForIt() = run { rig ->
+        val m = direct("m1")
+        val other = direct("m2")
+        rig.outbox.owe(m)
+        rig.outbox.owe(other)
+        rig.link("L1")
+        rig.outbox.onLinkEstablished("L1")
+        // The pull brings m1 (or a live delivery did): only m2 is still owed.
+        rig.outbox.onBrought("m1")
+        yield()
+        assertEquals(listOf(other), rig.outbox.owed())
+        assertFalse(rig.store.rows.containsKey(m.id))
+        rig.outbox.onPulled()
+        yield()
+        assertEquals(0, rig.port.uploadsOf(m.id).size)
+        assertEquals(1, rig.port.uploadsOf(other.id).size)
+        // A hash nothing is owed under, or one owed as another kind, changes nothing.
+        rig.outbox.owe(sentCopy("s1"))
+        rig.outbox.onBrought("s1")
+        rig.outbox.onBrought("unknown")
+        assertTrue(rig.outbox.owed().any { it.id == "sent:s1" })
+    }
+
+    @Test
+    fun anUploadNotProvedWaitsForTheNextComingUpAndItsPullNeverItsOwnFailure() = run { rig ->
+        val m = direct("m1")
+        rig.outbox.owe(m)
+        rig.link("L1")
+        rig.outbox.onLinkEstablished("L1")
+        rig.outbox.onPulled()
+        yield()
+        rig.port.uploadsOf(m.id).single().lost()
+        yield()
+        // Another pull at the same coming-up (a wake's) does not send it again.
+        rig.outbox.onPulled()
+        yield()
+        assertEquals(1, rig.port.uploadsOf(m.id).size)
+        // The next coming-up's pass leaves it for its pull, which sends it.
+        rig.link("L2")
+        rig.outbox.onLinkEstablished("L2")
+        yield()
+        assertEquals(1, rig.port.uploadsOf(m.id).size)
+        rig.outbox.onPulled()
+        yield()
+        assertEquals(2, rig.port.uploadsOf(m.id).size)
+        assertEquals("L2", rig.port.uploadsOf(m.id).last().linkId)
+    }
+
+    @Test
+    fun withItsDistroGivenUpNoPullBringsItSoItGoesInThePass() = run { rig ->
+        val m = direct("m1", distro = d1)
+        rig.outbox.owe(m)
+        // The device now holds another distro: no pull of d1 comes, and the message is still owed to d1.
+        rig.distro = d2
+        rig.outbox.onDistroChanged()
+        assertEquals(listOf(m), rig.outbox.owed())
+        rig.link("L1")
+        rig.outbox.onLinkEstablished("L1")
+        yield()
+        assertEquals(1, rig.port.uploadsOf(m.id).size)
+        assertEquals(d1.publicKey.take(4), rig.port.uploadsOf(m.id).single().key)
+    }
+
+    @Test
+    fun aPullWithTheLinkDownSendsNothingAndTheNextOneDoes() = run { rig ->
+        val m = direct("m1")
+        rig.outbox.owe(m)
+        rig.outbox.onPulled()
+        rig.link("L1", active = false)
+        rig.outbox.onPulled()
+        yield()
+        assertTrue(rig.port.sent.isEmpty())
+        rig.link("L1")
+        rig.outbox.onPulled()
+        yield()
+        assertEquals(1, rig.port.uploadsOf(m.id).size)
+    }
 }

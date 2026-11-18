@@ -64,7 +64,9 @@ class DistroOutboxContractTest {
         // ruling's send (inside uploadOwed's loss handler), and a never-left upload whose UpEdgeMark says an
         // interface came up since it was handed over (keepNeverLeft: that up-edge was its own). Anything else
         // calling either would send an upload again on its own failure.
-        assertEquals(listOf("sendDistroOutbox", "onInterfaceOnline", "uploadOwedAtOnce"), callersOf("uploadOwed"))
+        // Since 2026-11-17 a sixth, onPulled (RFed SPEC §17.15): a message received direct goes after the pull,
+        // and reads the failure record with the coming-up current then, as the pass does.
+        assertEquals(listOf("sendDistroOutbox", "onInterfaceOnline", "onPulled", "uploadOwedAtOnce"), callersOf("uploadOwed"))
         assertEquals(listOf("owe", "uploadOwed", "keepNeverLeft"), callersOf("uploadOwedAtOnce"))
         // The upload it makes has one caller too.
         assertEquals(listOf("uploadOwed"), callersOf("uploadFor"))
@@ -89,6 +91,27 @@ class DistroOutboxContractTest {
         for (name in listOf("sendDistroOutbox", "propComingUps", "unprovedSince", "unproved.record(", "unproved.since(", "comingUp")) {
             assertFalse(name, edge.contains(name))
         }
+    }
+
+    @Test
+    fun aMessageReceivedDirectGoesAfterThePullAndNeverOnItsOwnFailure() {
+        // RFed SPEC §17.15: an event the runtime tells after a drained pull; nothing in the outbox calls it.
+        assertEquals(emptyList<String>(), callersOf("onPulled"))
+        assertEquals(emptyList<String>(), callersOf("onBrought"))
+        val start = code.indexOf("suspend fun onPulled(")
+        val pulled = code.substring(start, code.indexOf("fun onBrought(", start))
+        // No coming-up of its own: it takes the one current now and reads the failure record with it.
+        assertFalse(pulled.contains("++propComingUps"))
+        assertTrue(pulled.contains("val comingUp = propComingUps"))
+        assertEquals(1, Regex("uploadOwed\\(").findAll(pulled).count())
+        assertTrue(pulled.contains("uploadOwed(held.id, entry, comingUp)"))
+        for (guard in listOf("if (stopped) return", "held.active", "it.kind == OwedKind.DIRECT", "!stillOwed(entry)",
+            "distroAttemptOpen(entry, held.id)", "unprovedSince(entry, comingUp)", "linkUp(held.id)")) {
+            assertTrue(guard, pulled.contains(guard))
+        }
+        // The pass leaves it for the pull while its distro is held.
+        val pass = code.substring(code.indexOf("private suspend fun sendDistroOutbox("), code.indexOf("suspend fun onInterfaceOnline("))
+        assertTrue(pass.contains("if (entry.kind == OwedKind.DIRECT && holdsDistro(entry.distro)) continue"))
     }
 
     @Test

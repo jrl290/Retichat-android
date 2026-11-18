@@ -255,7 +255,12 @@ object RfedDistroClient {
             when {
                 unfinished != null -> Log.w(TAG, "pull stopped after $total blob(s): $unfinished")
                 lastMore -> Log.w(TAG, "pull stopped at its round cap after $total blob(s); RFed has more")
-                else -> Log.i(TAG, "pull drained $total blob(s)")
+                else -> {
+                    Log.i(TAG, "pull drained $total blob(s)")
+                    // Drained: what this device took at its offline address and RFed did
+                    // not bring goes now (RFed SPEC §17.15, after the pull).
+                    DistroOutboxRuntime.pulled()
+                }
             }
             PullOutcome(total, unfinished, morePending = unfinished == null && lastMore)
         }
@@ -273,21 +278,56 @@ object RfedDistroClient {
     suspend fun handleBlob(context: Context, blob: ByteArray): Boolean {
         val distro = DistroManager.identityHandle
         if (distro == 0L) return false
-        val json = when (val unwrapped = DistroUnwrapOutcome.of(RetichatBridge.distroUnwrap(distro, blob)) { RetichatBridge.lastError() }) {
+        val o = JSONObject(unwrap(distro, blob) ?: return false)
+        // RFed brought it: a copy of it this device took at its offline address
+        // is owed to RFed no more (RFed SPEC §17.15).
+        o.optString("hash", "").takeIf { it.length == 64 }?.let(DistroOutboxRuntime::brought)
+        return handleUnwrapped(context, blob, o)
+    }
+
+    /**
+     * A copy that came to this device's offline address (RFed SPEC §17.15), its
+     * stamp already checked against the RFed node's cost: opened and kept as a
+     * blob from RFed is ([handleBlob]), then owed to RFed as it came, so the
+     * distro's other devices get it, unless this device already held it. True
+     * when the device holds it afterwards, newly or already: the packet's
+     * proof, or the request's `held`.
+     */
+    suspend fun takeDirect(context: Context, sealed: ByteArray, stamp: ByteArray): Boolean {
+        val (state, distro) = DistroManager.signing() ?: return false
+        val o = JSONObject(unwrap(distro, sealed) ?: return false)
+        val msgHash = o.optString("hash", "")
+        val heldBefore = o.has("source_hash") && o.has("timestamp") &&
+            UserPreferences.hasDistroSeen(context, DistroCodec.seenKey(o.getString("source_hash"), o.getDouble("timestamp")))
+        val held = handleUnwrapped(context, sealed, o)
+        when {
+            !held -> Log.i(TAG, "a message received direct was not kept (§17.15)")
+            heldBefore -> Log.i(TAG, "a message received direct was held already (§17.15): nothing more is owed for it")
+            msgHash.length != 64 -> Log.w(TAG, "a message received direct has no LXMF hash: kept, and not copied to the distro's other devices (§17.15)")
+            else -> DistroOutboxRuntime.oweDirect(context, state, distro, msgHash, sealed, stamp)
+        }
+        return held
+    }
+
+    /** [blob] opened with the distro key [distro]: the unwrap's JSON, or null (said) when it is refused, rejected or another distro's. */
+    private fun unwrap(distro: Long, blob: ByteArray): String? =
+        when (val unwrapped = DistroUnwrapOutcome.of(RetichatBridge.distroUnwrap(distro, blob)) { RetichatBridge.lastError() }) {
             // RFed SPEC §17.14 "Repeated keys": refused whole, as Python LXMF refuses it.
             // LXMF-rust logged its one line; nothing is stored, marked as seen or applied.
-            DistroUnwrapOutcome.Refused -> return false
+            DistroUnwrapOutcome.Refused -> null
             is DistroUnwrapOutcome.Rejected -> {
                 Log.w(TAG, "blob rejected: ${unwrapped.error}")
-                return false
+                null
             }
             DistroUnwrapOutcome.OtherDistro -> {
                 Log.i(TAG, "blob for a different distro — ignored")
-                return false
+                null
             }
             is DistroUnwrapOutcome.Message -> unwrapped.json
         }
-        val o = JSONObject(json)
+
+    /** [handleBlob] once [blob] is opened as [o]. */
+    private suspend fun handleUnwrapped(context: Context, blob: ByteArray, o: JSONObject): Boolean {
         val srcHex = o.getString("source_hash")
         val timestamp = o.getDouble("timestamp")
         val content = o.optString("content", "")

@@ -65,7 +65,9 @@ class DistroSyncMigrationTest {
         val impl = File("build/generated/ksp/debug/java/com/newendian/retichat/data/db/RetichatDatabase_Impl.java")
         Assume.assumeTrue(impl.exists())
         val room = Regex("CREATE TABLE IF NOT EXISTS `distro_outbox` \\([^\"]*").find(impl.readText())?.value
-        assertEquals(version15Outbox, room?.replace("IF NOT EXISTS ", ""))
+        // Database 19 (DirectUploadMigration) added `stamp` to distro_outbox: DirectUploadMigrationTest pins the
+        // table as Room generates it now. Without that column it is still the version-15 table here.
+        assertEquals(version15Outbox, room?.replace("IF NOT EXISTS ", "")?.replace(", `stamp` BLOB", ""))
     }
 
     @Test
@@ -124,6 +126,7 @@ class DistroSyncMigrationTest {
         assertEquals(GroupStatusesMigration.TO, DistroSyncMigration.FROM)
         // Both columns nullable, last, in the entity.
         val entities = File("src/main/kotlin/com/newendian/retichat/data/db/entity/Entities.kt").readText()
-        assertTrue(entities.contains("    val seq: Long,\n    val sealed: ByteArray? = null,\n    val syncSig: ByteArray? = null,\n)"))
+        // Database 19 (DirectUploadMigration) added `stamp` after them.
+        assertTrue(entities.contains("    val seq: Long,\n    val sealed: ByteArray? = null,\n    val syncSig: ByteArray? = null,\n"))
     }
 }

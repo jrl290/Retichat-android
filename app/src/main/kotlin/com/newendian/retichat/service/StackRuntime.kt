@@ -390,6 +390,10 @@ object StackRuntime {
         // the router's, opened by the sync and the send paths: this never starts it.
         runCatching { DistroOutboxRuntime.start(app) }
             .onFailure { Log.e(TAG, "DistroOutboxRuntime.start failed", it) }
+        // Offline use of the distro address (RFed SPEC §17.15): listen to the link to RFed and to
+        // what comes to the offline address. It holds and announces nothing until the device is offline.
+        runCatching { DistroOffline.start(app) }
+            .onFailure { Log.e(TAG, "DistroOffline.start failed", it) }
 
         // The live route RFed pushes this device's messages on, proved per
         // push; without it RFed can reach a running app only by FCM push.
@@ -442,7 +446,11 @@ object StackRuntime {
         // up- and down-edge (L83, 2026-10-18). It was the enabled rows counted
         // here once, so it said 0 with RTNode Bluetooth up and kept a dropped
         // backbone.
-        if (!RetichatBridge.onlineInterfaceCountRegister { count, peers -> app.updateInterfaceCount(count, peers) }) {
+        if (!RetichatBridge.onlineInterfaceCountRegister { count, peers ->
+                app.updateInterfaceCount(count, peers)
+                // The same edge decides whether the device is offline (RFed SPEC §17.15).
+                DistroOffline.onInterfaceEdge()
+            }) {
             Log.e(TAG, "onlineInterfaceCountRegister failed: ${RetichatBridge.lastError()}")
         }
 
@@ -498,6 +506,7 @@ object StackRuntime {
         RfedDistroClient.onStackStopped()
         // No proof can come for an upload still open: each is decided not proved, and nothing is sent.
         DistroOutboxRuntime.stop()
+        DistroOffline.stop()
 
         ConnectionStateManager.unregister()
         runCatching { RetichatBridge.onlineInterfaceCountUnregister() }

@@ -202,7 +202,7 @@ class DistroAttachmentsTest {
 
     @Test
     fun handleBlobReadsTheFieldsAndHandsThemOn() {
-        val handle = body(client, "suspend fun handleBlob(")
+        val handle = body(client, "suspend fun handleUnwrapped(")
         assertTrue(handle.contains("""val fieldsValue = o.opt("fields")"""))
         assertTrue(handle.contains("val fieldsRaw = DistroCodec.fieldsBytes(fieldsValue)"))
         // optString would turn a JSON null into the string "null".
