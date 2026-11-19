@@ -184,7 +184,8 @@ object DistroOffline {
      * RNode rows, listen to the link to RFed and to what comes to the offline
      * address. What was held in an earlier start stays held (Reticulum keeps
      * it until the app restarts), and so does being offline; what the new
-     * stack's link to RFed says decides from here.
+     * stack's link to RFed says decides from here, and the mesh connections
+     * already up count as come up ([startedWithMeshUp]).
      */
     suspend fun start(app: RetichatApp) {
         this.app = app
@@ -206,6 +207,8 @@ object DistroOffline {
             RfedLink.setStatusListener(node, LISTENER) { status -> scope.launch { onRfedStatus(status) } }
         }
         started = true
+        // After the registrations: what an announce brings finds them in place.
+        scope.launch { startedWithMeshUp() }
         if (!distroWatch) {
             distroWatch = true
             scope.launch { DistroManager.state.collect { evaluate("the distro held changed") } }
@@ -243,12 +246,7 @@ object DistroOffline {
         val meshUp = (now - online).filter(::isMesh)
         online = now
         if (meshUp.isNotEmpty()) {
-            // The sender: each distro is asked for once more, at its next send.
-            asked.clear()
-            heard.clear()
-            copies.values.forEach { list -> list.forEach { it.afterAsk = false } }
-            // The device: offline, it announces on a mesh connection that comes up.
-            held?.takeIf { offline }?.let { announce(it, meshUp, "the mesh connection ${meshUp.joinToString()} came up") }
+            meshCameUp(meshUp, "the mesh connection ${meshUp.joinToString()} came up")
             // A device that holds no link to RFed (a slow route) tries RFed when a mesh connection
             // comes up, and decides from that attempt (§17.15).
             val node = UserPreferences.getEffectiveRfedNodeIdentityHash(app)
@@ -257,6 +255,37 @@ object DistroOffline {
             }
         }
         evaluate("the interfaces changed")
+    }
+
+    /**
+     * Mesh connections came up (§17.15): the sender asks for each distro once
+     * more, at its next send, and an offline device announces its offline
+     * address on them. For one that comes up while the stack runs
+     * ([interfacesChanged]) and for those already up when it starts
+     * ([startedWithMeshUp]).
+     */
+    private fun meshCameUp(meshUp: List<String>, why: String) {
+        // The sender: each distro is asked for once more, at its next send.
+        asked.clear()
+        heard.clear()
+        copies.values.forEach { list -> list.forEach { it.afterAsk = false } }
+        // The device: offline, it announces on a mesh connection that comes up.
+        held?.takeIf { offline }?.let { announce(it, meshUp, why) }
+    }
+
+    /**
+     * A new stack's mesh connections are new ones, whether they came up before
+     * [start] or after it: those already up count as come up here, as a later
+     * one does in [interfacesChanged]. Settings' Apply restarts the stack inside
+     * the process (StackRuntime.restart), and its connections come up before
+     * [start] runs, so until 2026-11-18 the old stack's asked and heard carried
+     * over and the next send to a distro did not ask (the M5 device test). Not
+     * [interfacesChanged]'s attempt at RFed: the stack's own start tries RFed.
+     */
+    private fun startedWithMeshUp() {
+        if (!started) return
+        val meshUp = online.filter(::isMesh)
+        if (meshUp.isNotEmpty()) meshCameUp(meshUp, "the stack started with ${meshUp.joinToString()} up")
     }
 
     private fun onRfedStatus(status: Int) {

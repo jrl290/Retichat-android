@@ -196,4 +196,48 @@ class DistroOfflineTest {
         assertTrue(offline.contains("if (started && sendsTo(app, d)) makeCopy(app, d, handle, localId)"))
         assertFalse(offline.contains("messageDestroy"))
     }
+
+    /** Whether [needles] appear in [text] in this order. */
+    private fun inOrder(text: String, vararg needles: String): Boolean {
+        var from = 0
+        for (needle in needles) {
+            val at = text.indexOf(needle, from)
+            if (at < 0) return false
+            from = at + needle.length
+        }
+        return true
+    }
+
+    /**
+     * 2026-11-18 (James: "Yes, build it"): Settings' Apply restarts the stack
+     * inside the process, and the new stack's connections come up before start
+     * runs. Those already up count as come up there, so the next send to a
+     * distro asks once more and an offline device announces on them; until
+     * then the old stack's asked and heard carried over (the M5 test: the next
+     * send after the restart did not ask).
+     */
+    @Test
+    fun aStackStartCountsTheMeshConnectionsAlreadyUpAsComeUp() {
+        assertEquals("asked is cleared in one place", 1, Regex("asked\\.clear\\(\\)").findAll(offline).count())
+        assertEquals("heard is cleared in one place", 1, Regex("heard\\.clear\\(\\)").findAll(offline).count())
+        val cameUp = offline.substring(offline.indexOf("private fun meshCameUp("), offline.indexOf("private fun startedWithMeshUp("))
+        assertTrue(
+            "the sender asks once more, and an offline device announces on the connections",
+            inOrder(cameUp, "asked.clear()", "heard.clear()", "it.afterAsk = false", "held?.takeIf { offline }?.let { announce(it, meshUp, why) }"),
+        )
+        val changed = offline.substring(offline.indexOf("private fun interfacesChanged("), offline.indexOf("private fun meshCameUp("))
+        assertTrue("a connection that comes up while the stack runs", changed.contains("meshCameUp(meshUp, \"the mesh connection"))
+        val atStart = offline.substring(offline.indexOf("private fun startedWithMeshUp("), offline.indexOf("private fun onRfedStatus("))
+        assertTrue(
+            "the connections up when the stack starts, measured against the start's own baseline",
+            inOrder(atStart, "if (!started) return", "val meshUp = online.filter(::isMesh)", "if (meshUp.isNotEmpty()) meshCameUp(meshUp, \"the stack started with"),
+        )
+        assertFalse("not the attempt at RFed: the stack's start makes its own", atStart.contains("RfedCollect"))
+        val start = offline.substring(offline.indexOf("suspend fun start(app: RetichatApp)"), offline.indexOf("fun stop()"))
+        assertTrue(
+            "at each start, on the serial thread after the baseline, once the registrations are in place",
+            inOrder(start, "online = RetichatBridge.onlineInterfaces().toSet()", "RetichatBridge.distroDirectRegister(callback)",
+                "started = true", "scope.launch { startedWithMeshUp() }"),
+        )
+    }
 }
